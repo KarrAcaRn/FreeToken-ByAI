@@ -94,6 +94,11 @@ class EngineConfig:
     # Runtime knobs of the multimodal path; the architecture side (vision_config, mrope) lives in ModelConfig.
     mm: MultimodalConfig = field(default_factory=MultimodalConfig)
 
+    # DFlash speculative decoding
+    speculative_algorithm: str | None = None  # "dflash" or None
+    speculative_draft_model_path: str | None = None
+    speculative_dflash_block_size: int = 2
+
     def __post_init__(self):
         if self.moe_backend is None:
             return
