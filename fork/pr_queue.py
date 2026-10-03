@@ -3,6 +3,7 @@
 import argparse
 import json
 import pathlib
+import subprocess
 import urllib.request
 
 UPSTREAM = "FlashML-org/FreeToken"
@@ -51,14 +52,44 @@ def render(log):
     TABLE.write_text("\n".join(rows) + "\n")
 
 
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
+
+
+def overlap(num, log):
+    """What may already cover PR ``num``: main's commits since its base and other PRs on its files."""
+    ref = f"refs/pr-heads/{num}"
+    # refs/pr-heads/ stays out of the branch list
+    if subprocess.run(["git", "fetch", "-q", "upstream", f"+refs/pull/{num}/head:{ref}"]).returncode:
+        raise SystemExit(f"#{num} has no upstream PR head (an issue number?)")
+    open_nums = [pr["number"] for pr in open_prs() if pr["number"] != num]
+    git("fetch", "-q", "upstream", *[f"+refs/pull/{n}/head:refs/pr-heads/{n}" for n in open_nums])
+    base = git("merge-base", "main", ref).strip()
+    files = set(git("diff", "--name-only", f"{base}..{ref}").split())
+    print(f"# PR #{num}: {len(files)} files, base {base[:12]}")
+    # main moved on after the PR branched: a fix or refactor there may make it obsolete
+    print("## main since the PR's base, on its files")
+    print(git("log", "--oneline", f"{base}..main", "--", *files) or "(none)\n", end="")
+    print("## other open PRs touching the same files")
+    for n in open_nums:
+        shared = files & set(git("diff", "--name-only", f"main...refs/pr-heads/{n}").split())
+        if shared:
+            decision = log.get(str(n), {}).get("decision", "undecided")
+            print(f"#{n} [{decision}]: {', '.join(sorted(shared))}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=5)
     ap.add_argument("--render", action="store_true", help="rewrite pr-decisions.md and exit")
+    ap.add_argument("--overlap", type=int, metavar="N", help="show what may make PR N duplicate or obsolete")
     args = ap.parse_args()
     log = load_log()
     if args.render:
         render(log)
+        return
+    if args.overlap is not None:
+        overlap(args.overlap, log)
         return
     todo = sorted(pending(open_prs(), log), key=lambda p: (p["draft"], -p["number"]))
     for pr in todo[: args.limit]:
