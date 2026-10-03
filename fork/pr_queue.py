@@ -42,13 +42,15 @@ def pending(prs, log):
 def render(log):
     rows = ["# Upstream PR decisions", "",
             "Generated from `pr-decisions.json` by `python3 fork/pr_queue.py --render`.", "",
-            "| PR | Title | Decision | Reason |", "|---|---|---|---|"]
+            "| PR | Title | Authors | Decision | Reason |", "|---|---|---|---|---|"]
     for num in sorted(log, key=int, reverse=True):
         e = log[num]
         reason = e["reason"].replace("|", "\\|").replace("\n", " ")
         gpu = " (GPU untested)" if e.get("gpu_untested") else ""
         link = f"[#{num}](https://github.com/{UPSTREAM}/pull/{num})"
-        rows.append(f"| {link} | {e['title']} | {e['decision']}{gpu} | {reason} |")
+        # names only: the emails stay in the JSON for Co-authored-by trailers
+        authors = ", ".join(a.split(" <")[0] for a in e.get("authors", []))
+        rows.append(f"| {link} | {e['title']} | {authors} | {e['decision']}{gpu} | {reason} |")
     TABLE.write_text("\n".join(rows) + "\n")
 
 
