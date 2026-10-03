@@ -86,8 +86,11 @@ _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 _ELEM_DTYPES = {"e4m3": torch.float8_e4m3fn}
 
 
-def _rename(raw_name: str) -> str | None:
-    """Checkpoint key -> FreeToken state-dict key, or None to skip."""
+def _rename(raw_name: str, quant) -> str | None:
+    """Checkpoint key -> FreeToken state-dict key, or None to skip.
+
+    ``quant`` is the checkpoint's QuantConfig when the file can carry quantized tensors;
+    ``None`` skips every scale, correct where weights are never quantized (the vision tower)."""
     if raw_name.startswith("mtp."):
         return None
     if _PLE_TABLE_INFIX in raw_name:
@@ -95,8 +98,24 @@ def _rename(raw_name: str) -> str | None:
     if _EXPERT_RE.search(raw_name):
         return None  # routed experts: offload source banks
     if raw_name.endswith(_SCALE_SUFFIXES):
-        return None
+        return _dialect_scale_rename(raw_name, quant) if quant is not None else None
     return rename_vl_prefix(raw_name)
+
+
+def _dialect_scale_rename(raw_name: str, quant) -> str | None:
+    """A scale the dialect stores under a name the state dict does not use, renamed per its storage table; None to skip.
+
+    ModelOpt exports MXFP8 block scales as ``.weight_scale`` while the module loads them as ``weight_scale_inv``."""
+    if not raw_name.endswith(".weight_scale"):
+        return None
+    module = rename_vl_prefix(raw_name[: -len(".weight_scale")])
+    scheme = quant.scheme_for(module)
+    if scheme is None:
+        return None
+    for role, stored in quant.storage(scheme).items():
+        if stored.name == "weight_scale" and role.endswith("_scale_inv"):
+            return module + "." + role
+    return None
 
 
 def _split_kind(name: str) -> tuple[str, str]:
@@ -201,7 +220,7 @@ def iter_weights(
     """Yield the dense (non-expert) weights, prefix-stripped and fused to the model's buffers.
 
     Keys keep the checkpoint's module names below the stripped prefix, so the emitted set is the model's state dict minus the routed experts.
-    A dense projection is bf16 or 128x128 block-fp8 (``.weight`` e4m3 + ``.weight_scale_inv``) as the checkpoint's QuantConfig says: the official releases skip everything but the routed experts, the community NVFP4-FP8 requants quantize the attention / GDN projections.
+    A dense projection is bf16, 128x128 block-fp8 (``.weight`` e4m3 + ``.weight_scale_inv``) or MXFP8 (e4m3 + e8m0 per 32, stored ``.weight_scale``) as the checkpoint's QuantConfig says: the official releases skip everything but the routed experts, the community requants quantize the attention / GDN projections.
     Fusions, per kind: attention q|k|v -> ``qkv_proj``; GDN ``in_proj_{qkv,z,b,a}`` -> ``in_proj``, or ``in_proj_qkvz`` + bf16 ``in_proj_ba`` when qkv|z is quantized; shared-expert gate|up -> ``gate_up_proj``; each per-layer HC's ``input_mix_weight_down`` | ``block_inject_weight`` -> a zero-padded ``input_mix_weight_down_block_inject``.
     ``include_moe_experts`` is accepted for the loader contract but never yields anything: the routed experts are NVFP4 and always come from the offload cache's expert reader.
     """
@@ -220,7 +239,7 @@ def iter_weights(
     ):
         with safetensors.safe_open(file, framework="pt", device=str(device)) as f:
             for raw_name in f.keys():
-                name = _rename(raw_name)
+                name = _rename(raw_name, fuser.quant)
                 if name is None:
                     continue
                 if not include_vision and name.startswith(VISION_KEY_PREFIXES):
@@ -241,7 +260,7 @@ def iter_vision_weights(model_path: str, device: torch.device) -> Iterator[tuple
     for file in iter_weight_files(model_path):
         with safetensors.safe_open(file, framework="pt", device=str(device)) as f:
             for raw_name in f.keys():
-                name = _rename(raw_name)
+                name = _rename(raw_name, None)
                 if name is not None and name.startswith(VISION_KEY_PREFIXES):
                     yield name, f.get_tensor(raw_name)
 
@@ -253,18 +272,28 @@ def iter_vision_weights(model_path: str, device: torch.device) -> Iterator[tuple
 
 @dataclass(frozen=True)
 class PleTable:
-    """The filled n-gram table: one pinned host bank plus the checkpoint's per-tensor FP8 scale."""
+    """The filled n-gram table: one pinned host bank plus the checkpoint's per-tensor scale.
+
+    FP8 checkpoints fill the bank with e4m3 rows; NVFP4 checkpoints fill it with packed
+    uint8 rows (two e2m1 codes per byte) plus ``scale_bank``, the per-16-element fp8 block
+    scales, and keep the global scalar in ``weight_scale`` (``weight_scale_2`` upstream)."""
 
     bank: HostBank
     weight_scale: torch.Tensor  # scalar, checkpoint dtype (bf16)
+    scale_bank: HostBank | None = None  # ``[total_rows, ngram_head_dim // 16]`` fp8, NVFP4 only
 
     @property
     def tensor(self) -> torch.Tensor:
-        """``[total_rows, ngram_head_dim]`` float8_e4m3fn view of the bank."""
+        """Bank view: ``[total_rows, ngram_head_dim]`` fp8, or uint8 packed rows when NVFP4."""
         return self.bank.tensor
 
 
 _PLE_ST_DTYPE = "F8_E4M3"
+_PLE_PACKED_DTYPE = "U8"
+_PLE_SCALE2_SUFFIX = ".ple.ple_embedding.ngram_embedding.weight_scale_2"
+_PLE_SHARD_SCALE_RE = re.compile(
+    r"\.ple\.ple_embedding\.ngram_embedding\.shard_(?P<shard>\d+)\.weight_scale$"
+)
 
 
 def _safetensors_header(path: str) -> tuple[dict, int]:
@@ -282,6 +311,17 @@ def _ple_table_files(folder: str) -> list[str]:
         weight_map = json.load(fh)["weight_map"]
     files = {shard for name, shard in weight_map.items() if _PLE_TABLE_INFIX in name}
     return sorted(os.path.join(folder, shard) for shard in files)
+
+
+def ple_table_is_packed(model_path: str) -> bool:
+    """True when the n-gram table shards are NVFP4-packed: reads headers, no payloads."""
+    folder = download_hf_weight(model_path)
+    for path in _ple_table_files(folder):
+        header, _ = _safetensors_header(path)
+        for key, meta in header.items():
+            if _PLE_SHARD_RE.search(key) is not None:
+                return meta["dtype"] == _PLE_PACKED_DTYPE
+    return False
 
 
 def ftw_side_files(model_path: str, out_dir: str) -> list[str]:
@@ -323,8 +363,11 @@ class PleShards:
 
     parts: list[tuple[str, int]]
     rows_per_part: int
-    cols: int
-    scale: torch.Tensor  # scalar, checkpoint dtype
+    cols: int  # stored bytes per row: head_dim fp8 codes, or head_dim / 2 when NVFP4-packed
+    scale: torch.Tensor  # scalar, checkpoint dtype; NVFP4's global weight_scale_2
+    packed: bool = False
+    # NVFP4 only: shard i's per-16-element fp8 block scales, ``rows_per_part x cols // 8`` bytes each
+    block_parts: list[tuple[str, int]] | None = None
 
     @property
     def total_rows(self) -> int:
@@ -332,7 +375,7 @@ class PleShards:
 
     @property
     def nbytes(self) -> int:
-        return self.total_rows * self.cols
+        return self.total_rows * (self.cols + (self.cols // 8 if self.packed else 0))
 
 
 def ple_table_rows(qwen4_args) -> int:
@@ -351,11 +394,18 @@ def ple_table_rows(qwen4_args) -> int:
 
 
 def scan_ple_table(folder: str, qwen4_args) -> PleShards:
-    """Validate the checkpoint's ``ngram_embedding.shard_<i>`` set against the config before either backend touches a row."""
+    """Validate the checkpoint's ``ngram_embedding.shard_<i>`` set against the config before either backend touches a row.
+
+    FP8 tables carry e4m3 rows and one ``weight_scale``; NVFP4 tables carry packed uint8 rows, a
+    ``shard_<i>.weight_scale`` block-scale tensor per shard and the global ``weight_scale_2``."""
     parts: dict[int, tuple[str, int]] = {}
+    blocks: dict[int, tuple[str, int]] = {}
     where: dict[int, str] = {}
+    blocks_at: dict[int, str] = {}
     shape: list[int] | None = None
-    scale_at: tuple[str, str] | None = None
+    block_shape: list[int] | None = None
+    dtype: str | None = None
+    scalars: dict[str, tuple[str, str]] = {}  # suffix -> (path, key)
     for path in _ple_table_files(folder):
         header, base = _safetensors_header(path)
         data_bytes = os.path.getsize(path) - base
@@ -363,30 +413,47 @@ def scan_ple_table(folder: str, qwen4_args) -> PleShards:
             if key == "__metadata__":
                 continue
             at = f"{key} in {path}"
-            if key.endswith(_PLE_SCALE_SUFFIX):
-                if scale_at is not None:
-                    raise ValueError(f"PLE weight_scale {at}: expected one scale, already read {scale_at[1]} in {scale_at[0]}")
-                scale_at = (path, key)
+            suffix = next((x for x in (_PLE_SCALE2_SUFFIX, _PLE_SCALE_SUFFIX) if key.endswith(x)), None)
+            if suffix is not None:
+                if suffix in scalars:
+                    name = suffix.rpartition(".")[2]
+                    raise ValueError(f"PLE {name} {at}: expected one scale, already read {scalars[suffix][1]} in {scalars[suffix][0]}")
+                scalars[suffix] = (path, key)
                 continue
             match = _PLE_SHARD_RE.search(key)
+            is_block = False
             if match is None:
-                continue
-            if meta["dtype"] != _PLE_ST_DTYPE:
-                raise ValueError(f"PLE shard {at}: dtype {meta['dtype']}, expected {_PLE_ST_DTYPE}")
-            if len(meta["shape"]) != 2 or (shape is not None and meta["shape"] != shape):
-                raise ValueError(f"PLE shard {at}: shape {meta['shape']}, expected {shape or '2-D'}")
-            shape = meta["shape"]
+                match = _PLE_SHARD_SCALE_RE.search(key)
+                if match is None:
+                    continue
+                is_block = True
+            if is_block:
+                if meta["dtype"] != _PLE_ST_DTYPE:
+                    raise ValueError(f"PLE block scale {at}: dtype {meta['dtype']}, expected {_PLE_ST_DTYPE}")
+                if len(meta["shape"]) != 2 or (block_shape is not None and meta["shape"] != block_shape):
+                    raise ValueError(f"PLE block scale {at}: shape {meta['shape']}, expected {block_shape or '2-D'}")
+                block_shape = meta["shape"]
+                expect, found = block_shape, blocks
+            else:
+                if meta["dtype"] not in (_PLE_ST_DTYPE, _PLE_PACKED_DTYPE) or dtype not in (None, meta["dtype"]):
+                    raise ValueError(f"PLE shard {at}: dtype {meta['dtype']}, expected {dtype or _PLE_ST_DTYPE}")
+                dtype = meta["dtype"]
+                if len(meta["shape"]) != 2 or (shape is not None and meta["shape"] != shape):
+                    raise ValueError(f"PLE shard {at}: shape {meta['shape']}, expected {shape or '2-D'}")
+                shape = meta["shape"]
+                expect, found = shape, parts
             begin, end = meta["data_offsets"]
-            if not 0 <= begin <= end <= data_bytes or end - begin != shape[0] * shape[1]:
+            if not 0 <= begin <= end <= data_bytes or end - begin != expect[0] * expect[1]:
                 raise ValueError(
-                    f"PLE shard {at}: data_offsets [{begin}, {end}), expected {shape[0] * shape[1]} bytes "
+                    f"PLE shard {at}: data_offsets [{begin}, {end}), expected {expect[0] * expect[1]} bytes "
                     f"within the file's {data_bytes} data bytes"
                 )
             idx = int(match.group("shard"))
-            if idx in parts:
-                raise ValueError(f"PLE shard {at}: duplicate index {idx}, already read {where[idx]}")
-            parts[idx] = (path, base + begin)
-            where[idx] = at
+            seen = blocks_at if is_block else where
+            if idx in found:
+                raise ValueError(f"PLE shard {at}: duplicate index {idx}, already read {seen[idx]}")
+            found[idx] = (path, base + begin)
+            seen[idx] = at
 
     n_parts = int(qwen4_args.split_ngram_parts)
     if not parts or sorted(parts) != list(range(n_parts)):
@@ -396,24 +463,39 @@ def scan_ple_table(folder: str, qwen4_args) -> PleShards:
             f"PLE table in {folder}: expected shards 0..{n_parts - 1}, found {len(parts)} "
             f"(missing {missing[:8]}, unexpected {extra[:8]})"
         )
+    packed = dtype == _PLE_PACKED_DTYPE
+    rows, cols = shape
+    if packed:
+        if sorted(blocks) != list(range(n_parts)) or block_shape != [rows, cols // 8]:
+            raise ValueError(
+                f"NVFP4 PLE table in {folder}: expected block-scale shards 0..{n_parts - 1} of {[rows, cols // 8]}, "
+                f"found {len(blocks)} of {block_shape}"
+            )
+    # NVFP4 keeps the global scalar in weight_scale_2; FP8 exports carry it as weight_scale
+    scalar_suffix = _PLE_SCALE2_SUFFIX if packed else _PLE_SCALE_SUFFIX
+    scale_at = scalars.get(scalar_suffix)
     if scale_at is None:
-        raise ValueError(f"PLE table in {folder}: no {_PLE_SCALE_SUFFIX[1:]} tensor")
+        raise ValueError(f"PLE table in {folder}: no {scalar_suffix[1:]} tensor")
     # read only now: safe_open validates the whole file, which would mask the per-shard errors above
     with safetensors.safe_open(scale_at[0], framework="pt", device="cpu") as f:
         scale = f.get_tensor(scale_at[1])
     value = float(scale.float().reshape(-1)[0]) if scale.numel() == 1 else math.nan
     if not math.isfinite(value) or value <= 0:
         raise ValueError(
-            f"PLE weight_scale {scale_at[1]} in {scale_at[0]}: expected one finite positive value, got {scale.tolist()}"
+            f"PLE {scalar_suffix.rpartition('.')[2]} {scale_at[1]} in {scale_at[0]}: expected one finite positive value, "
+            f"got {scale.tolist()}"
         )
-    rows, cols = shape
+    width = cols * 2 if packed else cols
     want_rows = ple_table_rows(qwen4_args)
-    if cols != qwen4_args.ngram_head_dim or rows * n_parts != want_rows:
+    if width != qwen4_args.ngram_head_dim or rows * n_parts != want_rows:
         raise ValueError(
-            f"PLE table in {folder} ({where[0]}): {n_parts} shards of {[rows, cols]} = {rows * n_parts} rows, "
+            f"PLE table in {folder} ({where[0]}): {n_parts} shards of {[rows, width]} = {rows * n_parts} rows, "
             f"expected {want_rows} rows of {qwen4_args.ngram_head_dim} as the config addresses"
         )
-    return PleShards([parts[i] for i in range(n_parts)], rows, cols, scale.reshape(()))
+    return PleShards(
+        [parts[i] for i in range(n_parts)], rows, cols, scale.reshape(()), packed=packed,
+        block_parts=[blocks[i] for i in range(n_parts)] if packed else None,
+    )
 
 
 # Headroom left after the bank commits: the dense weights, CUDA context and staging buffers still allocate
@@ -443,22 +525,32 @@ def load_ple_table(model_path: str, qwen4_args, *, pin: bool = True,
     """
     shards = scan_ple_table(download_hf_weight(model_path), qwen4_args)
     _admit_host_table(shards.nbytes)
-    bank = HostBank((shards.total_rows, shards.cols), torch.float8_e4m3fn)
-    shard_bytes = shards.rows_per_part * shards.cols
+    bank = HostBank((shards.total_rows, shards.cols), torch.uint8 if shards.packed else torch.float8_e4m3fn)
+    jobs = [(shards.parts, bank, shards.cols)]
+    scale_bank = None
+    if shards.packed:
+        scale_bank = HostBank((shards.total_rows, shards.cols // 8), torch.float8_e4m3fn)
+        jobs.append((shards.block_parts, scale_bank, shards.cols // 8))
     try:
         with byte_bar(shards.nbytes, "Loading PLE table") as bar:
-            buf = bank.memoryview()
-            for shard, (path, offset) in enumerate(shards.parts):
-                read_range_into(buf, path, file_offset=offset, nbytes=shard_bytes,
-                                dest_offset=shard * shard_bytes, workers=workers, chunk=chunk)
-                bar.update(shard_bytes)
+            for src, dst, row_bytes in jobs:
+                buf = dst.memoryview()
+                shard_bytes = shards.rows_per_part * row_bytes
+                for shard, (path, offset) in enumerate(src):
+                    read_range_into(buf, path, file_offset=offset, nbytes=shard_bytes,
+                                    dest_offset=shard * shard_bytes, workers=workers, chunk=chunk)
+                    bar.update(shard_bytes)
         if pin and torch.cuda.is_available():
             bank.pin()
+            if scale_bank is not None:
+                scale_bank.pin()
     except BaseException:
         with contextlib.suppress(Exception):  # the load failure is the error worth reporting
             bank.free()
+            if scale_bank is not None:
+                scale_bank.free()
         raise
-    return PleTable(bank=bank, weight_scale=shards.scale)
+    return PleTable(bank=bank, weight_scale=shards.scale, scale_bank=scale_bank)
 
 
 # ======================================================================================
@@ -475,5 +567,6 @@ __all__ = [
     "PleTable",
     "iter_weights",
     "load_ple_table",
+    "ple_table_is_packed",
     "scan_ple_table",
 ]
