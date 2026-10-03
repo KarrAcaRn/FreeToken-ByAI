@@ -223,5 +223,21 @@
     "authors": [
       "Glucksberg <markuscontasul@gmail.com>"
     ]
+  },
+  "337": {
+    "number": 337,
+    "title": "feat(moe): NVMe disk tier for MoE expert banks",
+    "head_sha": "91289bae8652",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Pulled forward (low-RAM topic): lets models whose expert banks exceed host RAM run, the tail served from NVMe. Opt-in (--moe-disk-tier); the one general change, MAP_PRIVATE banks, makes released pages really free. Fixups: Windows mmap has no flags (would break every bank on Windows), pin_prefix of an empty bank pinned 0 bytes, and a family test stale against main's dialect-dependent qwen3_5_moe spec. Conflicts with #563 in 6 files; the user chose #337.",
+    "commits": [
+      "953c87d",
+      "4d2fa42"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "pi agent <pi@local>"
+    ]
   }
 }
