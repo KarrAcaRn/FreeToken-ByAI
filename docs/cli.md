@@ -44,6 +44,8 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--port` | 1919 | Bind port |
 | `--api-key` | disabled | Require `Authorization: Bearer <key>` on every route except `/health` (401 otherwise); `FREETOKEN_API_KEY` is read when the flag is absent |
 | `--dist-port` | `--port` + 1 | Internal TP rendezvous port (loopback-only regardless of `--host`) |
+| `--ssl-certfile` | disabled | PEM certificate chain for HTTPS; requires `--ssl-keyfile` |
+| `--ssl-keyfile` | disabled | PEM private key for HTTPS; requires `--ssl-certfile` |
 | `--gpu` | GPU 0 | GPU to run on: a UUID from `nvidia-smi -L` or an `nvidia-smi` index; see [below](#choosing-a-gpu) |
 | `--max-running-requests` | 4 | Max concurrently running requests |
 | `--max-output-tokens` | 32768 | Default output budget for requests that omit one |
@@ -51,6 +53,14 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--max-prefill-length` | 8192 | Chunked-prefill chunk size in tokens |
 | `--cuda-graph-max-bs`, `--graph` | = max running requests | Max batch size captured as CUDA graphs |
 | `--decode-log-interval` | 40 | Scheduler status line every N decode steps |
+
+To serve HTTPS directly, provide the certificate and private key together:
+
+```bash
+ft serve --model ... --host 0.0.0.0 \
+  --ssl-certfile /etc/ssl/example/fullchain.pem \
+  --ssl-keyfile /etc/ssl/example/privkey.pem
+```
 
 ### Choosing a GPU
 
