@@ -589,5 +589,18 @@
       "Asmanov Lev <81736315+AsmanovLev@users.noreply.github.com>",
       "Lev Asmanov <asmanovlev@gmail.com>"
     ]
+  },
+  "498": {
+    "number": 498,
+    "title": "feat(qwen4_exp): support channel-wise fp8 dense weights and per-row PLE loaders",
+    "head_sha": "549a1f52c416",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "Special-case loader support for community per_row_e4m3 PLE exports and channel-wise fp8 dense weights (extra kernel branch + loader paths for one non-standard checkpoint dialect); conflicts with the PLE/dense loading reworked by #594. Not worth carrying.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "AlReis <258541404+alvarorsouza-arch@users.noreply.github.com>"
+    ]
   }
 }
