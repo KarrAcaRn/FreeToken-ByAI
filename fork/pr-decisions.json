@@ -677,5 +677,51 @@
     "authors": [
       "Mukkesh Ganesh <mukmckenzie@gmail.com>"
     ]
+  },
+  "494": {
+    "number": 494,
+    "title": "fix(gemma4): load mixed-quant GGUF checkpoints",
+    "head_sha": "eee1723c60c4",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Mixed-quant Gemma4 GGUFs (per-tensor quant types inside one expert bank) failed to load; the PR dequantizes or repacks the odd tensors and passes each expert's byte stride to ggml_moe_a8_vec. Comes with tests. GPU-checked on the RTX 4090: a q8_0 bank with padded expert stride gave NaN before and now matches the contiguous bank bit for bit and a dequantized reference (rel. err 0.6%). No Gemma4 GGUF is cached, so no end-to-end load.",
+    "commits": [
+      "6f10a92"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Poyo-Yon <Poyo-Yon@users.noreply.github.com>"
+    ]
+  },
+  "493": {
+    "number": 493,
+    "title": "fix(gemma4): load mixed compressed-tensors nvfp4",
+    "head_sha": "cc290d5df2b6",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Gemma4 compressed-tensors checkpoints that mix nvfp4 and unquantized tensors failed to load; nvfp4_expert_spec now follows the installed QuantConfig's dialect. Fixup: tests/moe/test_disk_tier_families excludes gemma4 from the static-spec check, as for qwen3_5_moe. CPU tests pass; the nvfp4 compute path needs FP4 hardware that sm_89 lacks, but the change is load-side only.",
+    "commits": [
+      "7306a31",
+      "76e3300"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Poyo-Yon <Poyo-Yon@users.noreply.github.com>"
+    ]
+  },
+  "488": {
+    "number": 488,
+    "title": "fix(swa): keep the prompt head's windowed KV so fan-out can reuse a shared prefix",
+    "head_sha": "e6db6264575c",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "With sliding-window attention the radix cache dropped the windowed KV of a shared prompt head, so fan-out (n>1, parallel requests on one prefix) re-prefilled it. Small change in scheduler/cache.py with retention and stress tests; tests/scheduler pass on the RTX 4090 machine.",
+    "commits": [
+      "5276fe3"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ]
   }
 }
