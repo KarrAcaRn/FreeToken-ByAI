@@ -1111,5 +1111,93 @@
     "authors": [
       "Gabriel A. Devenyi <gdevenyi@gmail.com>"
     ]
+  },
+  "595": {
+    "number": 595,
+    "title": "feat(server): add ft info and a pre-load memory preflight",
+    "head_sha": "2fc48971f5e0",
+    "reviewed_at": "2026-10-03",
+    "decision": "own",
+    "reason": "Our own PR, opened from feat/ft-info (ft info + pre-load preflight, adapted to upstream main). The feature is on next since 6890aeb; the branch leaves out the parts that need upstream #562, #574, #354/#408 (follow-up PRs once those merge).",
+    "commits": [
+      "6890aeb"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "KarrAcaRn <claude2@owayo.com>"
+    ]
+  },
+  "390": {
+    "number": 390,
+    "title": "fix(models): better support for mixed-precision compressed-tensors NVFP4",
+    "head_sha": "6b78a6c0f0f5",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "reason": "Mixed-precision compressed-tensors NVFP4 for qwen3_5_moe (FP8 attention/shared expert + NVFP4 experts, llm-compressor weight_packed / weight_global_scale names, reciprocal global scale). Superseded by #438 (0ffd5c8, every checkpoint layout through the QuantConfig): next's tests cover these exact layouts (unsloth NVFP4-Fast mixed precision, Ornith mixed-NVFP4-FP8, ct_tensor_fp8_moe), RedHatAI/Qwen3.6-35B-A3B-NVFP4 serves correctly, and the PR predates the refactor (conflicts in all 5 files).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Sam Izdat <ghsamizdat@gmail.com>"
+    ],
+    "superseded_by": "0ffd5c8 (#438)"
+  },
+  "380": {
+    "number": 380,
+    "title": "ci(container): настроить сборку образа",
+    "head_sha": "ded56ba9e409",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "Containerfile + a GitHub workflow that builds a CUDA image (publishing only in upstream's repo) and docs for `docker run`. Publishing images is upstream infrastructure this fork does not need (in the fork it would only build, up to 45 min per main push). Also, as written the documented command cannot be reached: ft serve binds 127.0.0.1 by default, so the container needs `--host 0.0.0.0`.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "nkolesnikov <33605615+Fgeeha@users.noreply.github.com>"
+    ]
+  },
+  "368": {
+    "number": 368,
+    "title": "feat(gguf): implement Q8_0 dequantization",
+    "head_sha": "b7635cd62408",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "reason": "Adds a torch Q8_0 dequant. Superseded by #494 (eee1723), which routes Q8_0 and every other GGML type through the gguf package's reference dequantizer; next's dequantize(Q8_0) matches the PR's formula bit for bit. The PR's test only fails on next because it imports the name dequant_q8_0.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Circle-Cheng <yc.22319139@gmail.com>"
+    ],
+    "superseded_by": "eee1723 (#494)"
+  },
+  "359": {
+    "number": 359,
+    "title": "fix(gemma4): support dense Gemma-4 GGUF checkpoints",
+    "head_sha": "ea492c5f9095",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Lets a dense Gemma-4 GGUF parse (expert fields default to 0, moe_enabled from them). Not enough on its own, checked with google/gemma-4-12B-it-qat-q4_0-gguf: the native-quant layer swap was gated on the Q4_0 expert format (dense -> built bf16, KeyError on the packed weights) and the weight iterator asserted the offload contract without experts. Fixups: merge conflict with #494's quant layout resolved (experts laid out only when present), GGUF recognised by its tensor layout, offload assertion only for MoE. On the RTX 4090: loads, 158.7k KV tokens (preflight forecast 155.7k), correct answers, ~95 tok/s decode, ~1090 tok/s prefill; the real-GGUF rope test passes.",
+    "commits": [
+      "5b0cb77",
+      "7f2fc79"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Circle-Cheng <yc.22319139@gmail.com>"
+    ]
+  },
+  "346": {
+    "number": 346,
+    "title": "fix(server): stop gemma4 tool-call markers leaking into content",
+    "head_sha": "abc1e6568c56",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Gemma4Detector surfaced partial or malformed <|tool_call markers as content; a scrub_markup hook now strips them on the one-shot paths and the end-of-stream drain (other detectors unchanged). Fixup: the scrub cut everything after the first marker, so the answer after a closed but unparseable block was lost (the PR's own example returned an empty message); a closed block is now dropped whole and only an unclosed opener ends the content. Note: streaming still turns such a block into a tool call and drops the text after it (pre-existing on next, not changed here).",
+    "commits": [
+      "7eee8a0",
+      "737e04e"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "vikoabastian <11003051+vianbas@users.noreply.github.com>"
+    ]
   }
 }
