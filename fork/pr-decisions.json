@@ -1,423 +1,423 @@
 {
- "589": {
-  "number": 589,
-  "title": "fix(checkpoint): resolve HF repo Ids before conversion",
-  "head_sha": "7f1b59648e5b",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "Goal is right, but resolving at the CLI with download_hf_weight only fetches weight shards, so a fresh HF cache still lacks tokenizer/remote-code files and the API path (convert_checkpoint) stays unfixed. Own version resolves inside convert_checkpoint, pulls the metadata too, and adds tests.",
-  "commits": [
-   "2d84a1d"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "rb <986796+rbrisita@users.noreply.github.com>"
-  ]
- },
- "591": {
-  "number": 591,
-  "title": "perf(moe): fold the shared-expert gate epilogue into hc_combine_norm",
-  "head_sha": "ab845fc8610e",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "Stacked on #590; adopted together as one own implementation. Folding the shared-expert epilogue is right, but the PR dispatches on an isinstance tuple and returns an un-combined 3-tuple from each layer; own version passes shared/gate explicitly and links each layer to its consumer norm (link_next_norms).",
-  "commits": [
-   "f965dfa"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Eva (port) <eva@local>"
-  ]
- },
- "590": {
-  "number": 590,
-  "title": "perf(model): fuse hc combine with the next block's RMSNorm via hc_combine_norm",
-  "head_sha": "7cba55ea8ba0",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "Goal is worthwhile (one launch fewer per block). The PR gets bit-exactness by reshaping to match the standalone norm's reduction tree; own version makes both kernels call one _gemma_rmsnorm helper on the same flat tile with the same num_warps, so they match by construction, and adds CPU and whole-stack fused==split tests.",
-  "commits": [
-   "f965dfa"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Eva (port) <eva@local>"
-  ]
- },
- "587": {
-  "number": 587,
-  "title": "feat(rocm): run on RDNA3/RDNA4 with torch 2.14/2.15 and ROCm 7.14/10",
-  "head_sha": "eb763897feb5",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "ROCm support is worthwhile, but the PR widens torch to <2.16 and triton to <3.9 and switches to C++20 for CUDA users too (sglang-kernel links only against 2.11), and on ROCm 7.14 it keeps a hiprtc-compiled spin kernel busy on a CU. Own version leaves the CUDA pins alone (uv overrides script for ROCm), uses C++20 only for ROCm torch>=2.14, detects memop graph replay functionally and falls back to the host-callback sync, and adds a moe_align contract test that runs on CPU. ROCm is untested here.",
-  "commits": [
-   "c362171"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Zhang Jason <ning.zhang2@amd.com>",
-   "zhangnju <zhangnju@126.com>"
-  ]
- },
- "585": {
-  "number": 585,
-  "title": "perf(linear): run a single-row bf16 projection as one GEMV",
-  "head_sha": "3d06e6c0fa9c",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "Worthwhile decode bs=1 bandwidth win. The PR turns on the GEMV for every bf16 linear, including ROCm and narrow layers, has no width heuristic, and leaves the tied LM head on F.linear. Own version gates on NVIDIA and >=512 out features, makes it opt-out with linear.none=torch, requires a row-major weight, uses ValueError checks, and covers the tied head.",
-  "commits": [
-   "8b1e34d"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Yevhenii <evgeny.kotyrlo@gmail.com>"
-  ]
- },
- "578": {
-  "number": 578,
-  "title": "perf(moe): dequant nvfp4 prefill experts by bit placement and load activations contiguously",
-  "head_sha": "e428b068cb10",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Bit-identical output, ~6x faster NVFP4 MoE prefill GEMM (measured by the author), reusing nvfp4_linear's existing table-free decode; the exactness argument checks out (every e2m1*e4m3 product is exact in fp16/bf16). Nothing to improve.",
-  "commits": [
-   "d027ad1"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Yevhenii <evgeny.kotyrlo@gmail.com>"
-  ]
- },
- "575": {
-  "number": 575,
-  "title": "fix(windows): build the extensions and JIT kernels with MSVC",
-  "head_sha": "fba57138c25b",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Windows source build. On Linux it only respells (.template, __forceinline__) to byte-identical device code; the rest sits behind sys.platform. Likely supersedes the older Windows PRs #298/#285 (to check when reached). setup.py conflict with our ROCm change resolved in the merge commit.",
-  "commits": [
-   "2dbb852"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Yevhenii <evgeny.kotyrlo@gmail.com>"
-  ]
- },
- "574": {
-  "number": 574,
-  "title": "feat(engine): --vram-reserve-mb keeps VRAM free at the largest prefill",
-  "head_sha": "2381a8137b0b",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Opt-in (--vram-reserve-mb, default 0) measurement of the real prefill peak with a bounded shrink of the expert cache; inert otherwise, tested. Draft #583 (WDDM free memory) builds on it.",
-  "commits": [
-   "ab4c03e"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Yevhenii <evgeny.kotyrlo@gmail.com>"
-  ]
- },
- "572": {
-  "number": 572,
-  "title": "fix(server): keep a silent stream alive and notice a client that left",
-  "head_sha": "09ab44ea0274",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Small and well tested: SSE comment keep-alive while a long prefill is silent, plus disconnect detection during the silence. Complements, not duplicates, #222 (abort delivery), which is still to be reviewed.",
-  "commits": [
-   "068a8c1"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "Yevhenii <evgeny.kotyrlo@gmail.com>"
-  ]
- },
- "577": {
-  "number": 577,
-  "title": "feat(kvcache): keep prefill-chunk GDN checkpoints in a pinned host bank",
-  "head_sha": "b1fd3626a1ca",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Compared with an independent implementation of the same goal (+349 vs +636 lines, same design: pinned host bank, device copy wins, LRU host eviction, exact-length attach, plus the same last_track_seqlen carry fix). Ours was smaller but only CPU-tested; the PR is validated on a live engine and already fixed an overlap-scheduling bug found there, which weighs more for pinned-memory/stream-ordering code. Opt-in (--mamba-host-slots, default 0). Includes #505's fix, so #505 is likely superseded; #525 is a broader alternative to check when reached.",
-  "commits": [
-   "97e70f0"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "skavans <skavans@users.noreply.github.com>"
-  ]
- },
- "505": {
-  "number": 505,
-  "title": "fix(scheduler): preserve pending hybrid checkpoint across prefill chunks",
-  "head_sha": "ae8b3cfaef74",
-  "reviewed_at": "2026-10-03",
-  "decision": "superseded",
-  "superseded_by": 577,
-  "reason": "Its fix (carry mamba_last_track_seqlen into the next chunk's Req, three lines in scheduler/prefill.py) is contained verbatim in #577, which credits it and is already merged.",
-  "commits": [],
-  "gpu_untested": false,
-  "authors": [
-   "Ran Bao <worksev@gmail.com>"
-  ]
- },
- "334": {
-  "number": 334,
-  "title": "fix(memory): honor cgroup memory limits when sizing expert banks",
-  "head_sha": "056b258ecfc8",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "Right goal (containers were OOM-killed mid-load because the loader sized against the host's MemAvailable). The PR's 294-line module charges memory.current in full, which counts page cache: a container that just read its checkpoint reads as full. Own ~90-line version clamps MemAvailable to the tightest cgroup v2/v1 limit and counts inactive_file as free; used by the expert-bank loader, ft bench bw and the load bench.",
-  "commits": [
-   "106a2b8"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "Léon Avic Simmons <Avicennasis@gmail.com>"
-  ]
- },
- "233": {
-  "number": 233,
-  "title": "fix(engine): probe the real WSL pin budget instead of guessing 40% RAM",
-  "head_sha": "13a9782969e7",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "Right goal (WSL refuses pinning far below the 40%-of-RAM guess, so loads died in cudaHostRegister). The PR probes at most 8 GiB (capping large hosts at 6.4 GiB), returns None = uncapped when nothing pins, and predates main's reserved-bytes signature. Own version probes up to the old estimate via the pinned extension (which clears the latched error, #144), returns 0 when nothing pins, and is cached.",
-  "commits": [
-   "d792900"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "kitty <2165990891@qq.com>"
-  ]
- },
- "144": {
-  "number": 144,
-  "title": "fix(kernel): clear the latched CUDA error before raising in pinned_tensor",
-  "head_sha": "a1daa7aeea57",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "A refused pin (low RAM) left the CUDA error latched, so the next unrelated CUDA call failed as if it were its own -- it breaks exactly the fallback paths a low-RAM load relies on. Clean, HIP mappings already exist.",
-  "commits": [
-   "992390f"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Ruslan Rakhimov <risonyo@gmail.com>"
-  ]
- },
- "56": {
-  "number": 56,
-  "title": "kernel: clamp zero-size host registrations; WDDM lock-pool hint on pin failure",
-  "head_sha": "173508231caf",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "The empty-bank failure is real but now hits earlier: an anonymous mmap of 0 bytes raises EINVAL before host_register, so the PR's clamp no longer helps. Own fix gives an empty bank one block, an empty tensor and device_ptr()=0. The PR's RLIMIT_MEMLOCK hint is dropped (cudaHostRegister is not bound by it); main already has PinFailed + _pin_hint.",
-  "commits": [
-   "a433799"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "Glucksberg <markuscontasul@gmail.com>"
-  ]
- },
- "337": {
-  "number": 337,
-  "title": "feat(moe): NVMe disk tier for MoE expert banks",
-  "head_sha": "91289bae8652",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted-with-fixups",
-  "reason": "Pulled forward (low-RAM topic): lets models whose expert banks exceed host RAM run, the tail served from NVMe. Opt-in (--moe-disk-tier); the one general change, MAP_PRIVATE banks, makes released pages really free. Fixups: Windows mmap has no flags (would break every bank on Windows), pin_prefix of an empty bank pinned 0 bytes, and a family test stale against main's dialect-dependent qwen3_5_moe spec. Conflicts with #563 in 6 files; the user chose #337.",
-  "commits": [
-   "953c87d",
-   "4d2fa42"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "pi agent <pi@local>"
-  ]
- },
- "563": {
-  "number": 563,
-  "title": "feat(moe): pin hot experts so fp8 qwen3.8-flash-next serves on a 48gb card",
-  "head_sha": "1b03fcc9c295",
-  "reviewed_at": "2026-10-03",
-  "decision": "deferred",
-  "revisit": "after-queue",
-  "reason": "Valuable idea (pin per-layer hot experts in VRAM, hotness stats + selection tool, EMA repinning, live K via tune file, fp8_block CPU executor from #534), but 9.4k lines incl. a 1.2k-line rewrite of the offload cache, measured on one machine, and not opt-in: it changes the hybrid PCIe/CPU split default from the benched profile to a fixed 50%. Conflicts with the adopted #337 in 6 files. User decision: come back after all other PRs, then likely build our own version -- with a GPU test environment.",
-  "commits": [],
-  "gpu_untested": true,
-  "authors": [
-   "mmletgo <zhengrongh@126.com>"
-  ]
- },
- "564": {
-  "number": 564,
-  "title": "fix(server): do not auto-select qwen3 parser for instruct-2507",
-  "head_sha": "b5630ea2c313",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Small, tested: --reasoning-parser auto no longer picks qwen3 for Instruct-2507 checkpoints (empty message.content). The model path is the only signal (shared architecture with Thinking-2507); acceptable for an auto heuristic, an explicit flag still wins.",
-  "commits": [
-   "dce9d11"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "Sanjay Sundaram <ssundaram@berkeley.edu>"
-  ]
- },
- "562": {
-  "number": 562,
-  "title": "fix(engine): charge the attention workspace in moe-cache-auto sizing",
-  "head_sha": "c75e40330945",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted-with-fixups",
-  "reason": "Charges the attention backend's fixed workspace (fi 256 MiB, trtllm 128 MiB) in the --moe-cache-auto plan, so a tight --memory-ratio no longer OOMs at startup. Fixup: the runtime rebuild fit check (validate_rebuild, generic + DSV4) did not charge it, so a rebuild could re-grant the bytes the workspace holds. #340 (dummy page in the KV floor) is a separate, complementary fix.",
-  "commits": [
-   "fa9aa85",
-   "ae16716"
-  ],
-  "gpu_untested": true,
-  "authors": [
-   "Cyber-Marty <15370813896@163.com>"
-  ]
- },
- "559": {
-  "number": 559,
-  "title": "fix(kvcache): clone inserted radix keys to release request buffers",
-  "head_sha": "2f37ac514d94",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted-with-fixups",
-  "reason": "Correct and small: radix keys were views into the request's whole input+output token buffer, so a cached 16-token prefix kept ~131 KB alive (host-RAM growth). Fixup: the regression test the PR left out, across plain/SWA/hybrid caches.",
-  "commits": [
-   "8d69b50",
-   "d6aa64c"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "taking-lying-flat <1615405@qq.com>"
-  ]
- },
- "305": {
-  "number": 305,
-  "title": "feat(server): add --api-key bearer authentication",
-  "head_sha": "2e99aadbd9e5",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Pulled forward while reviewing #558 (same feature). The more complete --api-key: tests, docs, WWW-Authenticate, CORS preflight passes, and the attached shell client carries the key (with #558 a keyed ft serve --shell would lock out its own shell). args.py conflict resolved in the merge commit.",
-  "commits": [
-   "30550b5"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "Ben Wilson <soft@mainlight.com>"
-  ]
- },
- "558": {
-  "number": 558,
-  "title": "feat(server): --api-key flag for bearer token auth on the HTTP API",
-  "head_sha": "8054a6382e7e",
-  "reviewed_at": "2026-10-03",
-  "decision": "superseded",
-  "superseded_by": 305,
-  "reason": "Same --api-key feature as #305, which is more complete (tests, docs, CORS preflight, WWW-Authenticate, the shell client sends the key) and is merged.",
-  "commits": [],
-  "gpu_untested": false,
-  "authors": [
-   "santanu20 <santanu20@users.noreply.github.com>"
-  ]
- },
- "565": {
-  "number": 565,
-  "title": "fix(ple): strict shard schema/geometry, nofollow + bounded discovery, mutation evidence, and pinned-bank admission/rollback",
-  "head_sha": "1e18e289c980",
-  "reviewed_at": "2026-10-03",
-  "decision": "reimplemented",
-  "reason": "Two of its four parts are worth having: one shard-set schema/geometry check shared by both PLE backends (exact row count, errors naming tensor+file), and pinned admission against available host RAM with release on failure (low-RAM topic). Own version (+396/-140 vs +981/-107) builds on available_host_memory() from #334's reimplementation and leaves out nofollow discovery and per-shard identity/digest re-validation -- tamper hardening a local engine does not need.",
-  "commits": [
-   "270b3a5"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "Léon Avic Simmons <Avicennasis@gmail.com>"
-  ]
- },
- "593": {
-  "number": 593,
-  "title": "fix(checkpoint): refuse converting into a directory that already holds an FTW",
-  "head_sha": "1d5ce5459b66",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted-with-fixups",
-  "reason": "Real data-loss bug: --out pointing at an existing FTW dir overwrote shard 00000 under a stale index. Merged as is (conflict with main's _resolve_source, kept both); fixup moves the check ahead of _resolve_source so an hf repo id is not downloaded only to be refused, with a test that fails before.",
-  "commits": [
-   "9ad678b",
-   "7671a66"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "Léon Avic Simmons <Avicennasis@gmail.com>"
-  ]
- },
- "592": {
-  "number": 592,
-  "title": "fix(mm): classify image fetch errors and re-check redirect targets",
-  "head_sha": "8952c0536033",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Redirects were followed without re-checking --allowed-media-domains (the code even said so), so an allowed host could 302 into the operator's network; 400 bodies leaked local paths and errno text. Small, tested, also streams with the size cap instead of buffering. Merged unchanged.",
-  "commits": [
-   "93ebf08"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "Léon Avic Simmons <Avicennasis@gmail.com>"
-  ]
- },
- "553": {
-  "number": 553,
-  "title": "feat(server): publish cumulative prefill and decode timing on /v1/stats",
-  "head_sha": "1eb311e19018",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted",
-  "reason": "Cumulative counters let a poller diff two /v1/stats calls into prefill/decode tok/s; per-request state follows the same finished-reply lifecycle as _inflight, so no new leak. Overlaps #447 only on a cached-tokens counter. Merged unchanged.",
-  "commits": [
-   "84460e8"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "mgeldi <muhammed_ali96@web.de>"
-  ]
- },
- "551": {
-  "number": 551,
-  "title": "improve installation success rate with higher timeout and retries",
-  "head_sha": "431ea5bd2cf9",
-  "reviewed_at": "2026-10-03",
-  "decision": "adopted-with-fixups",
-  "reason": "Longer uv HTTP timeout/retries fix real installer timeouts on slow links to pypi.nvidia.com. Fixup makes them defaults (${UV_HTTP_TIMEOUT:-600}) so a user-set value still wins.",
-  "commits": [
-   "b7c6ed5",
-   "4377773"
-  ],
-  "gpu_untested": false,
-  "authors": [
-   "John Li <jli@moresecure.ca>"
-  ]
- },
- "535": {
-  "number": 535,
-  "title": "ci(rocm): add ROCm 10.0.0 Dockerfile and validation workflow",
-  "head_sha": "8cd48c05f17e",
-  "reviewed_at": "2026-10-03",
-  "decision": "rejected",
-  "reason": "CI for upstream's self-hosted W7900D runner (custom labels); this fork has no such runner, and a full run needs ROCm support PRs not yet adopted. Revisit together with the ROCm backend PRs.",
-  "commits": [],
-  "gpu_untested": false,
-  "authors": [
-   "LZ-QWQ <lz1830837889@163.com>"
-  ]
- }
+  "589": {
+    "number": 589,
+    "title": "fix(checkpoint): resolve HF repo Ids before conversion",
+    "head_sha": "7f1b59648e5b",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "Goal is right, but resolving at the CLI with download_hf_weight only fetches weight shards, so a fresh HF cache still lacks tokenizer/remote-code files and the API path (convert_checkpoint) stays unfixed. Own version resolves inside convert_checkpoint, pulls the metadata too, and adds tests.",
+    "commits": [
+      "2d84a1d"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "rb <986796+rbrisita@users.noreply.github.com>"
+    ]
+  },
+  "591": {
+    "number": 591,
+    "title": "perf(moe): fold the shared-expert gate epilogue into hc_combine_norm",
+    "head_sha": "ab845fc8610e",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "Stacked on #590; adopted together as one own implementation. Folding the shared-expert epilogue is right, but the PR dispatches on an isinstance tuple and returns an un-combined 3-tuple from each layer; own version passes shared/gate explicitly and links each layer to its consumer norm (link_next_norms).",
+    "commits": [
+      "f965dfa"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Eva (port) <eva@local>"
+    ]
+  },
+  "590": {
+    "number": 590,
+    "title": "perf(model): fuse hc combine with the next block's RMSNorm via hc_combine_norm",
+    "head_sha": "7cba55ea8ba0",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "Goal is worthwhile (one launch fewer per block). The PR gets bit-exactness by reshaping to match the standalone norm's reduction tree; own version makes both kernels call one _gemma_rmsnorm helper on the same flat tile with the same num_warps, so they match by construction, and adds CPU and whole-stack fused==split tests.",
+    "commits": [
+      "f965dfa"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Eva (port) <eva@local>"
+    ]
+  },
+  "587": {
+    "number": 587,
+    "title": "feat(rocm): run on RDNA3/RDNA4 with torch 2.14/2.15 and ROCm 7.14/10",
+    "head_sha": "eb763897feb5",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "ROCm support is worthwhile, but the PR widens torch to <2.16 and triton to <3.9 and switches to C++20 for CUDA users too (sglang-kernel links only against 2.11), and on ROCm 7.14 it keeps a hiprtc-compiled spin kernel busy on a CU. Own version leaves the CUDA pins alone (uv overrides script for ROCm), uses C++20 only for ROCm torch>=2.14, detects memop graph replay functionally and falls back to the host-callback sync, and adds a moe_align contract test that runs on CPU. ROCm is untested here.",
+    "commits": [
+      "c362171"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Zhang Jason <ning.zhang2@amd.com>",
+      "zhangnju <zhangnju@126.com>"
+    ]
+  },
+  "585": {
+    "number": 585,
+    "title": "perf(linear): run a single-row bf16 projection as one GEMV",
+    "head_sha": "3d06e6c0fa9c",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "Worthwhile decode bs=1 bandwidth win. The PR turns on the GEMV for every bf16 linear, including ROCm and narrow layers, has no width heuristic, and leaves the tied LM head on F.linear. Own version gates on NVIDIA and >=512 out features, makes it opt-out with linear.none=torch, requires a row-major weight, uses ValueError checks, and covers the tied head.",
+    "commits": [
+      "8b1e34d"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "578": {
+    "number": 578,
+    "title": "perf(moe): dequant nvfp4 prefill experts by bit placement and load activations contiguously",
+    "head_sha": "e428b068cb10",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Bit-identical output, ~6x faster NVFP4 MoE prefill GEMM (measured by the author), reusing nvfp4_linear's existing table-free decode; the exactness argument checks out (every e2m1*e4m3 product is exact in fp16/bf16). Nothing to improve.",
+    "commits": [
+      "d027ad1"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "575": {
+    "number": 575,
+    "title": "fix(windows): build the extensions and JIT kernels with MSVC",
+    "head_sha": "fba57138c25b",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Windows source build. On Linux it only respells (.template, __forceinline__) to byte-identical device code; the rest sits behind sys.platform. Likely supersedes the older Windows PRs #298/#285 (to check when reached). setup.py conflict with our ROCm change resolved in the merge commit.",
+    "commits": [
+      "2dbb852"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "574": {
+    "number": 574,
+    "title": "feat(engine): --vram-reserve-mb keeps VRAM free at the largest prefill",
+    "head_sha": "2381a8137b0b",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Opt-in (--vram-reserve-mb, default 0) measurement of the real prefill peak with a bounded shrink of the expert cache; inert otherwise, tested. Draft #583 (WDDM free memory) builds on it.",
+    "commits": [
+      "ab4c03e"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "572": {
+    "number": 572,
+    "title": "fix(server): keep a silent stream alive and notice a client that left",
+    "head_sha": "09ab44ea0274",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Small and well tested: SSE comment keep-alive while a long prefill is silent, plus disconnect detection during the silence. Complements, not duplicates, #222 (abort delivery), which is still to be reviewed.",
+    "commits": [
+      "068a8c1"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "577": {
+    "number": 577,
+    "title": "feat(kvcache): keep prefill-chunk GDN checkpoints in a pinned host bank",
+    "head_sha": "b1fd3626a1ca",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Compared with an independent implementation of the same goal (+349 vs +636 lines, same design: pinned host bank, device copy wins, LRU host eviction, exact-length attach, plus the same last_track_seqlen carry fix). Ours was smaller but only CPU-tested; the PR is validated on a live engine and already fixed an overlap-scheduling bug found there, which weighs more for pinned-memory/stream-ordering code. Opt-in (--mamba-host-slots, default 0). Includes #505's fix, so #505 is likely superseded; #525 is a broader alternative to check when reached.",
+    "commits": [
+      "97e70f0"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "skavans <skavans@users.noreply.github.com>"
+    ]
+  },
+  "505": {
+    "number": 505,
+    "title": "fix(scheduler): preserve pending hybrid checkpoint across prefill chunks",
+    "head_sha": "ae8b3cfaef74",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "superseded_by": 577,
+    "reason": "Its fix (carry mamba_last_track_seqlen into the next chunk's Req, three lines in scheduler/prefill.py) is contained verbatim in #577, which credits it and is already merged.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Ran Bao <worksev@gmail.com>"
+    ]
+  },
+  "334": {
+    "number": 334,
+    "title": "fix(memory): honor cgroup memory limits when sizing expert banks",
+    "head_sha": "056b258ecfc8",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "Right goal (containers were OOM-killed mid-load because the loader sized against the host's MemAvailable). The PR's 294-line module charges memory.current in full, which counts page cache: a container that just read its checkpoint reads as full. Own ~90-line version clamps MemAvailable to the tightest cgroup v2/v1 limit and counts inactive_file as free; used by the expert-bank loader, ft bench bw and the load bench.",
+    "commits": [
+      "106a2b8"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Léon Avic Simmons <Avicennasis@gmail.com>"
+    ]
+  },
+  "233": {
+    "number": 233,
+    "title": "fix(engine): probe the real WSL pin budget instead of guessing 40% RAM",
+    "head_sha": "13a9782969e7",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "Right goal (WSL refuses pinning far below the 40%-of-RAM guess, so loads died in cudaHostRegister). The PR probes at most 8 GiB (capping large hosts at 6.4 GiB), returns None = uncapped when nothing pins, and predates main's reserved-bytes signature. Own version probes up to the old estimate via the pinned extension (which clears the latched error, #144), returns 0 when nothing pins, and is cached.",
+    "commits": [
+      "d792900"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "kitty <2165990891@qq.com>"
+    ]
+  },
+  "144": {
+    "number": 144,
+    "title": "fix(kernel): clear the latched CUDA error before raising in pinned_tensor",
+    "head_sha": "a1daa7aeea57",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "A refused pin (low RAM) left the CUDA error latched, so the next unrelated CUDA call failed as if it were its own -- it breaks exactly the fallback paths a low-RAM load relies on. Clean, HIP mappings already exist.",
+    "commits": [
+      "992390f"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Ruslan Rakhimov <risonyo@gmail.com>"
+    ]
+  },
+  "56": {
+    "number": 56,
+    "title": "kernel: clamp zero-size host registrations; WDDM lock-pool hint on pin failure",
+    "head_sha": "173508231caf",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "The empty-bank failure is real but now hits earlier: an anonymous mmap of 0 bytes raises EINVAL before host_register, so the PR's clamp no longer helps. Own fix gives an empty bank one block, an empty tensor and device_ptr()=0. The PR's RLIMIT_MEMLOCK hint is dropped (cudaHostRegister is not bound by it); main already has PinFailed + _pin_hint.",
+    "commits": [
+      "a433799"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Glucksberg <markuscontasul@gmail.com>"
+    ]
+  },
+  "337": {
+    "number": 337,
+    "title": "feat(moe): NVMe disk tier for MoE expert banks",
+    "head_sha": "91289bae8652",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Pulled forward (low-RAM topic): lets models whose expert banks exceed host RAM run, the tail served from NVMe. Opt-in (--moe-disk-tier); the one general change, MAP_PRIVATE banks, makes released pages really free. Fixups: Windows mmap has no flags (would break every bank on Windows), pin_prefix of an empty bank pinned 0 bytes, and a family test stale against main's dialect-dependent qwen3_5_moe spec. Conflicts with #563 in 6 files; the user chose #337.",
+    "commits": [
+      "953c87d",
+      "4d2fa42"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "pi agent <pi@local>"
+    ]
+  },
+  "563": {
+    "number": 563,
+    "title": "feat(moe): pin hot experts so fp8 qwen3.8-flash-next serves on a 48gb card",
+    "head_sha": "1b03fcc9c295",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Valuable idea (pin per-layer hot experts in VRAM, hotness stats + selection tool, EMA repinning, live K via tune file, fp8_block CPU executor from #534), but 9.4k lines incl. a 1.2k-line rewrite of the offload cache, measured on one machine, and not opt-in: it changes the hybrid PCIe/CPU split default from the benched profile to a fixed 50%. Conflicts with the adopted #337 in 6 files. User decision: come back after all other PRs, then likely build our own version -- with a GPU test environment.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "mmletgo <zhengrongh@126.com>"
+    ]
+  },
+  "564": {
+    "number": 564,
+    "title": "fix(server): do not auto-select qwen3 parser for instruct-2507",
+    "head_sha": "b5630ea2c313",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Small, tested: --reasoning-parser auto no longer picks qwen3 for Instruct-2507 checkpoints (empty message.content). The model path is the only signal (shared architecture with Thinking-2507); acceptable for an auto heuristic, an explicit flag still wins.",
+    "commits": [
+      "dce9d11"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Sanjay Sundaram <ssundaram@berkeley.edu>"
+    ]
+  },
+  "562": {
+    "number": 562,
+    "title": "fix(engine): charge the attention workspace in moe-cache-auto sizing",
+    "head_sha": "c75e40330945",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Charges the attention backend's fixed workspace (fi 256 MiB, trtllm 128 MiB) in the --moe-cache-auto plan, so a tight --memory-ratio no longer OOMs at startup. Fixup: the runtime rebuild fit check (validate_rebuild, generic + DSV4) did not charge it, so a rebuild could re-grant the bytes the workspace holds. #340 (dummy page in the KV floor) is a separate, complementary fix.",
+    "commits": [
+      "fa9aa85",
+      "ae16716"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Cyber-Marty <15370813896@163.com>"
+    ]
+  },
+  "559": {
+    "number": 559,
+    "title": "fix(kvcache): clone inserted radix keys to release request buffers",
+    "head_sha": "2f37ac514d94",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Correct and small: radix keys were views into the request's whole input+output token buffer, so a cached 16-token prefix kept ~131 KB alive (host-RAM growth). Fixup: the regression test the PR left out, across plain/SWA/hybrid caches.",
+    "commits": [
+      "8d69b50",
+      "d6aa64c"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ]
+  },
+  "305": {
+    "number": 305,
+    "title": "feat(server): add --api-key bearer authentication",
+    "head_sha": "2e99aadbd9e5",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Pulled forward while reviewing #558 (same feature). The more complete --api-key: tests, docs, WWW-Authenticate, CORS preflight passes, and the attached shell client carries the key (with #558 a keyed ft serve --shell would lock out its own shell). args.py conflict resolved in the merge commit.",
+    "commits": [
+      "30550b5"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Ben Wilson <soft@mainlight.com>"
+    ]
+  },
+  "558": {
+    "number": 558,
+    "title": "feat(server): --api-key flag for bearer token auth on the HTTP API",
+    "head_sha": "8054a6382e7e",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "superseded_by": 305,
+    "reason": "Same --api-key feature as #305, which is more complete (tests, docs, CORS preflight, WWW-Authenticate, the shell client sends the key) and is merged.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "santanu20 <santanu20@users.noreply.github.com>"
+    ]
+  },
+  "565": {
+    "number": 565,
+    "title": "fix(ple): strict shard schema/geometry, nofollow + bounded discovery, mutation evidence, and pinned-bank admission/rollback",
+    "head_sha": "1e18e289c980",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "Two of its four parts are worth having: one shard-set schema/geometry check shared by both PLE backends (exact row count, errors naming tensor+file), and pinned admission against available host RAM with release on failure (low-RAM topic). Own version (+396/-140 vs +981/-107) builds on available_host_memory() from #334's reimplementation and leaves out nofollow discovery and per-shard identity/digest re-validation -- tamper hardening a local engine does not need.",
+    "commits": [
+      "270b3a5"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Léon Avic Simmons <Avicennasis@gmail.com>"
+    ]
+  },
+  "593": {
+    "number": 593,
+    "title": "fix(checkpoint): refuse converting into a directory that already holds an FTW",
+    "head_sha": "1d5ce5459b66",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Real data-loss bug: --out pointing at an existing FTW dir overwrote shard 00000 under a stale index. Merged as is (conflict with main's _resolve_source, kept both); fixup moves the check ahead of _resolve_source so an hf repo id is not downloaded only to be refused, with a test that fails before.",
+    "commits": [
+      "9ad678b",
+      "7671a66"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Léon Avic Simmons <Avicennasis@gmail.com>"
+    ]
+  },
+  "592": {
+    "number": 592,
+    "title": "fix(mm): classify image fetch errors and re-check redirect targets",
+    "head_sha": "8952c0536033",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Redirects were followed without re-checking --allowed-media-domains (the code even said so), so an allowed host could 302 into the operator's network; 400 bodies leaked local paths and errno text. Small, tested, also streams with the size cap instead of buffering. Merged unchanged.",
+    "commits": [
+      "93ebf08"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Léon Avic Simmons <Avicennasis@gmail.com>"
+    ]
+  },
+  "553": {
+    "number": 553,
+    "title": "feat(server): publish cumulative prefill and decode timing on /v1/stats",
+    "head_sha": "1eb311e19018",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Cumulative counters let a poller diff two /v1/stats calls into prefill/decode tok/s; per-request state follows the same finished-reply lifecycle as _inflight, so no new leak. Overlaps #447 only on a cached-tokens counter. Merged unchanged.",
+    "commits": [
+      "84460e8"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "mgeldi <muhammed_ali96@web.de>"
+    ]
+  },
+  "551": {
+    "number": 551,
+    "title": "improve installation success rate with higher timeout and retries",
+    "head_sha": "431ea5bd2cf9",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Longer uv HTTP timeout/retries fix real installer timeouts on slow links to pypi.nvidia.com. Fixup makes them defaults (${UV_HTTP_TIMEOUT:-600}) so a user-set value still wins.",
+    "commits": [
+      "b7c6ed5",
+      "4377773"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "John Li <jli@moresecure.ca>"
+    ]
+  },
+  "535": {
+    "number": 535,
+    "title": "ci(rocm): add ROCm 10.0.0 Dockerfile and validation workflow",
+    "head_sha": "8cd48c05f17e",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "CI for upstream's self-hosted W7900D runner (custom labels); this fork has no such runner, and a full run needs ROCm support PRs not yet adopted. Revisit together with the ROCm backend PRs.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "LZ-QWQ <lz1830837889@163.com>"
+    ]
+  }
 }
