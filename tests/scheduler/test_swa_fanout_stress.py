@@ -16,24 +16,17 @@ Scenarios:
 """
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 import pytest
 import torch
-
-# These tests drive the real CacheManager on CPU. But `_maybe_pinned` (prefill.py:28)
-# calls `t.pin_memory()` whenever torch.cuda.is_available(), so on a GPU box they would
-# allocate real pinned memory -- on 218 that means competing with the live engine for
-# VRAM (observed: AcceleratorError "CUDA error: out of memory"). Hide the device so the
-# tests stay CPU-only. Must happen before torch's cuda state is first touched.
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 from freetoken.core import Context, SamplingParams, get_global_ctx, set_global_ctx
 from freetoken.distributed import set_tp_info, try_get_tp_info
 from freetoken.models.config import KVCacheGroupSpec
 from freetoken.scheduler import cache as cache_mod
 from freetoken.scheduler.cache import CacheManager
+from freetoken.scheduler import prefill as prefill_mod
 from freetoken.scheduler.decode import DecodeManager
 from freetoken.scheduler.prefill import ChunkedReq, PrefillManager
 from freetoken.scheduler.table import TableManager
@@ -51,12 +44,18 @@ HEAD = 600
 TAIL = 600
 
 
-def test_cuda_is_hidden_so_these_tests_never_touch_a_gpu():
-    """Guard: this file must not allocate device memory on a GPU host."""
-    assert not torch.cuda.is_available(), (
-        "CUDA is visible: _maybe_pinned would allocate pinned GPU memory and can OOM a "
-        "co-resident engine. Set CUDA_VISIBLE_DEVICES='' before torch initialises CUDA.")
+@pytest.fixture(autouse=True)
+def _never_pin(monkeypatch):
+    # These tests drive the real CacheManager on CPU, but `_maybe_pinned` pins host memory
+    # whenever CUDA is available, which creates a CUDA context and competes with a live engine
+    # for VRAM (observed: "CUDA error: out of memory"). Keep this file CPU-only without hiding
+    # the GPU from the rest of the pytest session.
+    monkeypatch.setattr(prefill_mod, "_maybe_pinned", lambda t: t)
 
+
+def test_these_tests_never_pin_host_memory():
+    t = torch.zeros(4)
+    assert prefill_mod._maybe_pinned(t) is t and not t.is_pinned()
 
 
 def _cfg(window, page_size=1, max_running_req=4):
