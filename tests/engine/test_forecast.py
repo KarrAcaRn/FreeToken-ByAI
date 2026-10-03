@@ -3,6 +3,7 @@
 The forecast must reuse the engine's own sizing functions, so each check prices the same
 configuration through those functions directly and compares."""
 
+import copy
 import json
 import struct
 import time
@@ -99,7 +100,6 @@ def test_forecast_matches_engine_sizing(tiny_qwen3):
 
     r = _analyze(tiny_qwen3)
     config, f = r.config, r.forecast
-    assert not torch.cuda.is_initialized()
     # weights: the meta model's parameters (bf16, untied lm_head) + the eager rope table
     params = sum(t.numel() * t.element_size() for t in _meta_model(config).state_dict().values())
     assert f.weights_bytes == params + r.inputs.weights.gpu["rope"]
@@ -291,3 +291,33 @@ def test_moe_offload_slots_follow_the_auto_plan(tmp_path):
         max_slots=inp.max_slots,
     )
     assert (f.moe_slots, f.num_pages) == (size, pages)
+
+
+def test_free_memory_is_read_before_this_process_creates_a_cuda_context(tiny_qwen3, monkeypatch):
+    """The arch probe in _adjust_config initializes CUDA on a GPU machine; a reading taken after
+    it would count this process's own context twice."""
+    from freetoken.engine import engine
+    from freetoken.server import info
+
+    calls = []
+    real_gpu, real_adjust = info.gpu_info, engine._adjust_config
+    monkeypatch.setattr(info, "gpu_info", lambda *a, **k: calls.append("gpu_info") or real_gpu(*a, **k))
+    monkeypatch.setattr(engine, "_adjust_config", lambda *a, **k: calls.append("adjust") or real_adjust(*a, **k))
+    _analyze(tiny_qwen3)
+    assert calls[:2] == ["gpu_info", "adjust"]
+
+
+def test_kv_dtype_tips_shrink_bytes_per_token_and_pick_a_code_decoding_backend(tiny_qwen3):
+    from freetoken.engine.engine import _backend_supports_kv_quant
+    from freetoken.engine.forecast import _evaluate, _tips_kv_dtype
+
+    r = _analyze(tiny_qwen3)
+    changes = {c.flag: c for c in _tips_kv_dtype(r.inputs)}
+    assert set(changes) == {"--kv-cache-dtype fp8", "--kv-cache-dtype nvfp4"}
+    base = r.forecast
+    fp8 = _evaluate(r.inputs, (changes["--kv-cache-dtype fp8"],))
+    nvfp4 = _evaluate(r.inputs, (changes["--kv-cache-dtype nvfp4"],))
+    assert base.kv_tokens < fp8.kv_tokens < nvfp4.kv_tokens
+    config = copy.copy(r.inputs.config)
+    changes["--kv-cache-dtype fp8"].apply(config)
+    assert _backend_supports_kv_quant(config.attention_backend, "fp8")

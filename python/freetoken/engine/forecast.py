@@ -580,10 +580,45 @@ def _tips_moe(inp: ForecastInputs) -> Iterable[Change]:
                      note="experts decode on the CPU")
 
 
-# A new sizing option (e.g. a KV-cache dtype flag) adds one generator here; its bytes-per-token
-# effect reaches the forecast through the pool family's kv_cost, so nothing else changes.
+def _set_kv_quant(kv_quant: str):
+    def apply(config):
+        from freetoken.engine.engine import _backend_parts_serve, _backend_supports_kv_quant, _required_attn_types
+
+        object.__setattr__(config, "kv_quant", kv_quant)
+        if not _backend_supports_kv_quant(config.attention_backend, kv_quant):
+            # What --attn auto picks once the cache is quantized. The code-decoding backends
+            # have no arch condition, so this needs no CUDA probe (ft info runs on CPU too).
+            required = _required_attn_types(config.model_config)
+            backend = next(
+                (n for n in ("dsa", "qsa_sparse", "triton")
+                 if _backend_parts_serve(n, required) and _backend_supports_kv_quant(n, kv_quant)),
+                config.attention_backend,
+            )
+            object.__setattr__(config, "attention_backend", backend)
+    return apply
+
+
+def _tips_kv_dtype(inp: ForecastInputs) -> Iterable[Change]:
+    from freetoken.engine.engine import kv_quant_unsupported_reason
+
+    current = getattr(inp.config, "kv_quant", "none")
+    options = (
+        ("fp8", 1, "e4m3 codes with per-row scales; decode within a few percent of bf16"),
+        ("nvfp4", 2, "packed 4-bit codes; slower decode at long context"),
+    )
+    order = [q for q, _, _ in options]
+    for quant, cost, note in options:
+        if current != "none" and order.index(quant) <= order.index(current):
+            continue
+        if kv_quant_unsupported_reason(inp.config.model_config, quant) is None:
+            yield Change(f"--kv-cache-dtype {quant}", "kv_quant", cost, _set_kv_quant(quant), note=note)
+
+
+# A new sizing option adds one generator here; a bytes-per-token effect (like --kv-cache-dtype)
+# reaches the forecast through the pool family's kv_cost, so nothing else changes.
 TIP_CANDIDATES: list[Callable[[ForecastInputs], Iterable[Change]]] = [
     _tips_concurrency, _tips_memory_ratio, _tips_prefill, _tips_cache_type, _tips_encoders, _tips_moe,
+    _tips_kv_dtype,
 ]
 
 
@@ -593,11 +628,16 @@ class Tip:
     forecast: Forecast
     effect: str
     notes: list[str] = field(default_factory=list)
+    # single changes that still fit on top of a suggested combination and add KV tokens
+    then_also: list["Tip"] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"flags": self.flags, "verdict": self.forecast.verdict, "kv_tokens": self.forecast.kv_tokens,
-                "max_context": self.forecast.max_context, "max_running_req": self.forecast.max_running_req,
-                "effect": self.effect, "notes": self.notes}
+        out = {"flags": self.flags, "verdict": self.forecast.verdict, "kv_tokens": self.forecast.kv_tokens,
+               "max_context": self.forecast.max_context, "max_running_req": self.forecast.max_running_req,
+               "effect": self.effect, "notes": self.notes}
+        if self.then_also:
+            out["then_also"] = [t.to_dict() for t in self.then_also]
+        return out
 
 
 def _evaluate(inp: ForecastInputs, changes: tuple[Change, ...]) -> Forecast:
@@ -678,7 +718,18 @@ def suggest_tips(inp: ForecastInputs, base: Forecast, max_combo: int = 3) -> tup
     if best is None or _rank(best[2])[0] <= _rank(base)[0]:
         return single, None
     _, combo, fc = best
-    return single, Tip([c.flag for c in combo], fc, _effect(base, fc, combo), [c.note for c in combo if c.note])
+    suggested = Tip([c.flag for c in combo], fc, _effect(base, fc, combo), [c.note for c in combo if c.note])
+    if fc.verdict == "fits":
+        keys = {c.key for c in combo}
+        extra = []
+        for c in changes:
+            if c.key in keys or c.cost > 2:
+                continue
+            fce = _evaluate(inp, combo + (c,))
+            if fce.verdict == "fits" and fce.kv_tokens > fc.kv_tokens:
+                extra.append(Tip([c.flag], fce, _effect(fc, fce, (c,)), [c.note] if c.note else []))
+        suggested.then_also = sorted(extra, key=lambda t: -t.forecast.kv_tokens)[:2]
+    return single, suggested
 
 
 # ---------------------------------------------------------------------------------------------
@@ -829,4 +880,8 @@ def format_forecast(inp: ForecastInputs, fc: Forecast, tips: list[Tip], combo: T
             fcc = combo.forecast
             lines.append(f"  Suggested: {' '.join(combo.flags)} -> {fcc.verdict}, {fcc.kv_tokens} KV tokens, "
                          f"max context {fcc.max_context}, {_requests(fcc.max_running_req)}")
+            for extra in combo.then_also:
+                note = f" [{'; '.join(extra.notes)}]" if extra.notes else ""
+                lines.append(f"    then also {' '.join(extra.flags)} -> {extra.forecast.kv_tokens} KV tokens, "
+                             f"max context {extra.forecast.max_context}{note}")
     return "\n".join(lines)
