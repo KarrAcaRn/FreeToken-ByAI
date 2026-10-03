@@ -1086,13 +1086,30 @@
     "title": "fix(cpu-moe): honor padded fp8 scale strides, add avx512f tier and float64 parity (builds on #36)",
     "head_sha": "56a51835df7e",
     "reviewed_at": "2026-10-03",
-    "decision": "deferred",
-    "reason": "Stacked on #36 (block-FP8 expert GEMV for the CPU/hybrid MoE backends, still undecided): it carries #36's commit plus a padded-scale-stride fix, an AVX-512F fp8 tier and float64 parity tests. Review together with #36; CPU code, so it can be tested here then (this VM has AVX2 only).",
-    "commits": [],
-    "gpu_untested": true,
+    "decision": "adopted",
+    "reason": "Reviewed together with #36, whose block-FP8 CPU GEMV (W8A16 for --moe-strategy cpu/hybrid; FP8 checkpoints had no CPU expert path) it contains. On top: the scale banks are padded per expert to 16 bytes (Qwen3.x down_scale 5 -> 6 cols), which #36 alone mis-strides; an avx512f tier for CPUs without avx512_bf16; float64 parity tests that force each ISA tier. On this VM (AVX2 only; the two AVX-512 tiers skip): 11 tests pass; ft bench bw now measures fp8 at 30.5 GB/s CPU vs 12.6 GB/s PCIe gather (2.42x -> hybrid). No FP8 checkpoint fits next to the NVFP4 test model, so no end-to-end FP8 serve; the rebuilt extension leaves Qwen3.6-35B-A3B-NVFP4 unchanged (same answers, ~7960 prefill / ~140 decode tok/s).",
+    "commits": [
+      "9602cf6"
+    ],
+    "gpu_untested": false,
     "authors": [
       "ChenyuHe <hechenyu@zju.edu.cn>"
+    ]
+  },
+  "36": {
+    "number": 36,
+    "title": "feat(cpu-moe): block-FP8 expert GEMV (W8A16) for the cpu/hybrid backends",
+    "head_sha": "19e9382725b8",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "superseded_by": 399,
+    "reason": "Merged as part of #399 (its 4a04c9b), which adds the padded-scale-stride fix this PR needs for real Qwen3.x FP8 banks, an avx512f tier and stronger tests. This PR's second commit (19e9382, force each ISA tier in the test) only touches the test file that #399 rewrites with the same tier forcing.",
+    "commits": [
+      "9602cf6"
     ],
-    "revisit_with": 36
+    "gpu_untested": false,
+    "authors": [
+      "Gabriel A. Devenyi <gdevenyi@gmail.com>"
+    ]
   }
 }
