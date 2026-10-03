@@ -1869,5 +1869,78 @@
       "rhyce.git <rhyce@comley.dev>"
     ],
     "superseded_by": 190
+  },
+  "169": {
+    "number": 169,
+    "title": "fix(engine): load prefill triton kernels at startup, not mid-request",
+    "head_sha": "a8326af90894",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "Runs the startup prefill warmup on every attention backend (next only did it for triton) over a ladder of lengths that crosses the Triton kernels' size buckets, tolerates a failing length with a warning, and adds --skip-prefill-warmup. Its l2norm change was already on next. Conflicts with #574's _prefill_dummy/_fit_prefill_peak and #337's config resolved: the error tolerance is opt-in for the warmup only (the peak fit still raises). Measured on Qwen3.6-35B-A3B-NVFP4: warmup 9.2 s over 10 lengths (was 2.9 s over 2), first-request TTFT 1655 vs 1773 ms - a small gain; the ~0.8 s steady-state floor is unrelated.",
+    "commits": [
+      "77d4c3d"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ]
+  },
+  "160": {
+    "number": 160,
+    "title": "cpu-device: OR-switch device resolver + RoPE multi-head fallback fix",
+    "head_sha": "89f402dfeb8f",
+    "reviewed_at": "2026-10-04",
+    "decision": "rejected",
+    "reason": "CPU-only device mode (torch CPU attention, device switch, RoPE fallback, CI smoke workflow; 1.7k lines). Its packaging change is wrong: it drops csrc/**/* from package-data ('C++ sources are build inputs, not runtime data'), but the GGUF and other JIT kernels compile at runtime from exactly those sources (kernel/gguf.py, kernel/utils.py), so a wheel install would lose them. The CPU-device idea could come back without that change.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "spaz122772 <35985754+spaz122772@users.noreply.github.com>"
+    ]
+  },
+  "159": {
+    "number": 159,
+    "title": "fix(kernel): GGUF JIT extension fails to build with gcc under C++17 - compile as C++20",
+    "head_sha": "67ad2a031fc9",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "nvcc's host pass rewrites a libtorch template so that some g++ versions reject it under C++17; -std=c++20 makes the dropped typename implicit. Conflict with next's ROCm flag split (#132) resolved by adding the flag to the CUDA branch only. Here (g++-15, CUDA 13.1) the build also worked before; rebuilt from scratch with C++20 and the GGUF kernel tests pass.",
+    "commits": [
+      "763c030"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "avlp12 <alisvolatprop12@proton.me>"
+    ]
+  },
+  "154": {
+    "number": 154,
+    "title": "GGUF: read multi-shard checkpoints",
+    "head_sha": "c3b8a1f01a52",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "Split GGUFs (-00001-of-000NN) were unopenable; the reader now resolves any shard or a directory to the ordered set, reads metadata/tokenizer from shard 1 and aggregates the tensor tables. Merged cleanly with its 200-line test; single-file GGUFs take the same path (Gemma-4 GGUF config/tokenizer tests pass). No split GGUF available here for an end-to-end load.",
+    "commits": [
+      "f8a3a83"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Victor Cruz <vcruz305@gmail.com>"
+    ]
+  },
+  "153": {
+    "number": 153,
+    "title": "fix(bench): skip an unsupported slot count instead of aborting the sweep",
+    "head_sha": "84109ada4b91",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "bench_offload_cache_copy skips a geometry the cache refuses (e.g. fewer slots than experts) instead of aborting the sweep, and exits 1 when an explicitly requested geometry measured nothing. Checked: --cache-slots 10 on qwen3.5-35B prints SKIPPED and exits 1.",
+    "commits": [
+      "8868a82"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Ruslan Rakhimov <risonyo@gmail.com>"
+    ]
   }
 }
