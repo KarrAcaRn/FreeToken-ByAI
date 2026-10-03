@@ -898,3 +898,22 @@ def test_an_empty_host_bank_still_maps_one_block(monkeypatch):
     assert device_ptr(bank.tensor) == 0  # no translation needed, so none is attempted
     bank.pin()
     assert registered == [host_banks._BLK]
+
+
+def test_copy_miss_verify_probe_gated_on_disk_tier(monkeypatch, capsys):
+    """FT_DISK_TIER_VERIFY must not fire the [copy-miss] probe when the disk tier
+    is off: the probe's .item()/.cpu() are device-to-host syncs, which crash any
+    CUDA graph capture (PR #337 issuecomment-5519070434 -- every graph-capturing
+    boot died with the env var left over from a tier session). Gated on the tier
+    like its neighbours, and skipped while a stream is capturing."""
+    layer, cache = _make_layer_and_cache()
+    cache._pending_src_layer = 0
+    cache.evict_slots = torch.tensor([0, 1], dtype=torch.int32)
+    cache.src_indices = torch.tensor([2, 3], dtype=torch.int32)
+    cache.num_indices = torch.tensor(2)
+    cache._copy_fused_ok = False
+    monkeypatch.setattr("freetoken.kernel.fast_index_copy_jit", lambda *a, **k: None)
+    monkeypatch.setenv("FT_DISK_TIER_VERIFY", "1")
+
+    cache.copy_missing()
+    assert "[copy-miss]" not in capsys.readouterr().out
