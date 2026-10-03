@@ -463,7 +463,7 @@ def parse_args(
         dest="kv_quant",
         type=str,
         default=ServerArgs.kv_quant,
-        choices=["auto", "bf16", "fp8"],
+        choices=["auto", "bf16", "fp8", "nvfp4"],
         help=(
             "KV-cache storage format. 'bf16' (default) stores the compute dtype; 'fp8'"
             " stores e4m3 codes plus one fp32 scale per (token, kv head), roughly "
@@ -471,6 +471,8 @@ def parse_args(
             " that decodes the codes (--attn auto picks triton, qsa_sparse or dsa) and a"
             " plain paged, hybrid-SWA, QSA sparse or MLA/DSA KV pool (not DSV4 or"
             " MiniMax-M3 block-sparse models)."
+            " 'nvfp4' stores packed E2M1 with block/row scales on the same pools; it"
+            " needs head_dim divisible by 16."
         ),
     )
 
