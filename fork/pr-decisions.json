@@ -1199,5 +1199,80 @@
     "authors": [
       "vikoabastian <11003051+vianbas@users.noreply.github.com>"
     ]
+  },
+  "341": {
+    "number": 341,
+    "title": "feat(bench): add reproducible serving performance harness",
+    "head_sha": "1d1483ab21b8",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Client-wall serving benchmark (calibrated prompt sizes, TTFT/decode/total, prefix-cache cases, cache geometry) for a running server. Fixups: send --api-key (default $FREETOKEN_API_KEY) as a bearer header, since next's --api-key (#305) answers 401 otherwise; and the server omits prompt_tokens_details for a zero hit, so every fresh prompt read as 'no cache report' and the fresh-prefill rate was always n/a - the harness now probes whether reporting is on and counts an absent object as a miss. Live on Qwen3.6-35B-A3B-NVFP4 (RTX 4090): 401 without key, ~150 tok/s decode, fresh prefill 1325 tok/s at 1k / 5238 tok/s at 4k, prefix hits detected (4032/4096).",
+    "commits": [
+      "93a5c9b",
+      "b36d49d",
+      "23d92b6"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Sebastián Real <tuxevil@gmail.com>"
+    ]
+  },
+  "340": {
+    "number": 340,
+    "title": "fix(engine): reserve the pool's dummy page in the --moe-cache-auto KV floor",
+    "head_sha": "d51a8e2f9146",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Every KV pool keeps page 0 as a dummy, but the --moe-cache-auto plan did not count it, so it could hand that page's bytes to expert slots (OOM at boot on large pages) and --kv-reserve-tokens under-delivered by one page. Conflict with next's #562 signature (attention workspace, slot limit) resolved by keeping both; the new test dropped its quant_format argument. ft info's forecast uses the same function and follows. Live: Qwen3.6 MoE with --kv-reserve-tokens 32768 got 32850 KV tokens.",
+    "commits": [
+      "e97bed0"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "dejay2 <218806300+dejay2@users.noreply.github.com>"
+    ]
+  },
+  "339": {
+    "number": 339,
+    "title": "fix(kernels): drop the D2H sync from the varlen GDN/KDA prefill conv",
+    "head_sha": "eea4ad6821ae",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "The triton fallback of causal_conv1d_varlen read the longest request back from the device (a D2H sync per prefill, illegal under capture); build_fla_metadata now carries the host-known max. Only the fallback is affected: with sgl_kernel installed (as here) the native kernel is used, so no speed change on this machine. New capture tests pass on the RTX 4090; Qwen3.6 MoE (GDN) serves unchanged.",
+    "commits": [
+      "aeefcb0"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "dejay2 <218806300+dejay2@users.noreply.github.com>"
+    ]
+  },
+  "338": {
+    "number": 338,
+    "title": "perf(ple): fuse the n-gram row-id hash into one Triton kernel",
+    "head_sha": "de77d16a5ac3",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Fuses Flash-Next's PLE n-gram row-id hash (39 tiny launches per layer) into one capture-safe Triton kernel; the old torch path stays as the CPU path and test oracle, FREETOKEN_PLE_FUSED_HASH=0 restores it. Kernel-vs-reference tests pass on the RTX 4090; Flash-Next itself cannot run here, so no end-to-end speed number.",
+    "commits": [
+      "f83277b"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "dejay2 <218806300+dejay2@users.noreply.github.com>"
+    ]
+  },
+  "327": {
+    "number": 327,
+    "title": "Feat/native gguf llama",
+    "head_sha": "fb8023e3ad79",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "Native Llama / Llama-4 GGUF support. Does not load a standard Llama GGUF: bartowski/Llama-3.2-1B-Instruct Q4_0 fails with a shape/dtype assertion during weight load (tried merged onto next). Also caps every Llama GGUF's context at 8192 (min(context_length, 8192)), drops rope_freqs without passing Llama 3's rope scaling (wrong frequencies at every position), and ships no tests; the Llama-4 MoE path is unverified. Worth doing properly as its own change if Llama GGUFs are wanted.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yasitha Herath <35001977+amodhyh@users.noreply.github.com>"
+    ]
   }
 }
