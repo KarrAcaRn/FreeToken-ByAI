@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
 from freetoken.core import SamplingParams
 from freetoken.message import TokenizeMsg
 from freetoken.tokenizer.effort import EFFORT_SCALE, KNOWN_REASONING_EFFORTS
@@ -164,9 +165,29 @@ def register_openai_routes(
                 # Messages path: render via the chat template, matching a real generation.
                 if not req.messages:
                     return create_error_response("messages: at least one message is required")
-                spec_msgs = [m.model_dump(exclude_none=True) for m in req.messages]
+                # Convert exactly as /v1/chat/completions does -- tools, chat_template_kwargs,
+                # reasoning_effort / thinking and the server's default thinking mode all change
+                # the rendered prompt -- so the count equals the request's usage.prompt_tokens.
+                try:
+                    chat_req = ChatCompletionRequest.model_validate(
+                        {
+                            "model": "",
+                            **req.model_dump(
+                                exclude={"input", "add_special_tokens"}, exclude_none=True
+                            ),
+                        }
+                    )
+                    spec = chat_request_to_genspec(
+                        chat_req,
+                        {},
+                        default_thinking_mode=getattr(
+                            state.config, "default_thinking_mode", "auto"
+                        ),
+                    )
+                except (ValidationError, ValueError) as exc:
+                    return create_error_response(str(exc))
                 n_tokens = await count_prompt_tokens(
-                    render_messages(spec_msgs), None, {}, state
+                    spec.messages, spec.template_tools, spec.chat_template_kwargs or {}, state
                 )
                 return TokenizeResponse(tokens=n_tokens)
             # Raw text path: direct tokenizer encode, no chat template.

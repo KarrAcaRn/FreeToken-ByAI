@@ -67,3 +67,41 @@ def test_tokenize_response_model_defaults():
     assert req.add_special_tokens is True
     req2 = TokenizeRequest(messages=[{"role": "user", "content": "hi"}])
     assert req2.input is None
+
+def test_tokenize_messages_converts_like_a_chat_completion(client, monkeypatch):
+    # tools, chat_template_kwargs, reasoning_effort and the server's default thinking mode
+    # all change the rendered prompt, so the count must see them as a generation would.
+    import freetoken.server.openai_api as openai_api
+
+    seen = {}
+
+    async def fake_count(messages, tools, ctk, state):
+        seen.update(messages=messages, tools=tools, ctk=ctk)
+        return 42
+
+    monkeypatch.setattr(openai_api, "count_prompt_tokens", fake_count)
+    tool = {
+        "type": "function",
+        "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}},
+    }
+    resp = client.post(
+        "/v1/tokenize",
+        json={
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "tools": [tool],
+            "chat_template_kwargs": {"custom": 1},
+            "reasoning_effort": "high",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["tokens"] == 42
+    assert seen["messages"] == [{"role": "user", "content": "hi"}]
+    assert seen["tools"] and seen["tools"][0]["function"]["name"] == "get_weather"
+    assert seen["ctk"]["custom"] == 1
+    assert seen["ctk"]["enable_thinking"] is True
+    assert seen["ctk"]["reasoning_effort"] == "high"
+
+
+def test_tokenize_messages_rejects_an_invalid_request(client):
+    resp = client.post("/v1/tokenize", json={"messages": [{"role": "user"}], "tools": "nope"})
+    assert resp.status_code == 400
