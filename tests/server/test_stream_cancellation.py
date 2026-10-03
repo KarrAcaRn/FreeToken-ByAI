@@ -295,3 +295,14 @@ def test_non_stream_connected_client_gets_result_without_abort(monkeypatch):
 
     assert result["choices"][0]["message"]["content"] == "Hi"
     assert state.aborted == []
+
+
+def test_no_base_http_middleware_hides_client_disconnects():
+    # Starlette's BaseHTTPMiddleware (@app.middleware("http")) never passes the client's
+    # disconnect to the endpoint, so request.is_disconnected() stays False and an abandoned
+    # non-streaming request decodes to max_tokens. Every middleware on the app must be pure ASGI.
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    from freetoken.server.api_server import app
+
+    assert all(m.cls is not BaseHTTPMiddleware for m in app.user_middleware)

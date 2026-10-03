@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Literal
 
 import uvicorn
 from fastapi import FastAPI, Request
+from starlette.datastructures import Headers
 from fastapi.responses import JSONResponse, StreamingResponse
 from freetoken import __version__
 from freetoken.core import SamplingParams
@@ -504,38 +505,59 @@ def _served_model_name() -> str | None:
     return getattr(cfg, "served_model_name", None)
 
 
-@app.middleware("http")
-async def _record_request_middleware(request: Request, call_next):
+class _RecordRequestMiddleware:
     """Time every generation request into the ring for /v1/requests + /v1/stats p95. Single-
     model server, so model = served_model_name; stream is inferred from the response media
-    type. Token counts are P3 (SSE usage arrives after the handler returns) — kept as None."""
-    path = request.url.path
-    if path.startswith(_UNTRACKED_REQUEST_PREFIXES) or not path.startswith(
-        _TRACKED_REQUEST_PREFIXES
-    ):
-        return await call_next(request)
-    import time as _time
+    type. Token counts are P3 (SSE usage arrives after the handler returns) — kept as None.
 
-    start = _time.monotonic()
-    response = await call_next(request)
-    duration_ms = int((_time.monotonic() - start) * 1000)
-    ctype = response.headers.get("content-type", "")
-    request_ring.record_request(
-        request_ring.RequestRecord(
-            ts=_time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-            method=request.method,
-            path=path,
-            status=response.status_code,
-            model=_served_model_name(),
-            duration_ms=duration_ms,
-            ttft_ms=None,
-            prompt_tokens=None,
-            completion_tokens=None,
-            stream=ctype.startswith("text/event-stream"),
-            error=None,
-        )
-    )
-    return response
+    Pure ASGI rather than ``@app.middleware("http")``: Starlette's BaseHTTPMiddleware does not
+    pass the client's disconnect through to the endpoint, so ``request.is_disconnected()``
+    never turned true and an abandoned non-streaming request decoded to max_tokens. The
+    duration is still taken at response start, where ``call_next`` used to return."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if (
+            scope["type"] != "http"
+            or path.startswith(_UNTRACKED_REQUEST_PREFIXES)
+            or not path.startswith(_TRACKED_REQUEST_PREFIXES)
+        ):
+            await self.app(scope, receive, send)
+            return
+        import time as _time
+
+        start = _time.monotonic()
+
+        async def send_recording(message):
+            if message["type"] == "http.response.start":
+                ctype = ""
+                for name, value in message.get("headers", ()):
+                    if name.lower() == b"content-type":
+                        ctype = value.decode("latin-1")
+                request_ring.record_request(
+                    request_ring.RequestRecord(
+                        ts=_time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                        method=scope["method"],
+                        path=path,
+                        status=message["status"],
+                        model=_served_model_name(),
+                        duration_ms=int((_time.monotonic() - start) * 1000),
+                        ttft_ms=None,
+                        prompt_tokens=None,
+                        completion_tokens=None,
+                        stream=ctype.startswith("text/event-stream"),
+                        error=None,
+                    )
+                )
+            await send(message)
+
+        await self.app(scope, receive, send_recording)
+
+
+app.add_middleware(_RecordRequestMiddleware)
 
 
 class CacheRebuildRequest(BaseModel):
@@ -627,34 +649,50 @@ def _resolve_num_swa_pages(state: FrontendManager, req: CacheRebuildRequest) -> 
     return max(1, -(-window_tokens // swa_page_size))  # ceil-div to the pool's page unit
 
 
-@app.middleware("http")
-async def _api_key_middleware(request: Request, call_next):
+class _ApiKeyMiddleware:
     """Reject any request without ``Authorization: Bearer <api_key>`` when a key is set.
 
-    Registered after ``_record_request_middleware`` so it runs *before* it (Starlette wraps the
+    Added after ``_RecordRequestMiddleware`` so it runs *before* it (Starlette wraps the
     last-added middleware outermost): a 401 never lands in the request ring or a handler. CORS
     preflights (OPTIONS) carry no credentials by design and pass through; the CORS middleware
     installed at startup is outer still, so it answers them. Constant-time compare, and the
-    same body shape the OpenAI-compatible routes use for errors."""
-    key = _API_KEY
-    if key is None or request.method == "OPTIONS" or request.url.path in _API_KEY_OPEN_PATHS:
-        return await call_next(request)
-    scheme, _, token = request.headers.get("authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not hmac.compare_digest(
-        token.strip().encode("utf-8"), key.encode("utf-8")
-    ):
-        return JSONResponse(
-            status_code=401,
-            headers={"WWW-Authenticate": "Bearer"},
-            content={
-                "error": {
-                    "message": "Invalid or missing API key (Authorization: Bearer <key>).",
-                    "type": "authentication_error",
-                    "code": 401,
-                }
-            },
-        )
-    return await call_next(request)
+    same body shape the OpenAI-compatible routes use for errors. Pure ASGI for the same
+    disconnect reason as ``_RecordRequestMiddleware``."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        key = _API_KEY
+        if (
+            scope["type"] != "http"
+            or key is None
+            or scope["method"] == "OPTIONS"
+            or scope.get("path", "") in _API_KEY_OPEN_PATHS
+        ):
+            await self.app(scope, receive, send)
+            return
+        scheme, _, token = Headers(scope=scope).get("authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+            token.strip().encode("utf-8"), key.encode("utf-8")
+        ):
+            response = JSONResponse(
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+                content={
+                    "error": {
+                        "message": "Invalid or missing API key (Authorization: Bearer <key>).",
+                        "type": "authentication_error",
+                        "code": 401,
+                    }
+                },
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_ApiKeyMiddleware)
 
 
 @app.post("/v1/cache/rebuild")
