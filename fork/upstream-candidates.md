@@ -8,6 +8,7 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | ft info + pre-load memory preflight | 6890aeb, 291d603, 63e1752 | **Opened as #595** (branch `feat/ft-info`); follow-ups once #562/#574 and #354/#408 merge upstream |
 | Load dense Gemma-4 GGUFs end to end | 5b0cb77 (merge of #359), 7f2fc79 | Candidate, see below |
 | bench_serving: --api-key and the zero-hit cache report | b36d49d, 23d92b6 (on top of #341) | Candidate, see below |
+| Pure ASGI middlewares, so #222's non-streaming abort works | f8de64f (on top of #222) | Candidate, see below |
 
 ## Load dense Gemma-4 GGUFs end to end
 
@@ -59,3 +60,21 @@ decode ~150 tok/s. `tests/benchmarks/test_bench_serving.py` (16 tests) passes.
 
 How to send it: #341 is still open, so the natural route is to suggest both fixes there (review
 comment or a PR against its branch); otherwise a follow-up PR once #341 merges.
+
+## Pure ASGI middlewares, so #222's non-streaming abort works
+
+Upstream PR #222 (Artemowka22, open) aborts an abandoned non-streaming request once
+`request.is_disconnected()` turns true. Starlette's BaseHTTPMiddleware (`@app.middleware("http")`)
+never passes the client's disconnect to the endpoint, and upstream main already has one
+(`_record_request_middleware`), so in a real server that check never fires - #222's own tests use
+mocks. f8de64f rewrites the middlewares as pure ASGI (same order; the request ring still records
+at response start) and adds a test that keeps BaseHTTPMiddleware off the app.
+
+Tested: Qwen/Qwen3-0.6B on an RTX 4090, `ft serve --max-running-requests 1`; a 4000-token
+non-streaming chat request dropped after 1 s: the next request waited 7.4 s before (the abandoned
+one decoded to the end), 0.12 s after. A minimal FastAPI repro shows the cause in isolation
+(endpoint sees the disconnect after 0.3 s without the middleware, never with it).
+
+How to send it: suggest it on #222 (it is the missing piece for that PR), or as its own small
+fix PR that also benefits upstream main (its _record_request_middleware alone hides disconnects
+from every handler). On main only the request-ring middleware exists (no --api-key yet).

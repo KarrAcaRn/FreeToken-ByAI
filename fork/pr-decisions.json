@@ -1617,5 +1617,81 @@
       "skywalk1411 <61213518+skywalk1411@users.noreply.github.com>"
     ],
     "revisit": "after-queue"
+  },
+  "231": {
+    "number": 231,
+    "title": "feat(moe): --moe-collect-stats, so expert-cache behaviour is measurable",
+    "head_sha": "d5c9d958f0d7",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "Wires the existing offload-cache counters to a --moe-collect-stats flag and logs miss rate, worst layers and a routing oracle bound every 256 decode steps. Conflicts with next's disk-tier options (#337) resolved by keeping both. Live on Qwen3.6-35B-A3B-NVFP4: miss_rate 0.008, oracle hit 0.999 vs realized 0.992 (the cache is near-optimal); decode ~137 vs ~139 tok/s without the flag.",
+    "commits": [
+      "3eb11ae"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Victor Cruz <vcruz305@gmail.com>"
+    ]
+  },
+  "230": {
+    "number": 230,
+    "title": "feat(server): add TLS certificate support",
+    "head_sha": "a30996865a8b",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "--ssl-certfile/--ssl-keyfile passed to uvicorn (both required together, not with --shell-mode). Conflicts with --api-key/--dist-port/NVFP4 KV docs resolved by keeping all. Live with a self-signed cert: HTTPS 200, plain HTTP refused.",
+    "commits": [
+      "799bdbe"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Carlos Alvarado <carlos-alvarado@outlook.com>"
+    ]
+  },
+  "224": {
+    "number": 224,
+    "title": "feat(server): OpenAI-compatible logprobs for chat and legacy completions",
+    "head_sha": "9a48a4bf5728",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "Sampled-token logprobs (logprobs/top_logprobs) for /v1/chat/completions and /v1/completions, raw pre-temperature values, fail-closed (400) on chat when a reasoning parser or tool parsing would hide tokens. Eight conflicts with next resolved by keeping both sides (penalties #527 and greedy mask #471 in the sampler, metrics #504, MoE stats #231, default thinking mode, #222's disconnect-watched drain). Live on Qwen3-0.6B: /v1/completions logprobs plausible and the greedy token is always top-1; chat logprobs are refused while the qwen3 reasoning parser is on (by design - a limitation for Qwen thinking models). Qwen3.6 MoE decode unchanged (~139 tok/s).",
+    "commits": [
+      "b4fcc5d"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "mac <av_samarin@mail.ru>"
+    ]
+  },
+  "223": {
+    "number": 223,
+    "title": "fix(server): validate sampling params and rebuild timeout at the API layer",
+    "head_sha": "c10f472a5ceb",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "temperature < 0, top_p outside (0, 1], top_k == 0 and non-finite values now give a 400 instead of failing deeper; the cache-rebuild timeout is bounded. Test conflict with #504's metrics tests resolved by keeping both. Live: top_p 0 -> 400.",
+    "commits": [
+      "d36d5dc"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "mac <av_samarin@mail.ru>"
+    ]
+  },
+  "222": {
+    "number": 222,
+    "title": "fix(server): guarantee AbortMsg delivery on stream cancellation",
+    "head_sha": "d803e061fced",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted-with-fixups",
+    "reason": "Delivers the abort from the stream wrapper's finally (any way the stream dies) and watches non-streaming requests for disconnects. Conflict with next's SSE keepalive loop (6e63b8f) resolved by keeping the loop and moving the abort into the finally; the PR's test stub gained #504's prefill_ms. Live on Qwen3-0.6B the non-streaming part did not work: Starlette's BaseHTTPMiddleware (the request-ring and --api-key middlewares) never passes the disconnect to the handler, so a dropped 4000-token request still decoded to the end (next request waited 7.4 s). Fixup f8de64f makes both middlewares pure ASGI: 0.12 s; API key, CORS preflight and the request ring checked live. Upstream candidate.",
+    "commits": [
+      "fbf365c",
+      "f8de64f"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "mac <av_samarin@mail.ru>"
+    ]
   }
 }
