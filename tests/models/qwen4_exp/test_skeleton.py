@@ -131,6 +131,66 @@ def test_hc_merged_gemm_layout_and_top_level_mixer():
     assert torch.allclose(x, ref_x, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("with_shared", [False, True])
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("cuda", marks=requires_cuda)]
+)
+def test_hc_combine_norm_matches_combine_then_mix(device: str, with_shared: bool):
+    """combine_norm + mix(R, rn) is bitwise the split combine -> mix chain it replaces in the layer."""
+    from freetoken.utils.torch_utils import torch_dtype
+
+    config = _config()
+    args = config.qwen4_args
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    with torch.device(device), torch_dtype(dtype):
+        hc, nxt = GatedResidual(config), GatedResidual(config)
+    gen = torch.Generator(device=device).manual_seed(4)
+    _fill(hc, gen)
+    _fill(nxt, gen)
+
+    kw = {"generator": gen, "device": device, "dtype": dtype}
+    R = torch.randn(7, args.ple_state_width, **kw)
+    y = torch.randn(7, args.hidden_size, **kw)
+    _, s = hc.mix(R)
+    shared = gate = None
+    block = y
+    if with_shared:
+        shared = torch.randn(7, args.hidden_size, **kw)
+        gate = torch.rand(7, generator=gen, device=device, dtype=torch.float32)
+        if device == "cuda":
+            from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add
+
+            block = shared_gate_mul_add(y, shared, gate)
+        else:
+            block = (y.float() + gate[:, None] * shared.float()).to(dtype)
+
+    ref_R = hc.combine(R, block, s)
+    ref_x, ref_s = nxt.mix(ref_R)
+    got_R, rn = hc.combine_norm(R, y, s, nxt.hc_norm, shared, gate)
+    got_x, got_s = nxt.mix(got_R, rn)
+
+    assert torch.equal(got_R, ref_R)
+    assert torch.equal(rn, nxt.hc_norm.forward(ref_R))
+    assert torch.equal(got_x, ref_x)
+    assert torch.equal(got_s, ref_s)
+
+
+def test_link_next_norms_skips_ple_boundaries():
+    """A layer fuses its last combine with the next attn hc_norm unless a PLE layer edits R first."""
+    from freetoken.models.qwen4_exp.model import link_next_norms
+
+    def layer(ple):
+        return SimpleNamespace(ple=ple, attn_hyper_connection=SimpleNamespace(hc_norm=object()))
+
+    layers = [layer(None), layer(object()), layer(None), layer(None)]
+    final = object()
+    link_next_norms(layers, final)
+    assert layers[0]._next_norm is None
+    assert layers[1]._next_norm is layers[2].attn_hyper_connection.hc_norm
+    assert layers[2]._next_norm is layers[3].attn_hyper_connection.hc_norm
+    assert layers[3]._next_norm is final
+
+
 # --------------------------------------------------------------------------------------
 # PLE
 # --------------------------------------------------------------------------------------
@@ -427,12 +487,9 @@ def test_shared_gate_kernels_match_torch(num_tokens, hidden, dtype):
     assert (fused.float() - ref).abs().max() <= (eager.float() - ref).abs().max() + 1e-6
 
 
-@requires_cuda
-def test_decoder_stack_prefill_and_decode(monkeypatch):
-    """Ragged bs=3 prefill then a bs=3 decode step through the whole model with dummy weights."""
-    from freetoken.kvcache.linear_state_pool import LinearStatePool
+def _decoder_stack(monkeypatch):
+    """The whole toy model on CUDA with dummy weights, the stub GDN mixer and a resident PLE table."""
     from freetoken.models.qwen4_exp import model as model_module
-    from freetoken.models.qwen4_exp.attention import TorchDenseQSAReference
     from freetoken.models.qwen4_exp.ple import GpuResidentTable
     from freetoken.utils.torch_utils import torch_dtype
 
@@ -453,6 +510,13 @@ def test_decoder_stack_prefill_and_decode(monkeypatch):
         ple.ple_embedding.ngram_heads_vocab_sizes.copy_(sizes)
         ple.ple_embedding.ngram_heads_offsets.copy_(offsets)
         ple.ple_embedding.attach_table(GpuResidentTable(table, dtype=dtype))
+    return model, config, device, dtype
+
+
+def _prefill(model, config, device, dtype):
+    """Ragged bs=3 prefill on fresh attention / linear state; returns (logits, ctx, reqs, prompts)."""
+    from freetoken.kvcache.linear_state_pool import LinearStatePool
+    from freetoken.models.qwen4_exp.attention import TorchDenseQSAReference
 
     num_slots, max_len = 4, 64
     pool = LinearStatePool(
@@ -484,6 +548,14 @@ def test_decoder_stack_prefill_and_decode(monkeypatch):
     )
     with ctx.forward_batch(batch):
         logits = model.forward()
+    return logits, ctx, reqs, prompts
+
+
+@requires_cuda
+def test_decoder_stack_prefill_and_decode(monkeypatch):
+    """Ragged bs=3 prefill then a bs=3 decode step through the whole model with dummy weights."""
+    model, config, device, dtype = _decoder_stack(monkeypatch)
+    logits, ctx, reqs, prompts = _prefill(model, config, device, dtype)
     assert logits.shape == (len(prompts), config.vocab_size)
     assert torch.isfinite(logits.float()).all()
 
@@ -502,3 +574,26 @@ def test_decoder_stack_prefill_and_decode(monkeypatch):
         decode_logits = model.forward()
     assert decode_logits.shape == (len(prompts), config.vocab_size)
     assert torch.isfinite(decode_logits.float()).all()
+
+
+@requires_cuda
+def test_decoder_stack_fused_combine_norm_is_bitwise_split(monkeypatch):
+    """Fusing every combine with the next hc_norm (and the shared-expert epilogue) changes no bit of the logits."""
+    from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add
+
+    model, config, device, dtype = _decoder_stack(monkeypatch)
+    # layer 0 feeds the PLE layer and stays split; the rest fuse across the layer boundary
+    layers = model.model.layers.op_list
+    assert layers[0]._next_norm is None
+    assert all(layer._next_norm is not None for layer in layers[1:])
+    fused, *_ = _prefill(model, config, device, dtype)
+
+    def split_combine_norm(self, R, y, s, norm, shared=None, gate=None):
+        if shared is not None:
+            y = shared_gate_mul_add(y, shared, gate)
+        R = self.combine(R, y, s)
+        return R, norm.forward(R)
+
+    monkeypatch.setattr(GatedResidual, "combine_norm", split_combine_norm)
+    split, *_ = _prefill(model, config, device, dtype)
+    assert torch.equal(fused, split)

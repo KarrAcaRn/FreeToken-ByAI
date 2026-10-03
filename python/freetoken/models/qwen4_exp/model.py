@@ -5,26 +5,31 @@ The residual state is ``R [T, hc_count*hidden]`` end to end: the embedding is re
 its output back, and the top-level mixer collapses them once before ``lm_head``. There is no
 input/post layernorm and no final ``model.norm`` -- the hyper-connection norms are the only ones.
 
-Layer contract (frozen): ``forward(R [T, hc*hidden], batch) -> R' [T, hc*hidden]`` with an
-immediate combine::
+Layer contract: ``forward(R [T, hc*hidden], batch, Rn) -> (R', Rn')`` with an immediate combine::
 
     R  = R + ple(R, batch)                 # zero-based layer 1 only
     x, s = attn_hc.mix(R); y = (GDN | QSA)(x); R = attn_hc.combine(R, y, s)
     x, s = mlp_hc.mix(R);  y = MoE(x);        R = mlp_hc.combine(R, y, s)
+
+Each combine is fused with the hc_norm of the mix that reads its result (``combine_norm``), and
+the mlp side also folds in the MoE shared-expert epilogue. ``Rn`` is that normed residual handed
+across the layer boundary (the last layer feeds ``hyper_connection_mixer``); it is None into a PLE
+layer, whose ``R + ple(R)`` changes the norm input.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Sequence, Tuple
 
 import torch
 from freetoken.core import get_global_ctx
+from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add
 from freetoken.layers import BaseOP, OPList, ParallelLMHead, VocabParallelEmbedding
 from freetoken.models.blocks import BaseLLMModel
 from freetoken.utils import nvtx_annotate
 
 from .attention import Qwen4ExpAttention
-from .hc import GatedResidual
+from .hc import GatedResidual, GroupedPlusOneRMSNorm
 from .moe import Qwen4ExpMoE
 from .ple import PLELayer
 from freetoken.models.blocks import embed_input_ids
@@ -71,19 +76,36 @@ class Qwen4ExpDecoderLayer(BaseOP):
         self.ple = (
             PLELayer(config, layer_id, prefix=f"{prefix}.ple") if layer_id in config.qwen4_args.ple_layer_ids else None
         )
+        # the hc_norm that reads this layer's output; underscored so it stays out of the state dict
+        self._next_norm: GroupedPlusOneRMSNorm | None = None
 
     @nvtx_annotate("Layer_{}", layer_id_field="_layer_id")
-    def forward(self, hidden: torch.Tensor, batch: Batch) -> torch.Tensor:
+    def forward(
+        self, hidden: torch.Tensor, batch: Batch, normed: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor | None]:
         if self.ple is not None:
+            assert normed is None, "a PLE layer must norm R + ple(R) itself"
             hidden = hidden + self.ple.forward(hidden, batch)
-        block_input, inject = self.attn_hyper_connection.mix(hidden)
+        attn_hc, mlp_hc = self.attn_hyper_connection, self.mlp_hyper_connection
+        block_input, inject = attn_hc.mix(hidden, normed)
         if self._is_linear:
             block_output = self.linear_attn.forward(block_input)
         else:
             block_output = self.self_attn.forward(block_input, batch)
-        hidden = self.attn_hyper_connection.combine(hidden, block_output, inject)
-        block_input, inject = self.mlp_hyper_connection.mix(hidden)
-        return self.mlp_hyper_connection.combine(hidden, self.mlp.forward(block_input), inject)
+        hidden, normed = attn_hc.combine_norm(hidden, block_output, inject, mlp_hc.hc_norm)
+        block_input, inject = mlp_hc.mix(hidden, normed)
+        routed, shared, gate = self.mlp.forward_parts(block_input)
+        if self._next_norm is None:
+            return mlp_hc.combine(hidden, shared_gate_mul_add(routed, shared, gate), inject), None
+        return mlp_hc.combine_norm(hidden, routed, inject, self._next_norm, shared, gate)
+
+
+def link_next_norms(layers: Sequence[Qwen4ExpDecoderLayer], final_norm: GroupedPlusOneRMSNorm) -> None:
+    """Point each layer at the hc_norm that reads its output, or None when a PLE layer comes next."""
+    for layer, nxt in zip(layers, layers[1:]):
+        layer._next_norm = None if nxt.ple is not None else nxt.attn_hyper_connection.hc_norm
+    if layers:
+        layers[-1]._next_norm = final_norm
 
 
 class Qwen4ExpModel(BaseOP):
@@ -100,6 +122,7 @@ class Qwen4ExpModel(BaseOP):
             ]
         )
         self.hyper_connection_mixer = GatedResidual(config, use_combine=False, prefix=f"{prefix}.hyper_connection_mixer")
+        link_next_norms(self.layers.op_list, self.hyper_connection_mixer.hc_norm)
         # plain tuple (not an OP child), so it never shows up in the state dict
         self._ple = tuple(layer.ple for layer in self.layers.op_list if layer.ple is not None)
 
@@ -118,13 +141,14 @@ class Qwen4ExpModel(BaseOP):
             meta = build_ple_metadata(batch, self._ple[0].args, input_ids.device)
             for ple in self._ple:  # gather the pinned-host PLE rows while the early layers run
                 ple.start_prefetch(batch, meta)
+        normed = None
         for layer in self.layers.op_list:
-            hidden = layer.forward(hidden, batch)
+            hidden, normed = layer.forward(hidden, batch, normed)
         if meta is not None:
             # single writer: the layers only read the context, so a second PLE layer's
             # prefetch sees the un-rolled window
             commit_ngram_context(meta, getattr(batch, "fla_metadata", None))
-        return self.hyper_connection_mixer.mix(hidden)[0]
+        return self.hyper_connection_mixer.mix(hidden, normed)[0]
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
@@ -227,4 +251,5 @@ __all__ = [
     "Qwen4ExpForConditionalGeneration",
     "Qwen4ExpModel",
     "build_linear_mixer",
+    "link_next_norms",
 ]

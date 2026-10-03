@@ -19,6 +19,20 @@ def _pdl_supported() -> bool:
     return is_sm90_supported()
 
 
+# hc_combine_norm must reproduce grouped_gemma_rmsnorm bit for bit, and the fp32 sum's
+# reduction tree follows the tile shape and the warp count, so both launches share them.
+_NORM_WARPS = 4
+
+
+@triton.jit
+def _gemma_rmsnorm(x, w, GROUP_DIM: tl.constexpr, EPS: tl.constexpr):
+    rrms = tl.rsqrt(tl.sum(x * x) / GROUP_DIM + EPS)
+    # Gemma's (1 + w) affine is written this way to lower to an FMA.
+    y = x * rrms
+    y += y * w.to(tl.float32)
+    return y
+
+
 @triton.jit
 def _grouped_gemma_rmsnorm_kernel(
     x_ptr,
@@ -52,11 +66,7 @@ def _grouped_gemma_rmsnorm_kernel(
 
     x = tl.load(x_ptr + row * stride_x + offsets, mask, other=0.0).to(tl.float32)
     w = tl.load(w_ptr + w_offs, mask, other=0.0)
-
-    rrms = tl.rsqrt(tl.sum(x * x) / GROUP_DIM + EPS)
-    # Gemma's (1 + w) affine is written this way to lower to an FMA.
-    y = x * rrms
-    y += y * w.to(tl.float32)
+    y = _gemma_rmsnorm(x, w, GROUP_DIM, EPS)
 
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
@@ -85,6 +95,7 @@ def grouped_gemma_rmsnorm(
         W_SHARED=weight.numel() == group_dim,
         EPS=eps,
         launch_pdl=_pdl_supported(),
+        num_warps=_NORM_WARPS,
     )
     return y
 
@@ -277,12 +288,15 @@ def hc_combine(
 @triton.jit
 def _hc_combine_norm_kernel(
     block_ptr,
+    shared_ptr,
+    gate_ptr,
     res_ptr,
     inj_ptr,
     w_ptr,
     out_ptr,
     y_ptr,
     stride_block,
+    stride_shared,
     stride_res,
     stride_inj,
     stride_out,
@@ -291,55 +305,46 @@ def _hc_combine_norm_kernel(
     HC: tl.constexpr,
     W_SHARED: tl.constexpr,
     EPS: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    HAS_SHARED: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
-    HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
-    NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
-    NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
+    # One program per (row, stream) over a flat next_pow2(HC_DIM) vector: the same tile,
+    # program split and _gemma_rmsnorm as _grouped_gemma_rmsnorm_kernel, so the fp32 sum
+    # reduces in the same order. A padded 2D tile would change the tree and the bits.
+    BLOCK_SIZE: tl.constexpr = triton.next_power_of_2(HC_DIM)
 
-    row = tl.program_id(0).to(tl.int64)
-    stream = tl.program_id(1)
-    offs_hc = tl.arange(0, HC_PAD)
-    mask_hc = offs_hc < HC
-    tile_ids = tl.arange(0, NUM_TILES_PAD)
-    offs_inner = tile_ids[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
-    mask_inner = offs_inner < HC_DIM
-    offs = stream * HC_DIM + offs_inner
-    # Shared norm weights repeat across streams; per-branch weights use the
-    # same flattened HC layout as the residual.
-    w_offs = offs_inner if W_SHARED else offs
+    pid = tl.program_id(0)
+    stream = pid % HC
+    row = (pid // HC).to(tl.int64)
+
+    offs_g = tl.arange(0, BLOCK_SIZE)
+    offsets = stream * HC_DIM + offs_g
+    mask = offs_g < HC_DIM
+    w_offs = offs_g if W_SHARED else offsets
 
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
 
-    # Start the uncached residual load first, then issue the other combine
-    # loads before consuming any of them.
-    res = tl.load(res_ptr + row * stride_res + offs, mask_inner, other=0.0)
-    inj = tl.load(inj_ptr + row * stride_inj + offs_hc, mask_hc, other=0.0)
-    block = tl.load(block_ptr + row * stride_block + offs_inner, mask_inner, other=0.0)
-    inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
-    inj = tl.sum(tl.where(offs_hc == stream, inj, 0.0))
-    # Round the materialized combine result before normalization. This matches
-    # the unfused combine -> RMSNorm boundary.
-    out = (res.to(tl.float32) + block.to(tl.float32) * inj).to(out_ptr.dtype.element_ty)
-    tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
+    res = tl.load(res_ptr + row * stride_res + offsets, mask, other=0.0)
+    inj = tl.load(inj_ptr + row * stride_inj + stream)
+    block = tl.load(block_ptr + row * stride_block + offs_g, mask, other=0.0).to(tl.float32)
+    if HAS_SHARED:
+        # shared_gate_mul_add's epilogue, rounded where the split path stores it.
+        gate = tl.load(gate_ptr + row)
+        shared = tl.load(shared_ptr + row * stride_shared + offs_g, mask, other=0.0)
+        block = (block + gate * shared.to(tl.float32)).to(block_ptr.dtype.element_ty)
+        block = block.to(tl.float32)
+    w = tl.load(w_ptr + w_offs, mask, other=0.0)
 
-    out = out.to(tl.float32)
-    # Keep the two-axis reduction: flattening the padded tile is ~40% slower
-    # at decode sizes.
-    sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
-    rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
+    inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
+    # Round before the norm: the split path normalizes the stored combine result.
+    out = (res.to(tl.float32) + block * inj).to(out_ptr.dtype.element_ty)
+    y = _gemma_rmsnorm(out.to(tl.float32), w, HC_DIM, EPS)
 
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
-
-    # Loading the weight earlier helps decode but keeps the tile live across
-    # the reduction and regresses larger batches, so defer it to the norm.
-    w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
-    y = out * rrms
-    y += y * w.to(tl.float32)
-    tl.store(y_ptr + row * stride_y + offs, y, mask_inner)
+    tl.store(out_ptr + row * stride_out + offsets, out, mask)
+    tl.store(y_ptr + row * stride_y + offsets, y, mask)
 
 
 def hc_combine_norm(
@@ -349,7 +354,14 @@ def hc_combine_norm(
     norm_weight: torch.Tensor,
     eps: float,
     hc_count: int,
+    shared_output: torch.Tensor | None = None,
+    shared_gate: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """``hc_combine`` followed by ``grouped_gemma_rmsnorm`` of its result, bitwise equal to the pair.
+
+    With ``shared_output`` / ``shared_gate`` the block output is first replaced by
+    ``shared_gate_mul_add(block_output, shared_output, shared_gate)``. Returns (combined, normed).
+    """
     N, DIM = residual.shape
     assert DIM % hc_count == 0
     hc_dim = DIM // hc_count
@@ -360,18 +372,25 @@ def hc_combine_norm(
     assert injection_logits.stride(1) == 1
     assert norm_weight.is_contiguous()
     assert norm_weight.numel() in (hc_dim, DIM)
+    has_shared = shared_output is not None
+    assert has_shared == (shared_gate is not None)
+    if has_shared:
+        assert shared_output.shape == block_output.shape and shared_output.stride(1) == 1
+        assert shared_gate.shape == (N,) and shared_gate.dtype == torch.float32
 
     out = residual.new_empty(residual.shape)
     y = residual.new_empty(residual.shape)
-    BLOCK_SIZE = 512
-    _hc_combine_norm_kernel[(N, hc_count)](
+    _hc_combine_norm_kernel[(N * hc_count,)](
         block_output,
+        shared_output if has_shared else block_output,
+        shared_gate if has_shared else block_output,
         residual,
         injection_logits,
         norm_weight,
         out,
         y,
         block_output.stride(0),
+        shared_output.stride(0) if has_shared else 0,
         residual.stride(0),
         injection_logits.stride(0),
         out.stride(0),
@@ -380,8 +399,9 @@ def hc_combine_norm(
         hc_count,
         W_SHARED=norm_weight.numel() == hc_dim,
         EPS=eps,
-        BLOCK_SIZE=BLOCK_SIZE,
+        HAS_SHARED=has_shared,
         launch_pdl=_pdl_supported(),
+        num_warps=_NORM_WARPS,
     )
     return out, y
 

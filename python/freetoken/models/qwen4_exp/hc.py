@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from freetoken.kernel.triton.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
+    hc_combine_norm,
     hc_gate_mix,
     hc_silu,
 )
@@ -83,6 +84,8 @@ class GatedResidual(BaseOP):
     and ``pad`` zero rows), ``input_mix_weight_up.weight``.
 
     Launch budget on CUDA: ``mix`` is 3 kernels around 2 GEMMs, ``combine`` is 1.
+    ``combine_norm`` folds the next consumer's hc_norm into the combine, so the ``mix`` it feeds
+    (given ``rn``) drops to 2 kernels.
     """
 
     def __init__(self, config: ModelConfig, use_combine: bool = True, *, prefix: str = "") -> None:
@@ -119,14 +122,16 @@ class GatedResidual(BaseOP):
         # both slices keep unit inner stride, so the kernels read them without a copy
         return down[:, : self.lowrank], down[:, self.lowrank : self.lowrank + self.hc_count]
 
-    def _mix_kernel(self, R: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor | None]:
-        rn = grouped_gemma_rmsnorm(R, self.hc_norm.weight, self.hc_norm.eps, self.hc_count)
+    def _mix_kernel(self, R: torch.Tensor, rn: torch.Tensor | None) -> Tuple[torch.Tensor, torch.Tensor | None]:
+        if rn is None:
+            rn = grouped_gemma_rmsnorm(R, self.hc_norm.weight, self.hc_norm.eps, self.hc_count)
         lora, s = self._down(rn)
         gate = self.input_mix_weight_up.forward(hc_silu(lora, self.hc_count))
         return hc_gate_mix(rn, gate, self.hc_count), s
 
-    def _mix_torch(self, R: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor | None]:
-        rn = grouped_plus_one_rms_norm(R, self.hc_norm.weight, self.hc_norm.eps, self.hc_count)
+    def _mix_torch(self, R: torch.Tensor, rn: torch.Tensor | None) -> Tuple[torch.Tensor, torch.Tensor | None]:
+        if rn is None:
+            rn = grouped_plus_one_rms_norm(R, self.hc_norm.weight, self.hc_norm.eps, self.hc_count)
         lora, s = self._down(rn)
         lora = F.silu(lora.float() / self.hc_count)
         gate = self.input_mix_weight_up.forward(lora.to(R.dtype))
@@ -140,15 +145,40 @@ class GatedResidual(BaseOP):
         out = out + y.float().unsqueeze(-2) * inject.unsqueeze(-1)
         return out.flatten(-2).to(R.dtype)
 
-    def mix(self, R: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor | None]:
-        """Return the block input ``x [T, hidden]`` and the inject logits ``s [T, hc_count]`` (None if no combine)."""
-        return self._mix_kernel(R) if R.is_cuda else self._mix_torch(R)
+    def mix(self, R: torch.Tensor, rn: torch.Tensor | None = None) -> Tuple[torch.Tensor, torch.Tensor | None]:
+        """Return the block input ``x [T, hidden]`` and the inject logits ``s [T, hc_count]`` (None if no combine).
+
+        ``rn`` is ``hc_norm(R)`` when an upstream ``combine_norm`` already produced it.
+        """
+        return self._mix_kernel(R, rn) if R.is_cuda else self._mix_torch(R, rn)
 
     def combine(self, R: torch.Tensor, y: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
         """Inject the block output ``y [T, hidden]`` back into every stream of ``R``."""
         if R.is_cuda:
             return hc_combine(R, y, s, self.hc_count)
         return self._combine_torch(R, y, s)
+
+    def combine_norm(
+        self,
+        R: torch.Tensor,
+        y: torch.Tensor,
+        s: torch.Tensor,
+        norm: GroupedPlusOneRMSNorm,
+        shared: torch.Tensor | None = None,
+        gate: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """``combine`` plus ``norm`` of its result, as ``(R', norm(R'))``, bitwise equal to the two calls.
+
+        ``shared`` / ``gate`` fold in the MoE epilogue: ``y`` is the routed output and the block
+        output is ``shared_gate_mul_add(y, shared, gate)``.
+        """
+        assert norm.num_groups == self.hc_count
+        if R.is_cuda:
+            return hc_combine_norm(R, y, s, norm.weight, norm.eps, self.hc_count, shared, gate)
+        if shared is not None:
+            y = (y.float() + gate[:, None] * shared.float()).to(y.dtype)
+        R = self._combine_torch(R, y, s)
+        return R, norm.forward(R)
 
 
 __all__ = ["GatedResidual", "GroupedPlusOneRMSNorm", "grouped_plus_one_rms_norm"]
