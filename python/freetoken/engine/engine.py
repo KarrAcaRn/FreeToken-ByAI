@@ -179,6 +179,31 @@ def _backend_supports_kv_quant(name: str, kv_quant: str) -> bool:
     )
 
 
+def kv_quant_unsupported_reason(model_config, kv_quant: str) -> str | None:
+    """Why ``kv_quant`` cannot serve this model, or None. Shared by the config gate and the
+    pre-load forecast's tips."""
+    if kv_quant == "none":
+        return None
+    # Quantized codes are wired through the pools that hand their rows to a Triton
+    # kernel: plain paged and hybrid-SWA, QSA sparse, and DSA/MLA. QSA's index
+    # tier and DSA's index-key/tail tiers stay bf16; the DSA kernel dequantizes
+    # selected latent rows with their per-token scale. Other sparse families have
+    # no scale-read path and remain rejected before weights load.
+    unsupported = _required_attn_types(model_config) - {
+        AttnType.FULL, AttnType.SWA, AttnType.QSA, AttnType.MLA, AttnType.DSA,
+    }
+    if unsupported:
+        return (
+            f"--kv-cache-dtype {kv_quant} is implemented for the plain paged, "
+            "hybrid-SWA, QSA sparse and DSA/MLA KV pools; this model also needs "
+            f"{', '.join(sorted(t.value for t in unsupported))} attention "
+            "(use --kv-cache-dtype bf16)."
+        )
+    if kv_quant == "nvfp4" and any(spec.head_dim % 16 for spec in model_config.kv_cache_group_specs()):
+        return "--kv-cache-dtype nvfp4 requires head_dim divisible by 16"
+    return None
+
+
 def _resolve_auto_attention_backend(
     required: frozenset[AttnType], *, kv_quant: str = "none"
 ) -> str:
@@ -1750,30 +1775,9 @@ def _adjust_config(config: EngineConfig):
     # which pool families are usable and which backend auto may pick.
     kv_quant = _resolve_kv_quant(getattr(config, "kv_quant", "none"))
     override("kv_quant", kv_quant)
-    if kv_quant == "nvfp4":
-        if required_attn_types - {AttnType.FULL, AttnType.SWA, AttnType.QSA, AttnType.MLA, AttnType.DSA}:
-            raise ValueError(
-                "--kv-cache-dtype nvfp4 requires a paged FULL, hybrid-SWA, QSA, or MLA/DSA KV pool"
-            )
-        for spec in model_config.kv_cache_group_specs():
-            if spec.head_dim % 16:
-                raise ValueError("--kv-cache-dtype nvfp4 requires head_dim divisible by 16")
-    if kv_quant != "none":
-        # Quantized codes are wired through the pools that hand their rows to a Triton
-        # kernel: plain paged and hybrid-SWA, QSA sparse, and DSA/MLA. QSA's index
-        # tier and DSA's index-key/tail tiers stay bf16; the DSA kernel dequantizes
-        # selected latent rows with their per-token scale. Other sparse families have
-        # no scale-read path and remain rejected before weights load.
-        quant_unsupported = required_attn_types - {
-            AttnType.FULL, AttnType.SWA, AttnType.QSA, AttnType.MLA, AttnType.DSA,
-        }
-        if quant_unsupported:
-            raise ValueError(
-                f"--kv-cache-dtype {kv_quant} is implemented for the plain paged, "
-                "hybrid-SWA, QSA sparse and DSA/MLA KV pools; this model also needs "
-                f"{', '.join(sorted(t.value for t in quant_unsupported))} attention "
-                "(use --kv-cache-dtype bf16)."
-            )
+    reason = kv_quant_unsupported_reason(model_config, kv_quant)
+    if reason is not None:
+        raise ValueError(reason)
     _dtype = getattr(config, "dtype", None)  # duck-typed test configs omit it
     if (
         required_attn_types & {AttnType.BSA, AttnType.QSA}
