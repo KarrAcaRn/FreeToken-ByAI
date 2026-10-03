@@ -639,11 +639,8 @@ class OffloadMoeCache:
 
     def _invalidate_prefill_buffer(self, buffer_id: int) -> None:
         slot_start = buffer_id * self.num_experts
-        # One fixed-shape launch. The previous boolean-mask index
-        # (slot_for_id[old_ids[old_ids >= 0]] = -1) has a data-dependent shape, so every
-        # call hid a device-to-host sync -- and with two buffer reuses per chunk x 48
-        # layers the host waited, per layer, for ALL enqueued GPU work (the cached-context
-        # attention included), serializing the prefill-overlap pipeline.
+        # Fixed shape on purpose: a boolean-mask index here hid a sync per layer that drained
+        # the queued context attention and serialized the prefill-overlap pipeline.
         from freetoken.kernel.triton.moe import invalidate_prefill_slots
 
         invalidate_prefill_slots(

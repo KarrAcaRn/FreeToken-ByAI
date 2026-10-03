@@ -1,21 +1,5 @@
-"""Single-launch invalidation of the MoE prefill overlap buffers.
-
-``OffloadMoeCache._invalidate_prefill_buffer`` runs twice per prefill chunk (once per
-double-buffer slot) and used to clear the buffer's slot map with a boolean-mask index:
-
-    slot_for_id.view(-1)[old_ids[old_ids >= 0].long()] = -1
-
-A boolean index produces a data-dependent shape, so every call hid a device-to-host
-synchronization. With two buffer reuses per chunk x 48 layers, the host waited -- per
-layer -- for ALL enqueued GPU work (the cached-context attention included) before
-prefetching the next layer, which serialized the prefill-overlap pipeline. On long
-cached contexts that turned a ~3 s chunk into a 20-150 s turn (py-spy: 92% of the
-scheduler inside this invalidation + ``synchronize``, GPU 0-3% utilized).
-
-This kernel is fixed-shape: one launch, no synchronization, identical result. Zeroing
-``usage`` here (instead of a separate ``zero_``) keeps the buffer's slots as the
-argmin(usage) eviction victims, exactly like the code it replaces.
-"""
+"""Single-launch invalidation of the MoE prefill overlap buffers: fixed-shape, so unlike the
+boolean-mask index it replaces it never hides a device-to-host sync per layer."""
 
 import torch
 import triton
