@@ -1281,13 +1281,14 @@
     "head_sha": "c7be5d068b3c",
     "reviewed_at": "2026-10-03",
     "decision": "deferred",
-    "reason": "Serializes 'auxiliary' expert banks (a second row geometry) into a nested FTW checkpoint and loads them back. Nothing on next produces auxiliary banks: the only producer of ExpertBanks.auxiliary_sources is the still-undecided older PR #260, so this is stacked on it. Review together with #260.",
+    "reason": "Serializes 'auxiliary' expert banks (a second row geometry) into a nested FTW checkpoint and loads them back. Nothing on next produces auxiliary banks: the only producer of ExpertBanks.auxiliary_sources is the still-undecided older PR #260, so this is stacked on it. Review together with #260, which is itself deferred until after the queue (ROCm).",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "Erik Bogado <erikbogado@gmail.com>"
     ],
-    "revisit_with": 260
+    "revisit_with": 260,
+    "revisit": "after-queue"
   },
   "316": {
     "number": 316,
@@ -1561,5 +1562,60 @@
     "authors": [
       "yuyi2439 <68320855+yuyi2439@users.noreply.github.com>"
     ]
+  },
+  "253": {
+    "number": 253,
+    "title": "feat(sm70): support Volta / Tesla V100 via torch 2.10 cu128 downgrade",
+    "head_sha": "8a00a1e9339e",
+    "reviewed_at": "2026-10-04",
+    "decision": "rejected",
+    "reason": "Makes V100 (sm_70) work by downgrading the whole stack for everyone: torch 2.11/cu130 -> 2.10/cu128, flashinfer cu13 -> cu12, and sglang-kernel dropped from the accel extra. On every newer GPU (incl. the RTX 4090 here) that removes native kernels (sgl_kernel conv, the fa backend) and pins an older torch. Volta support would need to be an optional build variant, not a global downgrade.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "fireflyer <fireflyer@localhost>"
+    ]
+  },
+  "251": {
+    "number": 251,
+    "title": "add a dockerfile ( based-cuda )",
+    "head_sha": "23d8f711e2df",
+    "reviewed_at": "2026-10-04",
+    "decision": "rejected",
+    "reason": "Third Dockerfile PR (after #380, #295). The image git-clones upstream instead of building the checkout (a fork image would hold none of the fork's changes), its CMD runs `python -m ft`, a module that does not exist (the package is freetoken), and it does not pass --host 0.0.0.0, so the server would not be reachable from outside the container.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "JuanForge <contact.juan.coding@gmail.com>"
+    ]
+  },
+  "245": {
+    "number": 245,
+    "title": "fix(engine): handle torch 2.9 allocator API deprecation",
+    "head_sha": "c269e70541ff",
+    "reviewed_at": "2026-10-04",
+    "decision": "reimplemented",
+    "reason": "torch deprecates torch.cuda.memory._set_allocator_settings (used to enable expandable segments). The PR falls back to torch._C._cuda_setAllocatorSettings, which torch 2.11 (the pinned version) does not have; torch's own warning names torch._C._accelerator_setAllocatorSettings. Ours prefers that API and keeps the old call as fallback, with a test for both paths. On torch 2.11.0+cu130: no deprecation warning, allocator segments are expandable.",
+    "commits": [
+      "36a467b"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "fangyuan-3149 <314945674@qq.com>"
+    ]
+  },
+  "241": {
+    "number": 241,
+    "title": "rocm: fix native extensions, kernel JIT builds, and Triton PTX fallbacks for gfx1150",
+    "head_sha": "76a759b02798",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "ROCm fixes for gfx1150 (native extensions, kernel JIT builds, Triton PTX fallbacks). Not judged on its merits yet: ROCm cannot be run or verified here. Note it also edits shared CUDA headers (utils.cuh, fast_index_copy.cuh, gguf dispatch.h), so the CUDA side must be re-tested when it comes back. Revisit after the queue with the other ROCm PRs (#217, #260, #535, #317).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "skywalk1411 <61213518+skywalk1411@users.noreply.github.com>"
+    ],
+    "revisit": "after-queue"
   }
 }
