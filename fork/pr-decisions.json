@@ -1418,5 +1418,78 @@
       "fangyuan-3149 <314945674@qq.com>"
     ],
     "superseded_by": "bd8bd44 (#354), 853a88d (#408), 2dbb852 (#575)"
+  },
+  "278": {
+    "number": 278,
+    "title": "fix(moe): match the benchbw verdict to the served model's expert size",
+    "head_sha": "0111d42107c7",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "The offload-vs-hybrid pick used the ft bench bw verdict measured on one geometry per expert format (nvfp4: 7.6 MB experts) for every model; small-expert models (Qwen3.6-35B-A3B, 1.7 MB) inherited it. Now a per-model bench at the served geometry wins and a dtype verdict applies only within 2x of the model's expert size. Conflict with next's offload-default / unified-memory gate resolved by keeping both. Measured on the RTX 4090 with Qwen3.6-35B-A3B-NVFP4 (profile in a scratch path only): here even the per-model bench says hybrid (CPU 37.4 vs PCIe 12.0 GB/s), yet hybrid decodes 21 tok/s vs 140 tok/s for offload, because the bench ignores that offload keeps ~88% of the experts resident. So the PR is a strict improvement but does not cover this machine's case; noted as a follow-up (residency-aware pick).",
+    "commits": [
+      "c16330f"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "bernimccoy <85797556+bernimccoy@users.noreply.github.com>"
+    ]
+  },
+  "275": {
+    "number": 275,
+    "title": "fix: [BUG] qwen3_5 dense: mixed-precision NVFP4 crashes in ct_bf16_fuse (Float8 × BFloat16 promotion)",
+    "head_sha": "1ca1d765579e",
+    "reviewed_at": "2026-10-04",
+    "decision": "superseded",
+    "reason": "Fixes a crash fusing per-tensor FP8 GDN projections with bf16 on a dense mixed NVFP4 export (issue #238), in a loader function next no longer has. Superseded by #438 (0ffd5c8); checked by adding the layout to next's tests (1cc57ba, 'ct_mixed_dense'): loads, the fused qkvz stays native fp8 with per-part scales, the MLP stays NVFP4.",
+    "commits": [
+      "1cc57ba"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Yausen <yuyi2439@qq.com>"
+    ],
+    "superseded_by": "0ffd5c8 (#438)"
+  },
+  "270": {
+    "number": 270,
+    "title": "glm5_next: support GLM-5.3-Flash (hybrid KDA + DSA, mHC, NVFP4 expert offload)",
+    "head_sha": "857c167192fa",
+    "reviewed_at": "2026-10-04",
+    "decision": "superseded",
+    "reason": "An independent GLM-5.3-Flash implementation plus a vision/video tower behind FREETOKEN_GLM5_VISION (3350 lines). next has upstream's own GLM-5.3-Flash support (#507, 865ed79) and image input for it (#479, 3faef36); the model cannot run here anyway.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Cerynitius <ruixiu_zhang@outlook.com>"
+    ],
+    "superseded_by": "865ed79 (#507), 3faef36 (#479)"
+  },
+  "269": {
+    "number": 269,
+    "title": "fix(server): report why a tokenizer/detokenizer worker died during load",
+    "head_sha": "f139235a7599",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "A tokenizer/detokenizer that died at startup reached the supervisor only as a dead process ('exited during load'); it now pushes the same error ack the scheduler already does, then re-raises. Small, with a test that fails before; server tests pass.",
+    "commits": [
+      "b059f5f"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "sime2408 <simun.sunjic@gmail.com>"
+    ]
+  },
+  "267": {
+    "number": 267,
+    "title": "Add loopback runtime process identity endpoint",
+    "head_sha": "71fd695fd169",
+    "reviewed_at": "2026-10-04",
+    "decision": "rejected",
+    "reason": "Adds --launch-nonce and a loopback-only /v1/runtime/identity reporting PID/PGID/start time of the frontend and workers, for an external process supervisor. Well tested, but nothing in this fork consumes it (it serves an outside launcher), so it only adds API surface here; if upstream merges it, it arrives through the sync.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "HaileyStorm <HaileyCollet@gmail.com>"
+    ]
   }
 }
