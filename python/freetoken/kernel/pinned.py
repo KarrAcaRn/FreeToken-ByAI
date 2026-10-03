@@ -62,7 +62,9 @@ def device_ptr(t: torch.Tensor) -> int:
     Equals ``data_ptr()`` on CUDA tensors and wherever pinned host memory is
     device-visible at its host VA (Linux/UVA). On Windows/WDDM registered memory maps
     to a different device address, so zero-copy consumers must use this, not
-    ``data_ptr()``. Host tensors must be pinned+mapped."""
+    ``data_ptr()``. Host tensors must be pinned+mapped. An empty tensor has no address (0)."""
+    if t.numel() == 0:
+        return 0
     if t.is_cuda or _host_ptr_identity():
         return t.data_ptr()
     return _load_pinned_extension().host_device_ptr(t.data_ptr())

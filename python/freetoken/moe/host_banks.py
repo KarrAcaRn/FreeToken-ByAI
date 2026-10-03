@@ -95,7 +95,9 @@ class HostBank:
         assert backing in ("mmap", "cuda"), backing
         elsize = torch.empty((), dtype=dtype).element_size()
         self.nbytes = math.prod(shape) * elsize
-        asize = ((self.nbytes + _BLK - 1) // _BLK) * _BLK
+        # an empty bank (a dense layer's scale bank) still gets one block: neither an anonymous mmap
+        # nor cudaHostRegister accepts zero bytes
+        asize = max(_BLK, ((self.nbytes + _BLK - 1) // _BLK) * _BLK)
         if backing == "cuda":
             from freetoken.kernel.pinned import alloc_pinned_tensor
 
@@ -113,7 +115,10 @@ class HostBank:
             _LIVE_BUFFERS.append(self._buf)
             self.addr = ctypes.addressof(ctypes.c_char.from_buffer(self._buf))
             self._pinned = False
-        self.tensor = torch.frombuffer(self._buf, dtype=dtype, count=self.nbytes // elsize).view(*shape)
+        if self.nbytes:
+            self.tensor = torch.frombuffer(self._buf, dtype=dtype, count=self.nbytes // elsize).view(*shape)
+        else:  # frombuffer refuses count=0; an empty tensor has no address to read through anyway
+            self.tensor = torch.empty(shape, dtype=dtype)
         self._locked = False
 
     @property

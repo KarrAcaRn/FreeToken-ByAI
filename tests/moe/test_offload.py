@@ -881,3 +881,20 @@ def test_lock_failure_downgrades_echoed_residency(monkeypatch):
         with hb.PinPipeline() as pins:
             pins(1, {"gate_up": hb.HostBank((4,), torch.uint8)})
     assert plan2.actual == {1: hb.HostResidency.PAGEABLE.value}
+
+
+def test_an_empty_host_bank_still_maps_one_block(monkeypatch):
+    """A dense layer's scale bank can be empty; mmap and cudaHostRegister both refuse zero bytes."""
+    from freetoken.moe import host_banks
+    from freetoken.moe.host_banks import HostBank
+
+    registered = []
+    monkeypatch.setattr("freetoken.kernel.pinned.host_register", lambda addr, n: registered.append(n))
+    monkeypatch.delenv("FREETOKEN_SKIP_BANK_PIN", raising=False)
+    bank = HostBank((4, 0), torch.uint8, backing="mmap")
+    assert bank.tensor.shape == (4, 0) and bank.nbytes == 0
+    from freetoken.kernel.pinned import device_ptr
+
+    assert device_ptr(bank.tensor) == 0  # no translation needed, so none is attempted
+    bank.pin()
+    assert registered == [host_banks._BLK]
