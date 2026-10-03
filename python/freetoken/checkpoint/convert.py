@@ -103,6 +103,35 @@ def _copy_metadata(model_path: str, out_dir: str) -> list[str]:
     return copied
 
 
+# Weight formats a hub snapshot can carry; none of them belongs in the FTW dir, so the
+# metadata download skips them all (download_hf_weight already fetched the shards we read).
+_HUB_WEIGHT_PATTERNS = (
+    "*.safetensors", "*.gguf", "*.ftw", "*.bin", "*.pt", "*.pth", "*.ckpt", "*.h5", "*.msgpack", "*.onnx",
+)
+
+
+def _resolve_source(model_path: str) -> str:
+    """Local path -> unchanged; HF repo id -> local snapshot dir holding the weight shards
+    AND every non-weight file (config, tokenizer, remote code, generation config)."""
+    if os.path.exists(model_path):
+        return model_path
+    from huggingface_hub import snapshot_download
+
+    from freetoken.utils.hf import DisabledTqdm, download_hf_weight
+
+    try:
+        local = download_hf_weight(model_path)
+        # download_hf_weight only fetches the shards; pin the metadata pull to the same commit
+        # (the snapshot dir name) so both land in one consistent snapshot dir
+        snapshot_download(
+            model_path, revision=os.path.basename(os.path.normpath(local)),
+            ignore_patterns=list(_HUB_WEIGHT_PATTERNS), tqdm_class=DisabledTqdm,
+        )
+    except Exception as e:
+        raise SystemExit(f"cannot convert '{model_path}': not a local path and not a usable HF repo id ({e})") from e
+    return local
+
+
 class _ConvertSink:
     """Layer-completion sink for ``load_expert_banks(layer_sink=...)``: writes each
     completed layer's banks as their own FTW entries immediately (name
@@ -182,6 +211,8 @@ def convert_checkpoint(
     from freetoken.moe.expert_banks import load_expert_banks
     from .ftw import is_ftw_checkpoint
 
+    source_id = model_path
+    model_path = _resolve_source(model_path)
     if is_ftw_checkpoint(model_path):
         raise SystemExit(f"{model_path} is already an FTW checkpoint")
     tp = try_get_tp_info()
@@ -303,7 +334,7 @@ def convert_checkpoint(
         fingerprint = None
 
     index = writer.finalize({
-        "source_model_path": os.path.abspath(model_path),
+        "source_model_path": os.path.abspath(model_path) if model_path == source_id else source_id,
         "fingerprint": fingerprint,
         # quant_format records the actual on-disk bank layout (e.g. nvfp4_marlin vs
         # nvfp4_b12x): the suffix is a runtime backend pick (GPU capability / env), NOT in

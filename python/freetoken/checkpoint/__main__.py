@@ -1,6 +1,6 @@
 """CLI: convert an HF safetensors checkpoint to a FreeToken Weight (FTW) checkpoint.
 
-    ft checkpoint --model <hf_dir> --out <ftw_dir> \
+    ft checkpoint --model <hf_dir-or-repo-id> --out <ftw_dir> \
         [--dtype bfloat16] [--moe-backend offload] [--quant-backend moe.nvfp4=b12x] [--shard-gib 8] [--gpu <uuid-or-index>]
 
 The output dir is self-contained: point the server's ``--model`` at it to load via the FTW
@@ -33,7 +33,7 @@ def _parse_quant_backend(value: str) -> str:
 
 def main(argv: list[str] | None = None, prog: str = "freetoken.checkpoint") -> int:
     p = argparse.ArgumentParser(prog=prog, description=__doc__)
-    p.add_argument("--model", required=True, help="source HF safetensors checkpoint dir")
+    p.add_argument("--model", required=True, help="source HF safetensors checkpoint dir or HF repo id")
     p.add_argument("--out", required=True, help="output FTW checkpoint dir")
     p.add_argument("--dtype", choices=sorted(_DTYPES), default="bfloat16")
     p.add_argument("--moe-backend", default="offload",
