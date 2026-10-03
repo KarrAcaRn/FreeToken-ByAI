@@ -201,13 +201,18 @@ CT_BLOCK_MOE = _ct({
     "group_0": {**FP8_BLOCK_GROUP, "targets": [r"re:.*self_attn\.(q|k|v|o)_proj$", r"re:.*linear_attn\.(in_proj_qkv|in_proj_z|out_proj)$", r"re:.*shared_expert\.(gate|up|down)_proj$"]},
     "group_1": {**NVFP4_GROUP, "targets": [r"re:.*mlp\.experts\.\d+\.(gate|up|down)_proj$"]},
 }, ["lm_head", *GDN_BA, *ROUTERS], "mixed-precision")
+# dense mixed precision (upstream #275 / issue #238): per-tensor FP8 attention and GDN projections, NVFP4 MLP
+CT_MIXED_DENSE = _ct({
+    "group_0": {**FP8_TENSOR_STATIC_GROUP, "targets": [r"re:.*self_attn\.(q|k|v|o)_proj$", r"re:.*linear_attn\.(in_proj_qkv|in_proj_z|out_proj)$"]},
+    "group_1": {**NVFP4_GROUP, "targets": [r"re:.*mlp\.(gate|up|down)_proj$"]},
+}, ["lm_head", *GDN_BA], "mixed-precision")
 # block-fp8 everywhere, experts included, under llm-compressor's names (``weight_scale`` for the block scale)
 CT_BLOCK_EXPERTS = _ct({"group_0": {**FP8_BLOCK_GROUP, "targets": ["Linear"]}}, ["lm_head", f"{LM}.embed_tokens", *GDN_BA, *ROUTERS], "float-quantized")
 
 
 def _layout(name: str) -> tuple[bool, dict | None, dict[str, torch.Tensor]]:
     """``(moe, quantization_config, raw tensors)`` of one released layout."""
-    moe = name != "ct_nvfp4_dense"
+    moe = name not in ("ct_nvfp4_dense", "ct_mixed_dense")
     raw = _dense_bf16(moe)
     if name == "bf16":
         _experts(raw)
@@ -236,6 +241,10 @@ def _layout(name: str) -> tuple[bool, dict | None, dict[str, torch.Tensor]]:
     if name == "ct_nvfp4_dense":
         _quantize(raw, GDN_QKVZ_OUT + GDN_BA + ATTN + DENSE_MLP, lambda w: _nvfp4(w, ct=True))
         return moe, CT_NVFP4_DENSE, raw
+    if name == "ct_mixed_dense":
+        _quantize(raw, GDN_QKVZ_OUT + ATTN, _fp8_tensor_ct)
+        _quantize(raw, DENSE_MLP, lambda w: _nvfp4(w, ct=True))
+        return moe, CT_MIXED_DENSE, raw
     if name == "ct_nvfp4_moe":
         _quantize(raw, ATTN + SHARED, lambda w: _nvfp4(w, ct=True))
         _experts(raw, lambda w: _nvfp4(w, ct=True))
@@ -261,7 +270,7 @@ def _layout(name: str) -> tuple[bool, dict | None, dict[str, torch.Tensor]]:
     raise KeyError(name)
 
 
-LAYOUTS = ["bf16", "fp8_block", "modelopt_mixed", "modelopt_mixed_a16", "modelopt_mixed_noinput", "modelopt_mixed_fp8_shared", "ct_nvfp4_dense", "ct_nvfp4_moe", "ct_mixed_fast", "ct_tensor_fp8_moe", "ct_block_moe", "ct_block_experts"]
+LAYOUTS = ["bf16", "fp8_block", "modelopt_mixed", "modelopt_mixed_a16", "modelopt_mixed_noinput", "modelopt_mixed_fp8_shared", "ct_nvfp4_dense", "ct_mixed_dense", "ct_nvfp4_moe", "ct_mixed_fast", "ct_tensor_fp8_moe", "ct_block_moe", "ct_block_experts"]
 
 
 def _config_json(moe: bool, quantization_config) -> dict:
@@ -353,7 +362,7 @@ def test_emitted_keys_are_the_model_state_dict(checkpoint):
 def test_expert_quant_tag_follows_the_config(checkpoint):
     name, folder, _raw = checkpoint
     config = parse_config(cached_load_hf_config(folder))
-    expected = {"bf16": "none", "fp8_block": "fp8_block", "ct_block_experts": "fp8_block", "ct_nvfp4_dense": "none"}.get(name, "nvfp4")
+    expected = {"bf16": "none", "fp8_block": "fp8_block", "ct_block_experts": "fp8_block", "ct_nvfp4_dense": "none", "ct_mixed_dense": "none"}.get(name, "nvfp4")
     assert config.expert_quant == expected
     assert config.weight_block_size == ((128, 128) if expected == "fp8_block" else None)
 
@@ -609,3 +618,21 @@ def test_a_checkpoint_disagreeing_with_its_quant_config_is_rejected(tmp_path, qu
     (tmp_path / "config.json").write_text(json.dumps(_config_json(True, quantization_config)))
     with pytest.raises(ValueError, match=match):
         _load(str(tmp_path))
+
+
+def test_dense_mixed_precision_keeps_fp8_gdn_native(checkpoint):
+    # upstream #275 / issue #238: a dense export with per-tensor FP8 GDN projections next to an
+    # NVFP4 MLP crashed fusing fp8 with bf16; the fused qkvz must stay fp8 with per-part scales.
+    name, folder, raw = checkpoint
+    if name != "ct_mixed_dense":
+        pytest.skip("dense mixed-precision layout only")
+    loaded = _load(folder)
+    gdn = f"{LM}.layers.0.linear_attn"
+    qkvz = loaded["model.layers.0.linear_attn.in_proj_qkvz.weight"]
+    parts = [raw[f"{gdn}.in_proj_{p}.weight"] for p in ("qkv", "z")]
+    assert qkvz.dtype is torch.float8_e4m3fn
+    assert all(_same(a, b) for a, b in zip(_slices(qkvz, parts), parts))
+    scale = loaded["model.layers.0.linear_attn.in_proj_qkvz.weight_scale"]
+    expected = torch.cat([raw[f"{gdn}.in_proj_{p}.weight_scale"].float().expand(t.shape[0]) for p, t in zip(("qkv", "z"), parts)])
+    assert torch.equal(scale, expected)
+    assert loaded["model.layers.0.mlp.gate_up_proj.weight"].dtype is torch.uint8
