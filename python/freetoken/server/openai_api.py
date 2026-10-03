@@ -723,7 +723,9 @@ def _model_context_length(state: Any) -> int | None:
         # Local import: api_server imports this module, so a module-level one would cycle.
         from .api_server import kv_pool_geometry
 
-        num_pages, page_size = kv_pool_geometry(state)
+        num_pages, _ = kv_pool_geometry(state)
+        # Only the engine's meta knows the resolved page size; the frontend's config copy may not.
+        page_size = int((getattr(state, "cache_pools", None) or {}).get("page_size", 0) or 0)
         kv_tokens = num_pages * page_size
     except Exception:  # noqa: BLE001
         kv_tokens = 0

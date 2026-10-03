@@ -489,6 +489,21 @@ def test_models_route_keeps_the_ceiling_when_the_pool_exceeds_it():
     assert card["context_length"] == 32768
 
 
+def test_models_route_ignores_the_frontend_page_size():
+    """The engine resolves page_size in its own process; multiplying a known page count by the
+    frontend's unresolved copy would advertise a fraction of the pool."""
+    state = FakeState([])
+    state.config.max_seq_len = 262144
+    state.config.page_size = 1
+    state.cache_pools = None
+    state.stats = SimpleNamespace(kv_total_pages=2784)
+
+    assert _models_card(state)["context_length"] == 262144
+
+    state.cache_pools = {"num_pages": 2784, "page_size": 64}
+    assert _models_card(state)["context_length"] == 178176
+
+
 def test_models_route_prefers_the_last_rebuild_over_the_load_time_pool():
     """A rebuild moves the pool; /v1/models must follow it rather than freeze the load-time
     allocation (same most-recent-truth order /v1/cache/status reports)."""
