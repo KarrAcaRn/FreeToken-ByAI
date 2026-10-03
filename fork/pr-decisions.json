@@ -419,7 +419,8 @@
     "authors": [
       "LZ-QWQ <lz1830837889@163.com>"
     ],
-    "revisit_with": 217
+    "revisit_with": 217,
+    "revisit": "after-queue"
   },
   "531": {
     "number": 531,
@@ -1693,5 +1694,93 @@
     "authors": [
       "mac <av_samarin@mail.ru>"
     ]
+  },
+  "221": {
+    "number": 221,
+    "title": "fix(daemon): harden /bench/run child lifecycle, bound request models",
+    "head_sha": "9a11c6e0dbc0",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted-with-fixups",
+    "reason": "A client disconnect mid-stream left the /bench/run child running (holding the GPU, writing the profile, never reaped); it now runs in its own process group and is torn down on any exit (SIGTERM, 5 s grace, SIGKILL, shielded reap). Request ports are bounded to 1..65535. Fixup: the teardown used os.killpg, which Windows lacks, so there it raised and still orphaned the child; it now stops the child itself where process groups do not exist (test added). Daemon tests pass.",
+    "commits": [
+      "e59d0e4",
+      "275590e"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "mac <av_samarin@mail.ru>"
+    ]
+  },
+  "217": {
+    "number": 217,
+    "title": "feat(rocm): AMD ROCm runtime for RDNA3/4 with native Qwen3.5-MoE GGUF decode parity",
+    "head_sha": "ac9c9657c871",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "23k-line ROCm runtime for RDNA3/4 incl. native Qwen3.5-MoE GGUF decode and CI workflows (151 files). Not judged on its merits yet: ROCm cannot be run or verified here. Revisit after the queue with the other ROCm PRs (#241, #260, #317, #535).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Samuel Ishida <samuel.ishida@gmail.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "211": {
+    "number": 211,
+    "title": "fix(gguf): chunk the moe_vec z grid past the 65535 cap",
+    "head_sha": "a42a2c0a99e9",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "The grouped GGUF MoE GEMV put tokens*top_k on gridDim.z (hardware cap 65535), so large prefill chunks failed to launch; it now slices z into chunks with an explicit z_offset (keeping one expert's rows L2-local on x) and generates the 19 per-type launchers from one macro. Conflict with #494's expert_stride_bytes resolved by threading the stride through the new launcher. On the RTX 4090: the PR's >65535-row test passes and a padded-stride q8_0 bank still matches the contiguous one bit for bit. Supersedes #185.",
+    "commits": [
+      "b1eed49"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "avlp12 <alisvolatprop12@proton.me>"
+    ]
+  },
+  "210": {
+    "number": 210,
+    "title": "GGUF: serve DeepSeek-V4-Flash",
+    "head_sha": "9166b7387034",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "GGUF serving path for DeepSeek-V4-Flash (1.4k lines: GGUF layers, CPU-MoE kernel, DSV4 sparse attention changes). Not judged on its merits yet: the model is far beyond this machine. Revisit after the queue.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Victor Cruz <vcruz305@gmail.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "198": {
+    "number": 198,
+    "title": "fix(engine): reserve explicit KV pages during MoE auto-sizing",
+    "head_sha": "271420aee138",
+    "reviewed_at": "2026-10-04",
+    "decision": "reimplemented",
+    "reason": "With --num-pages / --num-tokens plus --moe-cache-auto the expert cache took the memory the forced KV pages needed. The PR patches the old call site; next computes this in the shared plan_moe_cache_auto (engine and ft info), so the floor is applied there, with a test. Live on Qwen3.6-35B-A3B-NVFP4 with --num-tokens 65536: 8894 expert slots, 65536 KV tokens allocated, preflight forecast matches, correct answers.",
+    "commits": [
+      "a73f98f"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "pedro-moser <pedro.niederauer.moser@gmail.com>"
+    ]
+  },
+  "185": {
+    "number": 185,
+    "title": "fix(kernel): launch GGUF MoE GEMV token axis on grid.x, not grid.z",
+    "head_sha": "3ca0ccd0365c",
+    "reviewed_at": "2026-10-04",
+    "decision": "superseded",
+    "reason": "Same 65535 gridDim.z cap as #211, fixed by moving the routed-row index to grid.x. Superseded by #211 (b1eed49), which keeps the rows on z for L2 locality and chunks the launch; this PR's own test (tests/kernels/test_gguf_moe_vec.py) passes on next with #211.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Erich Stuntebeck <erichstuntebeck@airia.com>"
+    ],
+    "superseded_by": 211
   }
 }
