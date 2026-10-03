@@ -7,6 +7,7 @@ import gc
 import math
 import os
 import socket
+import sys
 from datetime import timedelta
 from typing import Any, Dict, Iterable, NamedTuple, Tuple
 
@@ -640,6 +641,17 @@ class Engine:
             return torch.distributed.TCPStore(
                 "127.0.0.1", config.distributed_port, config.tp_info.size,
                 is_master=False, timeout=timeout, multi_tenant=True,
+            )
+        if sys.platform == "win32":
+            # Untested there: a Python SOCKET handle as master_listen_fd, and SO_REUSEADDR
+            # on Windows lets another socket take the port. Keep the previous store.
+            logger.warning_rank0(
+                "TP rendezvous store on port %d listens on every interface on Windows; "
+                "firewall that port if this host is reachable.", config.distributed_port,
+            )
+            return torch.distributed.TCPStore(
+                "127.0.0.1", config.distributed_port, config.tp_info.size,
+                is_master=True, timeout=timeout, multi_tenant=True,
             )
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

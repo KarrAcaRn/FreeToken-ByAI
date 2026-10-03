@@ -64,3 +64,23 @@ def test_two_ranks_rendezvous_with_loopback_only_store():
     # the master's listening socket was pre-bound to loopback, not the wildcard
     # address the C10d TCPStore server binds to on its own
     assert results[0][1] == "127.0.0.1"
+
+
+def test_windows_keeps_the_store_without_a_prebound_socket(monkeypatch):
+    import freetoken.engine.engine as engine_mod
+
+    made = {}
+
+    def fake_store(*args, **kwargs):
+        made.update(kwargs)
+        return "store"
+
+    monkeypatch.setattr(engine_mod.sys, "platform", "win32")
+    monkeypatch.setattr(engine_mod.torch.distributed, "TCPStore", fake_store)
+    engine = Engine.__new__(Engine)
+    config = SimpleNamespace(
+        tp_info=DistributedInfo(0, 1), distributed_timeout=5.0, distributed_port=29512
+    )
+    assert engine._make_distributed_store(config) == "store"
+    assert made["is_master"] and "master_listen_fd" not in made
+    assert not hasattr(engine, "_distributed_listen_socket")
