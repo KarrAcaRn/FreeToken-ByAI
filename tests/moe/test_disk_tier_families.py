@@ -26,10 +26,13 @@ def test_family_exposes_a_source_spec_hook(family):
         "the disk tier cannot build a disk index for it")
 
 
-@pytest.mark.parametrize("family", [f for f in NVFP4_FAMILIES if f not in ("glm5_next", "qwen3_5_moe", "gemma4")])
+@pytest.mark.parametrize(
+    "family", [f for f in NVFP4_FAMILIES if f not in ("glm5_next", "glm4_moe", "qwen3_5_moe", "gemma4")]
+)
 def test_hook_returns_the_spec_the_loader_uses(family):
-    # glm5_next is excluded here only because its hook reads the checkpoint config to pick
-    # between the compressed-tensors and modelopt namings; it is covered by the test below.
+    # glm5_next and glm4_moe are excluded here only because their hooks read the checkpoint
+    # config to pick between the compressed-tensors and modelopt namings; the test below
+    # covers them.
     # qwen3_5_moe and gemma4 build their spec from the installed QuantConfig's dialect, so they
     # have no static spec to compare; test_qwen3_5_moe_weight and test_gemma4_compressed_tensors
     # drive the loader through that same hook.
@@ -40,8 +43,9 @@ def test_hook_returns_the_spec_the_loader_uses(family):
     assert set(spec.proj_to_role.values()) == {"gate", "up", "down"}
 
 
-def test_glm5_next_hook_follows_the_checkpoint_quant_method(monkeypatch):
-    mod = importlib.import_module("freetoken.models.glm5_next.weight")
+@pytest.mark.parametrize("family", ["glm5_next", "glm4_moe"])
+def test_hook_follows_the_checkpoint_quant_method(monkeypatch, family):
+    mod = importlib.import_module(f"freetoken.models.{family}.weight")
 
     class _Cfg:
         def __init__(self, method):
@@ -51,6 +55,30 @@ def test_glm5_next_hook_follows_the_checkpoint_quant_method(monkeypatch):
     assert mod.nvfp4_expert_spec("p", None) is mod._NVFP4_CT_SOURCE_SPEC
     monkeypatch.setattr(mod, "cached_load_hf_config", lambda path: _Cfg("modelopt"))
     assert mod.nvfp4_expert_spec("p", None) is mod._NVFP4_SOURCE_SPEC
+
+
+def test_glm4_moe_compressed_tensors_names_fold_onto_the_modelopt_kinds():
+    # gesong2077/GLM-4.5-Air-NVFP4 (llm-compressor): weight_packed | weight_scale |
+    # weight_global_scale, plus input_global_scale that the W4A16 expert path never reads.
+    from freetoken.models.nvfp4_banks import _canon_kind
+
+    mod = importlib.import_module("freetoken.models.glm4_moe.weight")
+    spec = mod._NVFP4_CT_SOURCE_SPEC
+    base = "model.layers.3.mlp.experts.17.down_proj."
+    kinds = {}
+    for suffix in ("weight_packed", "weight_scale", "weight_global_scale", "input_global_scale"):
+        m = spec.key_pattern.match(base + suffix)
+        kinds[suffix] = _canon_kind(spec, m.group("kind")) if m else None
+    assert kinds == {
+        "weight_packed": "weight",
+        "weight_scale": "weight_scale",
+        "weight_global_scale": "weight_scale_2",
+        "input_global_scale": None,
+    }
+    assert spec.global_reciprocal
+    # the modelopt spec must not pick up the compressed-tensors names (the bug: only the
+    # shared weight_scale spelling matched, so the banks filled with scales and no weights)
+    assert not mod._NVFP4_SOURCE_SPEC.key_pattern.match(base + "weight_packed")
 
 
 def test_provider_refuses_a_family_without_a_spec(monkeypatch):
