@@ -29,6 +29,7 @@ def test_rocm_graph_capture_uses_per_bank_copy(monkeypatch):
         _pending_whole_layer=False,
         _unpinned_layers=frozenset(),
         _copy_fused_ok=True,
+        _disk_tier=None,
         _copy_dst_ptrs=tensor,
         _copy_src_ptrs=[tensor],
         _copy_feat_bytes=tensor,
