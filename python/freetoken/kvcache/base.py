@@ -100,6 +100,7 @@ class BaseKVCachePool(ABC):
         sizing target by declaring it on ITS kv_cost, with no base-signature churn."""
         import inspect
 
+        from freetoken.attention import fixed_workspace_bytes
         from freetoken.engine.cache_budget import net_cache_budget_bytes, required_bytes
 
         target_pages = num_pages if num_pages is not None else current_num_pages
@@ -108,9 +109,11 @@ class BaseKVCachePool(ABC):
             k: v for k, v in targets.items() if v is not None and k in cost_params
         }
         cache_per_page, fixed_cache_size, _, _ = type(self).kv_cost(config, **cost_kwargs)
+        # the attention workspace stays allocated across the rebuild: charge it as the startup plan did
         budget = net_cache_budget_bytes(
             config.memory_ratio, baseline_free, weights_bytes,
             fixed_cache_size + extra_fixed_bytes,
+            fixed_workspace_bytes(getattr(config, "attention_backend", "")),
         )
         need = required_bytes(target_moe, target_pages, per_expert_bytes, cache_per_page)
         if need > budget:

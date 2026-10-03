@@ -412,7 +412,13 @@ class DSV4PagedKVCache(BaseKVCachePool):
             kv_sizes = self.sizes
         # The rebuilds are free-before-alloc, so the whole budget is available (no fixed
         # cache term); an unfit request must still reject BEFORE the teardown.
-        budget = net_cache_budget_bytes(config.memory_ratio, baseline_free, weights_bytes, 0)
+        from freetoken.attention import fixed_workspace_bytes
+
+        # the attention workspace is not freed by the rebuild, so it stays charged
+        budget = net_cache_budget_bytes(
+            config.memory_ratio, baseline_free, weights_bytes, 0,
+            fixed_workspace_bytes(getattr(config, "attention_backend", "")),
+        )
         need = target_moe * per_expert_bytes + dsv4_pool_bytes(
             kv_sizes, dsv4_args, config.max_running_req + 1
         )

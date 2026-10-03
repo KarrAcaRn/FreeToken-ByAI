@@ -145,6 +145,32 @@ def test_generic_validate_rebuild_budget_check():
     check(None, per_page * 10 + fixed)
 
 
+def test_validate_rebuild_charges_the_attention_workspace():
+    # The startup plan charges fi's 256 MiB workspace; a runtime rebuild must too, since the
+    # workspace stays allocated -- otherwise it re-grants exactly the bytes the workspace holds.
+    from freetoken.kvcache.base import CacheRebuildRejected
+    from freetoken.kvcache.mha_pool import MHAKVCache
+
+    config = _generic_config()
+    per_page, fixed, _, _ = MHAKVCache.kv_cost(config)
+    pool = object.__new__(MHAKVCache)
+    object.__setattr__(config, "memory_ratio", 1.0)
+
+    def check(backend, baseline):
+        object.__setattr__(config, "attention_backend", backend)
+        pool.validate_rebuild(
+            config, num_pages=50, num_swa_pages=None,
+            target_moe=0, per_expert_bytes=0, baseline_free=baseline,
+            weights_bytes=0, current_num_pages=10,
+        )
+
+    budget = per_page * 50 + fixed
+    check("triton", budget)  # no fixed workspace: fits exactly
+    with pytest.raises(CacheRebuildRejected, match="old cache kept"):
+        check("fi", budget)
+    check("fi", budget + (256 << 20))
+
+
 def test_dsv4_validate_rebuild_floor():
     from freetoken.kvcache.base import CacheRebuildRejected
     from freetoken.kvcache.dsv4_cost_model import _dsv4_window_floor_pages
