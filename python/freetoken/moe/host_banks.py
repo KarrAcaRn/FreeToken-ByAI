@@ -118,7 +118,10 @@ class HostBank:
             # Private anonymous gives both for real: reads map the shared zero page, and
             # release_range() actually returns memory. Nothing needs the mapping to be shared --
             # the loaders are thread pools and ranks are mp-spawned, each with its own banks.
-            self._buf = mmap.mmap(-1, asize, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+            if hasattr(mmap, "MAP_PRIVATE"):
+                self._buf = mmap.mmap(-1, asize, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+            else:  # Windows: no flags argument; a pagefile-backed mapping is private to the process
+                self._buf = mmap.mmap(-1, asize)
             _LIVE_BUFFERS.append(self._buf)
             self.addr = ctypes.addressof(ctypes.c_char.from_buffer(self._buf))
             self._pinned = False
@@ -167,12 +170,12 @@ class HostBank:
             return
         from freetoken.kernel.pinned import host_register
 
-        row_bytes = self.nbytes // self.tensor.shape[0]
-        nbytes = nrows * row_bytes
+        # an empty bank has no rows to keep; pin its one block, as pin() would
+        nbytes = nrows * (self.nbytes // self.tensor.shape[0]) if self.nbytes else len(self._buf)
         try:
             host_register(self.addr, nbytes)
         except RuntimeError as exc:
-            raise RuntimeError(
+            raise PinFailed(
                 f"cudaHostRegister failed for {nbytes / 2**30:.1f} GiB prefix"
             ) from exc
         self._pinned = True

@@ -917,3 +917,26 @@ def test_copy_miss_verify_probe_gated_on_disk_tier(monkeypatch, capsys):
 
     cache.copy_missing()
     assert "[copy-miss]" not in capsys.readouterr().out
+
+
+def test_pin_prefix_of_an_empty_bank_registers_its_block(monkeypatch):
+    """The disk tier pins a prefix of every bank, empty scale banks included."""
+    from freetoken.moe import host_banks
+    from freetoken.moe.host_banks import HostBank
+
+    registered = []
+    monkeypatch.setattr("freetoken.kernel.pinned.host_register", lambda addr, n: registered.append(n))
+    HostBank((0, 16), torch.uint8, backing="mmap").pin_prefix(4)
+    assert registered == [host_banks._BLK]
+
+
+def test_host_bank_maps_without_mmap_flags(monkeypatch):
+    """Windows' mmap takes no flags argument; the bank falls back to the plain anonymous mapping."""
+    import mmap
+
+    from freetoken.moe.host_banks import HostBank
+
+    monkeypatch.delattr(mmap, "MAP_PRIVATE")
+    bank = HostBank((8, 512), torch.uint8, backing="mmap")
+    bank.tensor.fill_(3)
+    assert int(bank.tensor.sum()) == 3 * 8 * 512
