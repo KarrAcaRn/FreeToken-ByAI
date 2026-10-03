@@ -465,18 +465,15 @@ def test_rejects_tensor_overlap_including_padded_allocation(tmp_path):
     _expect_invalid(path, index, "overlaps padded allocation")
 
 
-@pytest.mark.parametrize(
-    ("remove", "match"),
-    [
-        (0, "tensor coverage has a gap"),
-        (1, "tensor coverage has a gap"),
-        (2, "tensors cover .* total_bytes"),
-    ],
-)
-def test_rejects_leading_internal_and_trailing_tensor_gaps(tmp_path, remove, match):
+@pytest.mark.parametrize("remove", [0, 1, 2])
+def test_accepts_unreferenced_bytes_left_by_a_dropped_entry(tmp_path, remove):
+    # scripts/ftw_hotfix.py drops/replaces entries and compacts their shards one atomic index
+    # swap at a time; every intermediate index (and an interrupted run's) must stay loadable.
     path, index = _three_tensor_checkpoint(tmp_path)
+    kept = [t["name"] for i, t in enumerate(index["tensors"]) if i != remove]
     index["tensors"].pop(remove)
-    _expect_invalid(path, index, match)
+    (path / INDEX_NAME).write_text(json.dumps(index))
+    assert sorted(FTWReader(str(path)).tensors) == sorted(kept)
 
 
 def test_rejects_zero_sized_tensor_inside_nonzero_allocation(tmp_path):
@@ -492,7 +489,7 @@ def test_rejects_zero_sized_tensor_inside_nonzero_allocation(tmp_path):
         "global_off": ALIGN,
         "nbytes": 0,
     })
-    _expect_invalid(path, index, "zero-sized tensor .* is not on a tensor boundary")
+    _expect_invalid(path, index, "zero-sized tensor .* is inside another tensor")
 
 
 def test_index_validation_does_not_mutate_tensor_order(tmp_path):

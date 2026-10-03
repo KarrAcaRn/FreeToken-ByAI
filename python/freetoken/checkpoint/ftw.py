@@ -386,8 +386,10 @@ def _validate_ftw_v1_index(path: str, index) -> tuple[list[dict], list[dict]]:
             zero_allocations.append((global_off, name))
         tensors.append(tensor)
 
+    # Unreferenced bytes between tensors are valid: scripts/ftw_hotfix.py drops or replaces
+    # entries and compacts their shards one atomic index swap at a time, promising a loadable
+    # FTW at every step (and after an interrupted run). Only overlaps are corrupt.
     allocations.sort(key=lambda item: (item[0], item[1], item[2]))
-    allocation_boundaries = {0}
     cursor = 0
     previous_name: str | None = None
     for start, end, name in allocations:
@@ -395,24 +397,13 @@ def _validate_ftw_v1_index(path: str, index) -> tuple[list[dict], list[dict]]:
             raise FTWFormatError(
                 f"tensor {name!r} overlaps padded allocation for {previous_name!r}"
             )
-        if start > cursor:
-            raise FTWFormatError(
-                f"FTW tensor coverage has a gap: expected offset {cursor}, "
-                f"got {start} for {name!r}"
-            )
-        allocation_boundaries.add(start)
-        allocation_boundaries.add(end)
         cursor = end
         previous_name = name
-    if cursor != total_bytes:
-        raise FTWFormatError(
-            f"tensors cover {cursor} padded bytes but total_bytes is {total_bytes}"
-        )
 
     for offset, name in zero_allocations:
-        if offset not in allocation_boundaries:
+        if any(start < offset < end for start, end, _ in allocations):
             raise FTWFormatError(
-                f"zero-sized tensor {name!r} at offset {offset} is not on a tensor boundary"
+                f"zero-sized tensor {name!r} at offset {offset} is inside another tensor"
             )
 
     # Preserve both zero-byte forms emitted by FTWWriter: finalize-without-add_tensor
