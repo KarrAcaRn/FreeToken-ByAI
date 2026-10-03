@@ -497,5 +497,97 @@
     "authors": [
       "yajun <leamon@stu.xidian.edu.cn>"
     ]
+  },
+  "354": {
+    "number": 354,
+    "title": "feat(kvcache): store the KV cache as fp8 e4m3 codes (--kv-cache-dtype fp8)",
+    "head_sha": "9b103b04f9c8",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Best of the KV-quant group: e4m3 codes + one fp32 scale per (token, kv head), robust to outliers; covers MHA (incl. GDN hybrid), hybrid-SWA, QSA and MLA/DSA. On the 27B = RadixArk/Qwen3.8-27B-NVFP4 on the RTX 4090, --max-running-requests 1 --memory-ratio 0.95 --max-prefill-length 2048: KV 13420 -> 26427 tokens, decode 46.2 vs 46.6 tok/s (triton instead of fi), same quality (Q&A, 8k fact retrieval, 15 codes in 7.4k); coherent on Qwen3-0.6B where #126 produced NaN. Fixups: test doubles for newer main attributes, one-bf16-ulp tolerance for an sm_89 summation-order case, help/docs now say MLA/DSA is covered.",
+    "commits": [
+      "bd8bd44",
+      "8f00988",
+      "194b137",
+      "61a16c9"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "ArqAlice <y.tomi0131@gmail.com>",
+      "Matsumoto Takaya (松本 貴也) <matsumoto.t@zigexn.co.jp>",
+      "Vincent Labreche <vincent.dev@gmail.com>"
+    ]
+  },
+  "408": {
+    "number": 408,
+    "title": "feat(kvcache): add nvfp4 kv quantization",
+    "head_sha": "1c7bb42909c4",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "nvfp4 KV on top of #354 (software decode on sm_89): 3.46x the bf16 tokens (46476 on the 27B) with the same quality on both models; costs ~15% decode at 8k and ~10% prefill, so it is opt-in. Fixup: kv_row_bytes sizes the packed row instead of kv_storage_bytes_per_elem raising 'unknown kv_quant'.",
+    "commits": [
+      "853a88d",
+      "53a72b0"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "ArqAlice <y.tomi0131@gmail.com>"
+    ]
+  },
+  "309": {
+    "number": 309,
+    "title": "feat(kvcache): add reliable quantized KV cache",
+    "head_sha": "899bf871adb4",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "reason": "fp8_e4m3 crashes at CUDA-graph capture (a triton.jit kernel imports round_e4m3; its tests never run that kernel), needs an explicit --attention-backend triton, q4_0 degrades badly on Qwen3-0.6B, q6_0 is 25% slower at 8k decode. fp8 and the sub-byte budget are covered by #354 + #408.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yuzuka Dev <onenew553@gmail.com>",
+      "fangyuan-3149 <314945674@qq.com>"
+    ],
+    "superseded_by": 354
+  },
+  "268": {
+    "number": 268,
+    "title": "feat(kvcache): sub-byte Q4_0 and Q6_0 KV cache quantization",
+    "head_sha": "bd3814f0b18b",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "reason": "Earlier version of #309's sub-byte work (same jit-import bug) plus unrelated Windows/csrc changes; covered by #354 + #408.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "fangyuan-3149 <314945674@qq.com>"
+    ],
+    "superseded_by": 354
+  },
+  "126": {
+    "number": 126,
+    "title": "Add fp8 KV-cache quantization (--kv-dtype)",
+    "head_sha": "b2e584515a0f",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "Fixed scale 1.0 ignores checkpoint k/v scales: K values of 488 exceed e4m3's 448 and the cast yields NaN (garbage on Qwen3-0.6B); MHA + fi only, no tests. An fi fp8 path could return later on top of #354 with proper scales.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "mkornreich <52514824+mkornreich@users.noreply.github.com>"
+    ]
+  },
+  "398": {
+    "number": 398,
+    "title": "feat(kvcache): add ISO3/ISO4 KV-cache quantization (--kv-cache-iso)",
+    "head_sha": "3746a196b774",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "ISO3/ISO4 produce garbage on Qwen3-0.6B, 8k decode drops to 6-9 tok/s (about 7x slower), FULL attention only, forces its own backend and adds ~1k lines of custom CUDA.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Asmanov Lev <81736315+AsmanovLev@users.noreply.github.com>",
+      "Lev Asmanov <asmanovlev@gmail.com>"
+    ]
   }
 }
