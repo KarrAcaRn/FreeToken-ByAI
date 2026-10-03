@@ -50,7 +50,8 @@ def render(log):
         link = f"[#{num}](https://github.com/{UPSTREAM}/pull/{num})"
         # names only: the emails stay in the JSON for Co-authored-by trailers
         authors = ", ".join(a.split(" <")[0] for a in e.get("authors", []))
-        rows.append(f"| {link} | {e['title']} | {authors} | {e['decision']}{gpu} | {reason} |")
+        by = f" by #{e['superseded_by']}" if e.get("superseded_by") else ""
+        rows.append(f"| {link} | {e['title']} | {authors} | {e['decision']}{by}{gpu} | {reason} |")
     TABLE.write_text("\n".join(rows) + "\n")
 
 
@@ -69,15 +70,27 @@ def overlap(num, log):
     base = git("merge-base", "main", ref).strip()
     files = set(git("diff", "--name-only", f"{base}..{ref}").split())
     print(f"# PR #{num}: {len(files)} files, base {base[:12]}")
+    if not files:
+        print("nothing left to apply: main already contains this PR's head")
+        return
     # main moved on after the PR branched: a fix or refactor there may make it obsolete
     print("## main since the PR's base, on its files")
     print(git("log", "--oneline", f"{base}..main", "--", *files) or "(none)\n", end="")
     print("## other open PRs touching the same files")
+    hits, decided = [], []
     for n in open_nums:
         shared = files & set(git("diff", "--name-only", f"main...refs/pr-heads/{n}").split())
-        if shared:
-            decision = log.get(str(n), {}).get("decision", "undecided")
-            print(f"#{n} [{decision}]: {', '.join(sorted(shared))}")
+        if not shared:
+            continue
+        if str(n) in log:
+            decided.append(f"#{n} {log[str(n)]['decision']}")
+        else:
+            hits.append((len(shared), n, shared))
+    # most shared files first: a PR touching only a hub file like args.py is rarely a duplicate
+    for count, n, shared in sorted(hits, key=lambda h: (-h[0], -h[1])):
+        print(f"#{n} [{count}]: {', '.join(sorted(shared))}")
+    if decided:
+        print(f"## already decided: {', '.join(decided)}")
 
 
 def main():

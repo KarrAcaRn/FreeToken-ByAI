@@ -149,5 +149,19 @@
     "authors": [
       "skavans <skavans@users.noreply.github.com>"
     ]
+  },
+  "505": {
+    "number": 505,
+    "title": "fix(scheduler): preserve pending hybrid checkpoint across prefill chunks",
+    "head_sha": "ae8b3cfaef74",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "superseded_by": 577,
+    "reason": "Its fix (carry mamba_last_track_seqlen into the next chunk's Req, three lines in scheduler/prefill.py) is contained verbatim in #577, which credits it and is already merged.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Ran Bao <worksev@gmail.com>"
+    ]
   }
 }
