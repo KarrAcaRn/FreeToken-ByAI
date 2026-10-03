@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Dict
 
 import torch
-import torch.nn.functional as F
 from freetoken.core import get_global_ctx
 from freetoken.distributed import DistributedCommunicator, get_tp_info
 from freetoken.utils import div_ceil, nvtx_annotate
@@ -84,9 +83,13 @@ class ParallelLMHead(VocabParallelEmbedding):
         self.out_features = self.num_embeddings_tp
         self.output_sizes = (self.num_embeddings_tp,)
         self.quant_method = None
+        self.tied_kernel = None
         if tied_embedding is None:
             self.quant_method = quant_method_for(quant_config, self, prefix)
             self.quant_method.create_weights(self)
+        else:
+            # the embedding's bf16 table is the weight; only the kernel choice comes from a Method
+            self.tied_kernel = quant_method_for(None, self, prefix).kernel
         self.bias = torch.empty(self.num_embeddings_tp) if bias else None
 
     def finalize(self) -> None:
@@ -132,7 +135,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             del indices
 
         if self.tied_embedding is not None:
-            logits = F.linear(x, self.tied_embedding.weight, self.bias)
+            logits = self.tied_kernel.linear(x, self.tied_embedding.weight, self.bias)
         else:
             logits = self.quant_method.apply(self, x)
         if self.tp_size == 1:

@@ -297,10 +297,11 @@ CASES = [
         **{f"model.layers.2.{p}": (FP8B, "dsv4") for p in (
             "attn.wq_a", "attn.wq_b", "attn.wkv", "attn.wo_b", "attn.indexer.wq_b",
             "ffn.shared_experts.w1", "ffn.shared_experts.w2", "ffn.shared_experts.w3")},
-        # the KV compressors and the indexer's scorer ship bf16; the fp8 config has no modules_to_not_convert
-        **{f"model.layers.2.{p}": (BF16, "torch") for p in (
+        # the KV compressors and the indexer's scorer ship bf16; the fp8 config has no modules_to_not_convert.
+        # Their kernel (torch, or the GEMV on a CUDA host) depends on the host, so only the Method is checked.
+        **{f"model.layers.2.{p}": BF16 for p in (
             "attn.compressor.wkv", "attn.compressor.wgate", "attn.indexer.weights_proj", "attn.indexer.compressor.wkv")},
-        "model.head": (BF16, "torch"), "model.layers.2.ffn.experts": (Mxfp4MoEMethod, "triton"),
+        "model.head": BF16, "model.layers.2.ffn.experts": (Mxfp4MoEMethod, "triton"),
     }, check=_dsv4),
     Case("nvidia/MiniMax-M2.5-NVFP4", ModelOptConfig, {
         "model.layers.3.block_sparse_moe.experts": Nvfp4MoEMethod, "model.layers.3.self_attn.qkv_proj": BF16,
