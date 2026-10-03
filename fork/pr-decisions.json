@@ -1492,5 +1492,74 @@
       "HaileyStorm <HaileyCollet@gmail.com>"
     ],
     "revisit": "after-queue"
+  },
+  "266": {
+    "number": 266,
+    "title": "fix(server): hide qwen transport markers from semantic responses",
+    "head_sha": "90be98111420",
+    "reviewed_at": "2026-10-04",
+    "decision": "rejected",
+    "reason": "Strips Qwen protocol markers (<|im_end|>, <|vision_start|>, ...) from chat-API content with a ~360-line streaming text filter that keeps markers inside quotes or typographic quotation marks. No issue or reproduction is given, and editing model text by quote heuristics can also drop markers a user explicitly asked about. The underlying gap is real (the detokenizer decodes without skip_special_tokens), but an exact token-level fix - drop non-semantic special token IDs for the chat APIs - would be far smaller and not heuristic.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "HaileyStorm <HaileyCollet@gmail.com>"
+    ]
+  },
+  "264": {
+    "number": 264,
+    "title": "fix(build): honor explicit and versioned CUDA toolkits",
+    "head_sha": "c697ffc382cd",
+    "reviewed_at": "2026-10-04",
+    "decision": "rejected",
+    "reason": "Selects torch's CUDA toolkit (absolute CUDA_HOME first, then /usr/local/cuda-X.Y, then PATH) and requires nvcc to match torch's CUDA major AND minor. That is stricter than the ABI needs (libcudart.so.<major> is shared across minors) and would refuse every build/JIT on working setups like this machine (toolkit 13.1, torch cu130) unless FREETOKEN_ALLOW_CUDA_MISMATCH is set; next's major-only check (#132) already guards the real hazard. It also conflicts with that check in _toolchain.py and setup.py. The CUDA_HOME / versioned-toolkit discovery could come back on top of a major-only check.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "HaileyStorm <HaileyCollet@gmail.com>"
+    ]
+  },
+  "260": {
+    "number": 260,
+    "title": "ROCm: validate native gfx1151 serving on Strix Halo",
+    "head_sha": "36cea4d36d48",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "15.6k-line ROCm port for gfx1151 (Strix Halo) across 174 files, incl. GGUF Q4 kernels and auxiliary expert banks (which #317 builds on). Not judged on its merits yet: ROCm cannot be run or verified here. Revisit after the queue together with #217 / #535 / #317.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "David <david@example.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "258": {
+    "number": 258,
+    "title": "feat(dflash): support dflash",
+    "head_sha": "9f0a136bdbf2",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Speculative decoding with a DFlash draft (new speculative/ package, ~780 lines in engine.py, ~390 in graph.py, scheduler and detokenizer changes; no description). Promising and testable here - z-lab/Qwen3.8-27B-DFlash2 exists for our 27B - but it conflicts in 6 central files on next and the available drafts are DFlash2, whose compatibility with this PR is unverified. Revisit after the queue as its own project (rebase/reimplement, measure acceptance and tok/s on the 27B).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Lancer <maruixiang6688@gmail.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "254": {
+    "number": 254,
+    "title": "feat(bench): pass ft serve options through '--' in bench_decode_moe",
+    "head_sha": "ce703a703afd",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "Replaces bench_decode_moe's mirrored server flags with a bare '--' passthrough to ft serve, applying the bench's own defaults only when the passthrough does not set them. Live on the RTX 4090: Qwen3.6-35B-A3B-NVFP4 with `-- --text-model-only --kv-reserve-tokens 32768 --kv-cache-dtype fp8` -> 142.7 tok/s decode, the options reached the server.",
+    "commits": [
+      "7cfd3fb"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "yuyi2439 <68320855+yuyi2439@users.noreply.github.com>"
+    ]
   }
 }
