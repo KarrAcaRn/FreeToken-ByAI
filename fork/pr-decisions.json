@@ -946,5 +946,82 @@
     "authors": [
       "gberasmus87 <gberasmus87@gmail.com>"
     ]
+  },
+  "439": {
+    "number": 439,
+    "title": "fix(scheduler): read the prefill chunk cap from the pool, not a snapshot",
+    "head_sha": "5e13cc711f12",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "CacheManager copied the window pool's prefill_chunk_budget at construction, so a runtime cache rebuild never refreshed it: growing the pool left chunking unchanged, shrinking left a cap too large for the pool. Now a property that re-reads the pool; test drives a real DSV4 pool rebuild in both directions. CPU tests pass; DSV4 itself cannot run here.",
+    "commits": [
+      "2fd82c1"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "gberasmus87 <gberasmus87@gmail.com>"
+    ]
+  },
+  "435": {
+    "number": 435,
+    "title": "fix(server): resolve JSON Schema refs and union types in tool arguments",
+    "head_sha": "0802d138b186",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Resolves local $ref (cycle-safe), type unions and anyOf/oneOf when typing tool-call arguments in the schema-aware parsers (qwen3_coder, MiniMax M3), with 700 lines of tests. Fixup: it gave every property without a type the new 'loose' type, so a parameter declared only by description or enum stopped streaming as a string and '123'/'true' came back as a number/boolean; only unions and unresolvable refs now parse loosely, plain untyped properties keep the string default (new test, 20 cases fail before).",
+    "commits": [
+      "f00c035",
+      "13fcbdf"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Retloldin <retloldin@icloud.com>"
+    ]
+  },
+  "430": {
+    "number": 430,
+    "title": "fix(glm4_moe): load compressed-tensors NVFP4 expert checkpoints",
+    "head_sha": "184979e7415b",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "glm4_moe's expert reader only knew the modelopt names, so a compressed-tensors export (gesong2077/GLM-4.5-Air-NVFP4) matched only the shared weight_scale tensors and the banks filled with scales and no weights. Mirrors glm5_next's dialect handling (kind_map + reciprocal global scale). The PR had no tests; fixup moves glm4_moe out of the static-spec test (its hook now reads the config) and adds dialect tests. The ~60 GB model cannot run here.",
+    "commits": [
+      "7032541",
+      "f88727c"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "gberasmus87 <gberasmus87@gmail.com>"
+    ]
+  },
+  "429": {
+    "number": 429,
+    "title": "qwen4_exp: build o_proj row-parallel, as every other family does",
+    "head_sha": "2973a722725c",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Same latent TP>1 defect as #440 for qwen4_exp: replicated o_proj after a head-sharded qkv would skip the all-reduce. LinearOProj is identical at TP=1 (#440's 27B check showed token-identical output for the same swap); qwen4_exp CPU tests pass. Flash-Next itself cannot run here.",
+    "commits": [
+      "fbff6f2"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "gberasmus87 <gberasmus87@gmail.com>"
+    ]
+  },
+  "414": {
+    "number": 414,
+    "title": "fix(kernel): order the batch-memcpy probe against the current stream",
+    "head_sha": "b6e799507621",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "The cudaMemcpyBatchAsync probe zero-filled its destination on the current stream and copied on a fresh stream without a join, so under a stream backlog the fill clobbered the copy and the probe failed on supported hardware, silently disabling --moe-prefill-hit-d2d. One wait_stream fixes it. Reproduced on the RTX 4090: the PR's test fails without the fix and passes with it.",
+    "commits": [
+      "e3c002c"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "tspeaks <speaks_tyler@yahoo.com>"
+    ]
   }
 }
