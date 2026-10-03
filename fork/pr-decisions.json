@@ -239,5 +239,19 @@
     "authors": [
       "pi agent <pi@local>"
     ]
+  },
+  "563": {
+    "number": 563,
+    "title": "feat(moe): pin hot experts so fp8 qwen3.8-flash-next serves on a 48gb card",
+    "head_sha": "1b03fcc9c295",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Valuable idea (pin per-layer hot experts in VRAM, hotness stats + selection tool, EMA repinning, live K via tune file, fp8_block CPU executor from #534), but 9.4k lines incl. a 1.2k-line rewrite of the offload cache, measured on one machine, and not opt-in: it changes the hybrid PCIe/CPU split default from the benched profile to a fixed 50%. Conflicts with the adopted #337 in 6 files. User decision: come back after all other PRs, then likely build our own version -- with a GPU test environment.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "mmletgo <zhengrongh@126.com>"
+    ]
   }
 }
