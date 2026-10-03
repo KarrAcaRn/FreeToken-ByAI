@@ -80,6 +80,8 @@ class EngineConfig:
     memory_ratio: float = 0.9
     # --vram-reserve-mb: device memory left free for the rest of the machine at the largest prefill
     vram_reserve_mb: int = 0
+    # --skip-preflight: load the weights even when the pre-load memory forecast says the config cannot fit
+    skip_preflight: bool = False
     # Hybrid GDN models default to the HybridRadixCache (cross-request GDN-state prefix reuse);
     # `--cache-type naive` opts out. linear_state_cache_ratio sizes the GDN snapshot cache as
     # ceil(ratio * max_running_req) extra slots.

@@ -355,6 +355,14 @@ def parse_args(
         "and shrinks the MoE expert cache until the reserve stays free. 0 skips the check.",
     )
 
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        default=ServerArgs.skip_preflight,
+        help="Load the weights even when the pre-load memory forecast (see `ft info`) says this "
+        "configuration cannot fit the GPU.",
+    )
+
     assert ServerArgs.use_dummy_weight == False
     parser.add_argument(
         "--dummy-weight",
