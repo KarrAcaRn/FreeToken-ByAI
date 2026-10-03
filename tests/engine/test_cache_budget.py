@@ -312,6 +312,7 @@ def test_engine_resolve_auto_moe_cache_size_maps_kwargs():
         memory_ratio = 0.9
         moe_prefill_overlap = True
         kv_reserve_tokens = 0
+        num_page_override = None
         swa_full_tokens_ratio = 0.2
         swa_num_pages_override = None
         attention_backend = "triton"  # resolved before Engine init; derived-size backends charge 0
@@ -723,3 +724,38 @@ def test_fixed_workspace_bytes_known_backends():
     # derived-size backends and unknown names charge nothing (never over-reserve)
     assert fixed_workspace_bytes("triton") == 0
     assert fixed_workspace_bytes("triton,fi") == 256 * 1024 * 1024
+
+
+def test_auto_plan_reserves_an_explicit_kv_page_count(monkeypatch):
+    # --num-pages / --num-tokens (num_page_override) is a KV floor too: --moe-cache-auto
+    # must not hand those pages to the expert cache (upstream #198).
+    from types import SimpleNamespace
+
+    from freetoken.engine import engine as engine_mod
+
+    captured = {}
+
+    def fake_resolve(**kwargs):
+        captured.update(kwargs)
+        return 8, 64, True
+
+    class StubPool:
+        @staticmethod
+        def kv_cost(config):
+            return 1024, 0, 16, 0  # cache_per_page, fixed, page_tokens, min_reserve
+
+    monkeypatch.setattr("freetoken.engine.cache_budget.resolve_moe_cache_auto", fake_resolve)
+    monkeypatch.setattr(engine_mod, "state_pool_bytes", lambda config: 0)
+    config = SimpleNamespace(
+        memory_ratio=0.9, moe_prefill_overlap=True, kv_reserve_tokens=256,
+        attention_backend="triton", num_page_override=None,
+        model_config=SimpleNamespace(num_experts=4, num_moe_layers=2),
+    )
+    plan = lambda: engine_mod.plan_moe_cache_auto(  # noqa: E731
+        config, StubPool, baseline_free=10_000_000, weights_bytes=0, per_expert_bytes=512, max_slots=None
+    )
+    plan()
+    assert captured["kv_reserve_tokens"] == 256
+    config.num_page_override = 100
+    plan()
+    assert captured["kv_reserve_tokens"] == 100 * 16

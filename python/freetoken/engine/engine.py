@@ -109,7 +109,10 @@ def plan_moe_cache_auto(
         num_experts=num_experts,
         total_experts=total_experts,
         prefill_overlap=config.moe_prefill_overlap,
-        kv_reserve_tokens=max(config.kv_reserve_tokens, min_reserve),
+        # An explicit --num-pages / --num-tokens is a KV floor too: the experts must not take it.
+        kv_reserve_tokens=max(
+            config.kv_reserve_tokens, min_reserve, (config.num_page_override or 0) * page_tokens
+        ),
         page_size=page_tokens,
         max_slots=max_slots,
     )
