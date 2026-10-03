@@ -81,14 +81,13 @@ def _write_checkpoint(tmp_path, table, n_shards):
 
 def _make_table(tmp_path):
     from freetoken.models.qwen4_exp.ple_disk import DiskRowTable, source_from_safetensors
+    from freetoken.models.qwen4_exp.weight import ple_table_rows
 
     args = parse_config(toy_hf_config()).qwen4_args
     multipliers, sizes, offsets = hash_constants(args)
-    total_rows = int(offsets[-1] + sizes[-1])
     gen = torch.Generator().manual_seed(9)
-    table = torch.randint(0, 256, (total_rows, args.ngram_head_dim), dtype=torch.uint8, generator=gen)
-    n_shards = next(k for k in (4, 2, 1) if total_rows % k == 0)
-    _write_checkpoint(tmp_path, table, n_shards)
+    table = torch.randint(0, 256, (ple_table_rows(args), args.ngram_head_dim), dtype=torch.uint8, generator=gen)
+    _write_checkpoint(tmp_path, table, args.split_ngram_parts)
     constants = {
         "num_ngram_heads": args.num_ngram_heads,
         "layer_multipliers": multipliers.tolist(),
@@ -96,7 +95,7 @@ def _make_table(tmp_path):
         "per_head_offsets": offsets.tolist(),
         "eos_token_id": EOS,
     }
-    disk = DiskRowTable(source_from_safetensors(str(tmp_path)), constants)
+    disk = DiskRowTable(source_from_safetensors(str(tmp_path), args), constants)
     oracle = GpuResidentTable(table.cuda().view(torch.float8_e4m3fn), scale=0.03125)
     return disk, oracle, args
 
@@ -207,51 +206,21 @@ def test_layouts_readers_and_errors(tmp_path):
     with pytest.raises(Exception, match="extent needs"):
         _make_store(tmp_path, write=False)
 
-    # checkpoint scan guards
-    from safetensors.torch import save_file
-
-    from freetoken.models.qwen4_exp.ple_disk import source_from_safetensors
-
-    save_file(
-        {f"{_KEY_PREFIX}.shard_0.weight": torch.zeros(8, 4, dtype=torch.uint8),
-         f"{_KEY_PREFIX}.weight_scale": torch.tensor(1.0, dtype=torch.bfloat16)},
-        str(tmp_path / "model.safetensors"),
-    )
-    with pytest.raises(ValueError, match="dtype"):
-        source_from_safetensors(str(tmp_path))
-    save_file(
-        {f"{_KEY_PREFIX}.shard_1.weight": torch.zeros(8, 4, dtype=torch.float8_e4m3fn),
-         f"{_KEY_PREFIX}.weight_scale": torch.tensor(1.0, dtype=torch.bfloat16)},
-        str(tmp_path / "model.safetensors"),
-    )
-    with pytest.raises(ValueError, match="contiguous"):
-        source_from_safetensors(str(tmp_path))
-    save_file(
-        {f"{_KEY_PREFIX}.shard_0.weight": torch.zeros(8, 4, dtype=torch.float8_e4m3fn),
-         f"{_KEY_PREFIX}.weight_scale": torch.tensor(1.0, dtype=torch.bfloat16)},
-        str(tmp_path / "model.safetensors"),
-    )
-    save_file(
-        {f"{_KEY_PREFIX}.shard_0.weight": torch.zeros(8, 4, dtype=torch.float8_e4m3fn)},
-        str(tmp_path / "model-2.safetensors"),
-    )
-    with pytest.raises(ValueError, match="duplicate"):
-        source_from_safetensors(str(tmp_path))
-    (tmp_path / "model-2.safetensors").unlink()
-
-    # truncated checkpoint: a contiguous shard prefix passes the scan, init rejects the row count
-    from freetoken.models.qwen4_exp.ple_disk import DiskRowTable
+    # the checkpoint scan guards are covered CPU-only in test_weight.py; here: state-dict hash
+    # constants that address past a valid table are rejected at init
+    from freetoken.models.qwen4_exp.ple_disk import DiskRowTable, source_from_safetensors
+    from freetoken.models.qwen4_exp.weight import ple_table_rows
 
     args = parse_config(toy_hf_config()).qwen4_args
     multipliers, vocab, offs = hash_constants(args)
-    rows = int(offs[-1] + vocab[-1])
-    _write_checkpoint(tmp_path, torch.zeros(rows // 2, args.ngram_head_dim, dtype=torch.uint8), 1)
+    rows = ple_table_rows(args)
+    _write_checkpoint(tmp_path, torch.zeros(rows, args.ngram_head_dim, dtype=torch.uint8), args.split_ngram_parts)
     constants = {
         "num_ngram_heads": args.num_ngram_heads, "layer_multipliers": multipliers.tolist(),
-        "per_head_vocab_sizes": vocab.tolist(), "per_head_offsets": offs.tolist(), "eos_token_id": EOS,
+        "per_head_vocab_sizes": vocab.tolist(), "per_head_offsets": (offs + rows).tolist(), "eos_token_id": EOS,
     }
     with pytest.raises(ValueError, match="hash addresses"):
-        DiskRowTable(source_from_safetensors(str(tmp_path)), constants)
+        DiskRowTable(source_from_safetensors(str(tmp_path), args), constants)
 
 
 @requires_cuda

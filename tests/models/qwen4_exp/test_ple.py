@@ -238,6 +238,10 @@ def test_pinned_uva_real_table():
         text = json.load(fh)["text_config"]
     heads = (text["ngram_size"] - 1) * text["heads_per_ngram"]
     args = SimpleNamespace(
+        ngram_size=text["ngram_size"],
+        num_ngram_heads=heads,
+        ngram_vocab_size_base=text["ngram_vocab_size_base"],
+        make_ngram_vocab_size_divisible_by=text["make_ngram_vocab_size_divisible_by"],
         split_ngram_parts=text["split_ngram_parts"],
         ngram_head_dim=text["ple_embed_dim"] // heads,
     )

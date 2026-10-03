@@ -333,10 +333,17 @@ def test_hash_constants_stay_int64(loaded):
         assert loaded[f"model.layers.0.ple.ple_embedding.{leaf}"].dtype is torch.int64
 
 
+def _ple_args(**overrides) -> SimpleNamespace:
+    """A config addressing exactly NGRAM_SHARDS x NGRAM_ROWS rows: one head over the prime 23, padded to 28."""
+    fields = dict(ngram_size=2, num_ngram_heads=1, ngram_vocab_size_base=23,
+                  make_ngram_vocab_size_divisible_by=NGRAM_SHARDS * NGRAM_ROWS,
+                  split_ngram_parts=NGRAM_SHARDS, ngram_head_dim=NGRAM_DIM)
+    return SimpleNamespace(**{**fields, **overrides})
+
+
 def test_load_ple_table_concatenates_shards_in_index_order(checkpoint):
     folder, raw = checkpoint
-    args = SimpleNamespace(split_ngram_parts=NGRAM_SHARDS, ngram_head_dim=NGRAM_DIM)
-    table = load_ple_table(folder, args, pin=False)
+    table = load_ple_table(folder, _ple_args(), pin=False)
     assert table.tensor.shape == (NGRAM_SHARDS * NGRAM_ROWS, NGRAM_DIM)
     assert table.tensor.dtype is torch.float8_e4m3fn
     prefix = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
@@ -350,9 +357,221 @@ def test_load_ple_table_concatenates_shards_in_index_order(checkpoint):
 
 def test_load_ple_table_rejects_a_shard_count_mismatch(checkpoint):
     folder, _raw = checkpoint
-    args = SimpleNamespace(split_ngram_parts=NGRAM_SHARDS + 1, ngram_head_dim=NGRAM_DIM)
-    with pytest.raises(ValueError, match="shards 0"):
-        load_ple_table(folder, args, pin=False)
+    with pytest.raises(ValueError, match=r"shards 0\.\.4, found 4 \(missing \[4\]"):
+        load_ple_table(folder, _ple_args(split_ngram_parts=NGRAM_SHARDS + 1), pin=False)
+
+
+# ======================================================================================
+# PLE shard-set validation (both backends) and the pinned load's admission / cleanup
+# ======================================================================================
+
+_PLE_PREFIX = "model.language_model.layers.0.ple.ple_embedding.ngram_embedding"
+
+
+@pytest.fixture
+def ple_folder(tmp_path):
+    """Just the n-gram table, one file; returns (folder, the file, its tensors)."""
+    tensors, _scale = _ngram_table()
+    path = tmp_path / "model-plefp8-00000.safetensors"
+    save_file(tensors, str(path))
+    return tmp_path, path, tensors
+
+
+def _rewrite(path, tensors=None, header_fn=None):
+    """Re-save ``tensors`` to ``path``, then let ``header_fn`` edit the raw safetensors header in place."""
+    if tensors is not None:
+        save_file(tensors, str(path))
+    if header_fn is not None:
+        data = path.read_bytes()
+        n = int.from_bytes(data[:8], "little")
+        header = json.loads(data[8:8 + n])
+        header_fn(header)
+        blob = json.dumps(header).encode()
+        blob += b" " * (-len(blob) % 8)
+        path.write_bytes(len(blob).to_bytes(8, "little") + blob + data[8 + n:])
+
+
+def _shard(i: int) -> str:
+    return f"{_PLE_PREFIX}.shard_{i}.weight"
+
+
+def test_scan_ple_table_maps_both_backends(ple_folder):
+    from freetoken.models.qwen4_exp.ple_disk import source_from_safetensors
+    from freetoken.models.qwen4_exp.weight import scan_ple_table
+
+    folder, path, tensors = ple_folder
+    shards = scan_ple_table(str(folder), _ple_args())
+    assert (shards.total_rows, shards.cols, float(shards.scale)) == (NGRAM_SHARDS * NGRAM_ROWS, NGRAM_DIM, 0.125)
+    data = path.read_bytes()
+    for i, (file, offset) in enumerate(shards.parts):
+        assert file == str(path)
+        assert data[offset:offset + NGRAM_ROWS * NGRAM_DIM] == tensors[_shard(i)].view(torch.uint8).numpy().tobytes()
+    source = source_from_safetensors(str(folder), _ple_args())
+    assert source.paths == [str(path)] and source.extent_file == [0] * NGRAM_SHARDS
+    assert source.extent_base == [offset for _, offset in shards.parts]
+    assert (source.total_rows, source.row_bytes, source.scale) == (NGRAM_SHARDS * NGRAM_ROWS, NGRAM_DIM, 0.125)
+
+
+def _with(tensors, **changes):
+    out = dict(tensors)
+    for key, value in changes.items():
+        if value is None:
+            del out[key]
+        else:
+            out[key] = value
+    return out
+
+
+_SCALE = f"{_PLE_PREFIX}.weight_scale"
+_FP8 = torch.float8_e4m3fn
+
+
+@pytest.mark.parametrize("edit, match", [
+    (lambda t: _with(t, **{_shard(2): t[_shard(2)].view(torch.uint8)}),
+     r"shard_2\.weight in .*model-plefp8-00000\.safetensors: dtype U8, expected F8_E4M3"),
+    (lambda t: _with(t, **{_shard(3): torch.zeros(NGRAM_ROWS + 1, NGRAM_DIM, dtype=_FP8)}),
+     r"shard_3\.weight in .*: shape \[8, 4\], expected \[7, 4\]"),
+    (lambda t: _with(t, **{_shard(0): torch.zeros(NGRAM_ROWS * NGRAM_DIM, dtype=_FP8)}),
+     r"shard_0\.weight in .*: shape \[28\], expected 2-D"),
+    (lambda t: _with(t, **{_shard(3): None, _shard(4): t[_shard(3)]}),
+     r"expected shards 0\.\.3, found 4 \(missing \[3\], unexpected \[4\]\)"),
+    (lambda t: _with(t, **{f"{_PLE_PREFIX}.shard_01.weight": t[_shard(1)].clone()}),
+     r"shard_0?1\.weight in .*: duplicate index 1, already read .*shard_0?1\.weight"),
+    (lambda t: _with(t, **{_SCALE: None}), r"no .*weight_scale tensor"),
+    (lambda t: _with(t, **{_SCALE: torch.tensor([0.0], dtype=torch.bfloat16)}), r"finite positive value, got \[0\.0\]"),
+    (lambda t: _with(t, **{_SCALE: torch.tensor(-1.0, dtype=torch.bfloat16)}), r"finite positive value, got -1\.0"),
+    (lambda t: _with(t, **{_SCALE: torch.tensor(float("nan"), dtype=torch.bfloat16)}), r"finite positive value, got nan"),
+    (lambda t: _with(t, **{_SCALE: torch.tensor(float("inf"), dtype=torch.bfloat16)}), r"finite positive value, got inf"),
+    (lambda t: _with(t, **{_SCALE: torch.ones(2, dtype=torch.bfloat16)}), r"finite positive value, got \[1\.0, 1\.0\]"),
+])
+def test_scan_ple_table_rejects_a_bad_shard_set(ple_folder, edit, match):
+    from freetoken.models.qwen4_exp.weight import scan_ple_table
+
+    folder, path, tensors = ple_folder
+    _rewrite(path, edit(tensors))
+    with pytest.raises(ValueError, match=match):
+        scan_ple_table(str(folder), _ple_args())
+
+
+def test_scan_ple_table_rejects_a_second_scale(ple_folder):
+    from freetoken.models.qwen4_exp.weight import scan_ple_table
+
+    folder, _path, _tensors = ple_folder
+    save_file({_SCALE: torch.tensor(0.5, dtype=torch.bfloat16)}, str(folder / "model-plefp8-00001.safetensors"))
+    with pytest.raises(ValueError, match=r"00001\.safetensors: expected one scale, already read .*00000\.safetensors"):
+        scan_ple_table(str(folder), _ple_args())
+
+
+def test_scan_ple_table_rejects_bad_data_offsets(ple_folder):
+    from freetoken.models.qwen4_exp.weight import scan_ple_table
+
+    folder, path, _tensors = ple_folder
+
+    def shrink(header):
+        begin, end = header[_shard(1)]["data_offsets"]
+        header[_shard(1)]["data_offsets"] = [begin, end - 1]
+
+    _rewrite(path, header_fn=shrink)
+    with pytest.raises(ValueError, match=r"shard_1\.weight in .*: data_offsets \[\d+, \d+\), expected 28 bytes"):
+        scan_ple_table(str(folder), _ple_args())
+
+    # a truncated file: the last tensor's bytes run past EOF
+    _rewrite(path, _ngram_table()[0])
+    path.write_bytes(path.read_bytes()[:-3])
+    with pytest.raises(ValueError, match=r"data_offsets .* within the file's \d+ data bytes"):
+        scan_ple_table(str(folder), _ple_args())
+
+
+@pytest.mark.parametrize("overrides", [
+    dict(split_ngram_parts=NGRAM_SHARDS - 1),
+    dict(ngram_head_dim=NGRAM_DIM * 2),
+    dict(make_ngram_vocab_size_divisible_by=32),  # 23 padded to 32 rows, the shards hold 28
+])
+def test_scan_ple_table_rejects_a_config_mismatch(ple_folder, overrides):
+    from freetoken.models.qwen4_exp.weight import ple_table_rows, scan_ple_table
+
+    folder, _path, _tensors = ple_folder
+    args = _ple_args(**overrides)
+    with pytest.raises(ValueError, match=rf"expected {'shards' if 'split_ngram_parts' in overrides else ple_table_rows(args)}"):
+        scan_ple_table(str(folder), args)
+
+
+def test_ple_table_rows_pads_like_hf():
+    from freetoken.models.qwen4_exp.config import parse_config
+    from freetoken.models.qwen4_exp.weight import ple_table_rows
+
+    args = parse_config(hf_config()).qwen4_args
+    # 4 heads over the primes after 999: 1009 + 1013 + 1019 + 1021 = 4062, padded to a multiple of 8
+    assert ple_table_rows(args) == 4064
+
+
+def _no_bank(*_args, **_kwargs):
+    raise AssertionError("HostBank allocated")
+
+
+def test_load_ple_table_validates_before_allocating(ple_folder, monkeypatch):
+    import freetoken.models.qwen4_exp.weight as weight
+
+    folder, path, tensors = ple_folder
+    _rewrite(path, _with(tensors, **{_SCALE: None}))
+    monkeypatch.setattr(weight, "HostBank", _no_bank)
+    with pytest.raises(ValueError, match="weight_scale"):
+        load_ple_table(str(folder), _ple_args(), pin=False)
+
+
+def test_load_ple_table_refuses_a_table_larger_than_host_ram(ple_folder, monkeypatch):
+    import freetoken.models.qwen4_exp.weight as weight
+
+    folder, _path, _tensors = ple_folder
+    monkeypatch.setattr("freetoken.memory.available_host_memory", lambda: weight._PLE_HOST_MARGIN)
+    monkeypatch.setattr(weight, "HostBank", _no_bank)
+    with pytest.raises(MemoryError, match=r"0\.0 GiB of host RAM plus 4 GiB headroom, .* 4\.0 GiB; use --ple-backend disk"):
+        load_ple_table(str(folder), _ple_args(), pin=False)
+
+    monkeypatch.undo()
+    monkeypatch.setattr("freetoken.memory.available_host_memory", lambda: None)  # unknown -> proceed
+    assert load_ple_table(str(folder), _ple_args(), pin=False).tensor.shape == (NGRAM_SHARDS * NGRAM_ROWS, NGRAM_DIM)
+
+
+@pytest.mark.parametrize("stage", ["fill", "pin", "fill+free"])
+def test_load_ple_table_frees_the_bank_on_failure(ple_folder, monkeypatch, stage):
+    import freetoken.models.qwen4_exp.weight as weight
+    from freetoken.moe import host_banks
+
+    folder, _path, _tensors = ple_folder
+    banks: list[HostBank] = []
+
+    class _Tracked(HostBank):
+        __slots__ = ()
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            banks.append(self)
+
+    def fail(*_args, **_kwargs):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(weight, "HostBank", _Tracked)
+    monkeypatch.setattr("freetoken.memory.available_host_memory", lambda: None)
+    if stage == "pin":
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(_Tracked, "pin", fail)
+    else:
+        monkeypatch.setattr(weight, "read_range_into", fail)
+    if stage == "fill+free":
+        def free_fails(self):
+            raise RuntimeError("free failed")
+
+        monkeypatch.setattr(_Tracked, "free", free_fails)
+    live = len(host_banks._LIVE_BUFFERS)
+
+    with pytest.raises(OSError, match="disk went away"):  # never masked by the cleanup
+        load_ple_table(str(folder), _ple_args())
+    assert len(banks) == 1
+    if stage != "fill+free":
+        assert len(host_banks._LIVE_BUFFERS) == live
+        assert all(b is not banks[0]._buf for b in host_banks._LIVE_BUFFERS)
+        assert not banks[0].tensor.view(torch.uint8).any()  # the filled pages were dropped
 
 
 # ======================================================================================

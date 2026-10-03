@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Sequence
 
-import safetensors
 import torch
 
 from freetoken.mm import MM_PAD_SHIFT_VALUE, restore_placeholder
@@ -19,13 +18,7 @@ from freetoken.core import Batch
 from freetoken.kernel.pinned import alloc_pinned_tensor
 from freetoken.utils import init_logger
 
-from .weight import (
-    _PLE_SCALE_SUFFIX,
-    _PLE_SHARD_RE,
-    _PLE_ST_DTYPE,
-    _ple_table_files,
-    _safetensors_header,
-)
+from .weight import scan_ple_table
 
 _IO_URING_ENV = "FREETOKEN_PLE_IO_URING"
 _SYNC_ENV = "FREETOKEN_PLE_SYNC"  # auto | wait | gate
@@ -56,48 +49,24 @@ class PleRowSource:
         return len(self.extent_base) * self.rows_per_extent
 
 
-def source_from_safetensors(folder: str) -> PleRowSource:
+def source_from_safetensors(folder: str, qwen4_args) -> PleRowSource:
     """Map the checkpoint's ``ngram_embedding.shard_<i>`` tensors in place: one extent per shard, no copy."""
-    rows = cols = 0
-    scale: torch.Tensor | None = None
-    paths: list[str] = []
-    path_idx: dict[str, int] = {}
-    shards: dict[int, tuple[int, int]] = {}
-    for path in _ple_table_files(folder):
-        header, base = _safetensors_header(path)
-        for key, meta in header.items():
-            if key == "__metadata__":
-                continue
-            if key.endswith(_PLE_SCALE_SUFFIX):
-                with safetensors.safe_open(path, framework="pt", device="cpu") as f:
-                    scale = f.get_tensor(key).reshape(())
-                continue
-            match = _PLE_SHARD_RE.search(key)
-            if match is None:
-                continue
-            if meta["dtype"] != _PLE_ST_DTYPE:
-                raise ValueError(f"PLE shard {key} has dtype {meta['dtype']}, expected {_PLE_ST_DTYPE}")
-            if rows and tuple(meta["shape"]) != (rows, cols):
-                raise ValueError(f"PLE shard {key} is {meta['shape']}, expected {[rows, cols]}")
-            rows, cols = meta["shape"]
-            if path not in path_idx:
-                path_idx[path] = len(paths)
-                paths.append(path)
-            idx = int(match.group("shard"))
-            if idx in shards:
-                raise ValueError(f"duplicate PLE shard {idx} in {path}")
-            shards[idx] = (path_idx[path], base + meta["data_offsets"][0])
-    if sorted(shards) != list(range(len(shards))) or not shards:
-        raise ValueError(f"PLE shard indices are not contiguous 0..N-1: {sorted(shards)[:8]}")
-    if scale is None:
-        raise ValueError("PLE table has no weight_scale")
-    order = [shards[i] for i in range(len(shards))]
-    return PleRowSource(paths, [f for f, _ in order], [b for _, b in order], rows, cols, cols, float(scale))
+    shards = scan_ple_table(folder, qwen4_args)
+    paths = list(dict.fromkeys(path for path, _ in shards.parts))
+    return PleRowSource(
+        paths,
+        [paths.index(path) for path, _ in shards.parts],
+        [offset for _, offset in shards.parts],
+        shards.rows_per_part,
+        shards.cols,
+        shards.cols,
+        float(shards.scale),
+    )
 
 
-def resolve_row_source(folder: str) -> PleRowSource:
+def resolve_row_source(folder: str, qwen4_args) -> PleRowSource:
     """Pick the row source for a checkpoint; the seam where a repacked format would plug in."""
-    return source_from_safetensors(folder)
+    return source_from_safetensors(folder, qwen4_args)
 
 
 class DiskRowTable:

@@ -209,6 +209,16 @@ class HostBank:
             return
         self._buf.madvise(mmap.MADV_DONTNEED)
 
+    def free(self) -> None:
+        """Give back a bank that will never be served (a failed load): drop its pages and the lifetime reference.
+
+        The mapping itself goes once the last torch view does; a traceback can hold those, so the pages are dropped now. A pinned bank is left alone."""
+        if self._pinned:
+            return
+        self.release()
+        with contextlib.suppress(ValueError):
+            _LIVE_BUFFERS.remove(self._buf)
+
     def lock(self) -> None:
         """mlock the (now-filled) buffer: resident without CUDA pin quota, but no device address -- only the CPU executor can serve a locked layer.
 
