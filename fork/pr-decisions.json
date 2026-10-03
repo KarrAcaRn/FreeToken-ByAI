@@ -74,5 +74,80 @@
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ]
+  },
+  "578": {
+    "number": 578,
+    "title": "perf(moe): dequant nvfp4 prefill experts by bit placement and load activations contiguously",
+    "head_sha": "e428b068cb10",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Bit-identical output, ~6x faster NVFP4 MoE prefill GEMM (measured by the author), reusing nvfp4_linear's existing table-free decode; the exactness argument checks out (every e2m1*e4m3 product is exact in fp16/bf16). Nothing to improve.",
+    "commits": [
+      "d027ad1"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "575": {
+    "number": 575,
+    "title": "fix(windows): build the extensions and JIT kernels with MSVC",
+    "head_sha": "fba57138c25b",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Windows source build. On Linux it only respells (.template, __forceinline__) to byte-identical device code; the rest sits behind sys.platform. Likely supersedes the older Windows PRs #298/#285 (to check when reached). setup.py conflict with our ROCm change resolved in the merge commit.",
+    "commits": [
+      "2dbb852"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "574": {
+    "number": 574,
+    "title": "feat(engine): --vram-reserve-mb keeps VRAM free at the largest prefill",
+    "head_sha": "2381a8137b0b",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Opt-in (--vram-reserve-mb, default 0) measurement of the real prefill peak with a bounded shrink of the expert cache; inert otherwise, tested. Draft #583 (WDDM free memory) builds on it.",
+    "commits": [
+      "ab4c03e"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "572": {
+    "number": 572,
+    "title": "fix(server): keep a silent stream alive and notice a client that left",
+    "head_sha": "09ab44ea0274",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Small and well tested: SSE comment keep-alive while a long prefill is silent, plus disconnect detection during the silence. Complements, not duplicates, #222 (abort delivery), which is still to be reviewed.",
+    "commits": [
+      "068a8c1"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "577": {
+    "number": 577,
+    "title": "feat(kvcache): keep prefill-chunk GDN checkpoints in a pinned host bank",
+    "head_sha": "b1fd3626a1ca",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Compared with an independent implementation of the same goal (+349 vs +636 lines, same design: pinned host bank, device copy wins, LRU host eviction, exact-length attach, plus the same last_track_seqlen carry fix). Ours was smaller but only CPU-tested; the PR is validated on a live engine and already fixed an overlap-scheduling bug found there, which weighs more for pinned-memory/stream-ordering code. Opt-in (--mamba-host-slots, default 0). Includes #505's fix, so #505 is likely superseded; #525 is a broader alternative to check when reached.",
+    "commits": [
+      "97e70f0"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "skavans <skavans@users.noreply.github.com>"
+    ]
   }
 }
