@@ -253,5 +253,96 @@
     "authors": [
       "mmletgo <zhengrongh@126.com>"
     ]
+  },
+  "564": {
+    "number": 564,
+    "title": "fix(server): do not auto-select qwen3 parser for instruct-2507",
+    "head_sha": "b5630ea2c313",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Small, tested: --reasoning-parser auto no longer picks qwen3 for Instruct-2507 checkpoints (empty message.content). The model path is the only signal (shared architecture with Thinking-2507); acceptable for an auto heuristic, an explicit flag still wins.",
+    "commits": [
+      "dce9d11"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Sanjay Sundaram <ssundaram@berkeley.edu>"
+    ]
+  },
+  "562": {
+    "number": 562,
+    "title": "fix(engine): charge the attention workspace in moe-cache-auto sizing",
+    "head_sha": "c75e40330945",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Charges the attention backend's fixed workspace (fi 256 MiB, trtllm 128 MiB) in the --moe-cache-auto plan, so a tight --memory-ratio no longer OOMs at startup. Fixup: the runtime rebuild fit check (validate_rebuild, generic + DSV4) did not charge it, so a rebuild could re-grant the bytes the workspace holds. #340 (dummy page in the KV floor) is a separate, complementary fix.",
+    "commits": [
+      "fa9aa85",
+      "ae16716"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Cyber-Marty <15370813896@163.com>"
+    ]
+  },
+  "559": {
+    "number": 559,
+    "title": "fix(kvcache): clone inserted radix keys to release request buffers",
+    "head_sha": "2f37ac514d94",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Correct and small: radix keys were views into the request's whole input+output token buffer, so a cached 16-token prefix kept ~131 KB alive (host-RAM growth). Fixup: the regression test the PR left out, across plain/SWA/hybrid caches.",
+    "commits": [
+      "8d69b50",
+      "d6aa64c"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ]
+  },
+  "305": {
+    "number": 305,
+    "title": "feat(server): add --api-key bearer authentication",
+    "head_sha": "2e99aadbd9e5",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Pulled forward while reviewing #558 (same feature). The more complete --api-key: tests, docs, WWW-Authenticate, CORS preflight passes, and the attached shell client carries the key (with #558 a keyed ft serve --shell would lock out its own shell). args.py conflict resolved in the merge commit.",
+    "commits": [
+      "30550b5"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Ben Wilson <soft@mainlight.com>"
+    ]
+  },
+  "558": {
+    "number": 558,
+    "title": "feat(server): --api-key flag for bearer token auth on the HTTP API",
+    "head_sha": "8054a6382e7e",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "superseded_by": 305,
+    "reason": "Same --api-key feature as #305, which is more complete (tests, docs, CORS preflight, WWW-Authenticate, the shell client sends the key) and is merged.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "santanu20 <santanu20@users.noreply.github.com>"
+    ]
+  },
+  "565": {
+    "number": 565,
+    "title": "fix(ple): strict shard schema/geometry, nofollow + bounded discovery, mutation evidence, and pinned-bank admission/rollback",
+    "head_sha": "1e18e289c980",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "Two of its four parts are worth having: one shard-set schema/geometry check shared by both PLE backends (exact row count, errors naming tensor+file), and pinned admission against available host RAM with release on failure (low-RAM topic). Own version (+396/-140 vs +981/-107) builds on available_host_memory() from #334's reimplementation and leaves out nofollow discovery and per-shard identity/digest re-validation -- tamper hardening a local engine does not need.",
+    "commits": [
+      "270b3a5"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Léon Avic Simmons <Avicennasis@gmail.com>"
+    ]
   }
 }
