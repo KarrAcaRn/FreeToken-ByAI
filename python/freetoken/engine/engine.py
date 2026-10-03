@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import functools
 import gc
 import math
 import os
@@ -1376,14 +1377,50 @@ def _cpu_moe_executor_viable(model_config) -> bool:
 def _pin_budget_bytes(reserved: int = 0) -> int | None:
     """Bytes this process can still safely cudaHostRegister, or None when the platform does not cap pinning (plain Linux).
 
-    WSL's WDDM-backed CUDA caps pinning near half of RAM, shared across processes -- budget 40%. FREETOKEN_PIN_BUDGET_GB overrides anywhere. ``reserved`` subtracts host bytes already pinned outside the expert banks (qwen4_exp's PLE table)."""
+    WSL's WDDM-backed CUDA caps pinning, shared across processes, at a ceiling that varies by host -- measured once (_wsl_pin_cap). FREETOKEN_PIN_BUDGET_GB overrides anywhere. ``reserved`` subtracts host bytes already pinned outside the expert banks (qwen4_exp's PLE table)."""
     if env := os.environ.get("FREETOKEN_PIN_BUDGET_GB"):
         cap = int(float(env) * 2**30)
     elif not hasattr(os, "uname") or "microsoft" not in os.uname().release.lower():  # WSL kernel tag
         return None
     else:
-        cap = int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") * 0.4)
+        cap = _wsl_pin_cap()
     return max(0, cap - reserved)
+
+
+# probe step: small enough to land near the ceiling, large enough to keep the probe to ~100 calls
+_PIN_PROBE_CHUNK = 256 << 20
+# what the banks may take of the measured ceiling: it moves with what other processes pin
+_PIN_PROBE_MARGIN = 0.8
+
+
+@functools.cache
+def _wsl_pin_cap() -> int:
+    """WSL's pin ceiling: half of RAM in principle, but on some hosts the driver refuses a few GiB in.
+
+    Pins 256 MiB blocks until the driver refuses one or the old 40%-of-RAM estimate is reached,
+    frees them, and keeps a margin of what it reached; the estimate stands when the probe cannot run."""
+    estimate = int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") * 0.4)
+    try:
+        from freetoken.kernel.pinned import alloc_pinned_tensor
+    except ImportError:
+        return estimate
+    held = []
+    try:
+        while (len(held) + 1) * _PIN_PROBE_CHUNK <= estimate:
+            try:
+                held.append(alloc_pinned_tensor(_PIN_PROBE_CHUNK, dtype=torch.uint8))
+            except RuntimeError:  # the driver's refusal; the extension clears the latched error
+                break
+        else:
+            return estimate  # no ceiling below the estimate
+        reached = len(held) * _PIN_PROBE_CHUNK
+    finally:
+        held.clear()  # free the probe blocks before any bank needs the budget
+    logger.info_rank0(
+        f"WSL pins at most {reached / 2**30:.2f} GiB here (estimate {estimate / 2**30:.1f} GiB); "
+        f"budgeting {_PIN_PROBE_MARGIN:.0%} of it"
+    )
+    return int(reached * _PIN_PROBE_MARGIN)
 
 
 def _bank_bytes(config: EngineConfig, method=None) -> int | None:

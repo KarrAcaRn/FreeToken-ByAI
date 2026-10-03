@@ -591,3 +591,61 @@ def test_a_reserve_the_expert_cache_cannot_free_fails_the_start(returned, refuse
     engine = _ReserveFitEngine(706 * MIB, returned=returned, refuses=refuses)
     with pytest.raises(RuntimeError, match=message):
         Engine._fit_prefill_peak(engine, 2000 * MIB)
+
+
+# ---- _wsl_pin_cap: the measured WSL pin ceiling ----
+
+
+@pytest.fixture
+def wsl_host(monkeypatch):
+    """A WSL kernel with 64 GiB of RAM and a driver that refuses pinning past ``limit`` bytes."""
+    import freetoken.engine.engine as engine_module
+    import freetoken.kernel.pinned as pinned
+
+    monkeypatch.delenv("FREETOKEN_PIN_BUDGET_GB", raising=False)
+    monkeypatch.setattr(os, "uname", lambda: SimpleNamespace(release="6.6.87.2-microsoft-standard-WSL2"))
+    pages = {"SC_PHYS_PAGES": 64 * 2**30 // 4096, "SC_PAGE_SIZE": 4096}
+    monkeypatch.setattr(os, "sysconf", lambda name: pages[name])
+    state = {"limit": None, "live": 0, "calls": 0}
+
+    def alloc(n, dtype):
+        state["calls"] += 1
+        if state["limit"] is not None and state["live"] + n > state["limit"]:
+            raise RuntimeError("cudaHostAlloc failed: out of memory")
+        state["live"] += n
+
+        class Block:  # frees its bytes when the probe drops it
+            def __del__(self):
+                state["live"] -= n
+
+        return Block()
+
+    monkeypatch.setattr(pinned, "alloc_pinned_tensor", alloc)
+    engine_module._wsl_pin_cap.cache_clear()
+    yield state
+    engine_module._wsl_pin_cap.cache_clear()
+
+
+def test_wsl_budget_is_the_measured_ceiling_with_a_margin(wsl_host):
+    wsl_host["limit"] = 2 * 2**30  # the driver refuses past 2 GiB
+    assert _pin_budget_bytes() == int(2 * 2**30 * 0.8)
+    assert _pin_budget_bytes(reserved=2**30) == int(2 * 2**30 * 0.8) - 2**30
+    assert wsl_host["live"] == 0  # the probe gave every block back
+
+
+def test_wsl_without_a_ceiling_below_the_estimate_keeps_it(wsl_host):
+    assert _pin_budget_bytes() == int(64 * 2**30 * 0.4)
+    assert wsl_host["live"] == 0
+
+
+def test_wsl_that_pins_nothing_has_no_budget(wsl_host):
+    wsl_host["limit"] = 0
+    assert _pin_budget_bytes() == 0  # zero, not None: None would read as uncapped
+
+
+def test_wsl_probe_runs_once(wsl_host):
+    wsl_host["limit"] = 2**30
+    _pin_budget_bytes()
+    calls = wsl_host["calls"]
+    _pin_budget_bytes(reserved=1)
+    assert wsl_host["calls"] == calls
