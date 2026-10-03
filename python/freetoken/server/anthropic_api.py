@@ -169,6 +169,10 @@ async def handle_anthropic_count_tokens(req: AnthropicCountTokensRequest, state:
         return _anthropic_error_response(
             400, "invalid_request_error", "messages: no tokenizable content"
         )
+    # The same server default a /v1/messages generation applies, so the count matches.
+    from .openai_api import apply_default_thinking_mode
+
+    ctk = apply_default_thinking_mode(ctk, getattr(state.config, "default_thinking_mode", "auto"))
     try:
         n_tokens = await count_prompt_tokens(messages, template_tools, ctk, state)
     except GenerationError as exc:

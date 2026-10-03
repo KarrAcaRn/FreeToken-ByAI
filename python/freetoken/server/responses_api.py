@@ -243,11 +243,10 @@ def convert_responses_to_genspec(
 
     from .openai_api import apply_default_thinking_mode
 
-    ctk = apply_default_thinking_mode(
-        dict(getattr(req, "chat_template_kwargs", None) or {}), default_thinking_mode
-    )
+    ctk = dict(getattr(req, "chat_template_kwargs", None) or {})
     if req.reasoning:
         ctk = effort_toggle_kwargs(req.reasoning.get("effort"), ctk)
+    ctk = apply_default_thinking_mode(ctk, default_thinking_mode)
 
     return GenSpec(
         messages=render_messages(messages),
