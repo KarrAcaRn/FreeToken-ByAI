@@ -70,16 +70,7 @@ def chat_request_to_genspec(
         ctk = effort_toggle_kwargs(req.reasoning_effort, ctk, thinking_type=thinking_type)
     return GenSpec(
         messages=render_messages([m.model_dump(exclude_none=True) for m in req.messages]),
-        sampling_params=resolve_sampling(
-            temperature=req.temperature,
-            top_k=req.top_k,
-            top_p=req.top_p,
-            max_tokens=req.max_tokens,
-            ignore_eos=req.ignore_eos,
-            model_sampling=model_sampling,
-            stop=req.stop,
-            default_max_tokens=default_max_tokens,
-        ),
+        sampling_params=_resolve_sampling(req, model_sampling, default_max_tokens=default_max_tokens),
         chat_template_kwargs=ctk,
         template_tools=_tools_for_template(req),
         parser_tools=(_all_tool_dicts(req.tools) if _should_parse_tools(req) else None),
@@ -187,7 +178,7 @@ async def handle_chat_completion(
         )
         spec = chat_request_to_genspec(req, model_sampling, default_max_tokens=default_max_tokens)
     except ValueError as exc:
-        return create_error_response(str(exc))
+        return create_error_response(str(exc), param=_sampling_error_param(exc))
 
     if req.stream:
         # Non-stream requests already surface render failures as a clean 400
@@ -394,13 +385,13 @@ async def handle_completion(
     unsupported = _completion_unsupported_reason(req)
     if unsupported is not None:
         return create_error_response(unsupported)
-    try:  # surfaces an out-of-range max_tokens as a 400 rather than a 500 from the worker
+    try:  # surfaces out-of-range sampling fields as a 400 rather than a 500 from the worker
         default_max_tokens = (
             getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS
         )
         _resolve_sampling(req, model_sampling, default_max_tokens=default_max_tokens)
     except ValueError as exc:
-        return create_error_response(str(exc), param="max_tokens")
+        return create_error_response(str(exc), param=_sampling_error_param(exc))
 
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     assert isinstance(prompts, list)
@@ -550,7 +541,15 @@ def _resolve_sampling(
         model_sampling=model_sampling,
         stop=req.stop,
         default_max_tokens=default_max_tokens,
+        presence_penalty=req.presence_penalty,
+        frequency_penalty=req.frequency_penalty,
     )
+
+
+def _sampling_error_param(exc: ValueError) -> str | None:
+    message = str(exc)
+    fields = ("max_tokens", "presence_penalty", "frequency_penalty")
+    return next((name for name in fields if message.startswith(name)), None)
 
 
 def _tools_for_template(req: ChatCompletionRequest) -> list[dict[str, Any]] | None:

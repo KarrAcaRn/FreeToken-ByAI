@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Literal, Tuple
@@ -24,10 +25,24 @@ class SamplingParams:
     # Stop strings (OpenAI `stop` / Anthropic `stop_sequences`). Generation finishes when one
     # appears in the decoded output; the matched substring (and anything after) is trimmed.
     stop_strs: list[str] = field(default_factory=list)
+    # OpenAI semantics: logit -= frequency * count + presence * (count > 0), counted over this
+    # request's generated tokens only (the prompt is not penalized).
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in ("presence_penalty", "frequency_penalty"):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and -2.0 <= value <= 2.0):
+                raise ValueError(f"{name} must be a finite number in [-2, 2], got {value}")
 
     @property
     def is_greedy(self) -> bool:
         return self.temperature <= 0.0 or self.top_k == 1
+
+    @property
+    def has_penalty(self) -> bool:
+        return self.presence_penalty != 0.0 or self.frequency_penalty != 0.0
 
 
 @dataclass(eq=False)
@@ -74,6 +89,9 @@ class Req:
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
         self.device_len = len(self.input_ids)
+        # Generated tokens live at token_pool[table_idx, prompt_len:device_len]. A ChunkedReq
+        # sees only a prompt prefix here, but it is never sampled, so no penalty reads it.
+        self.prompt_len = self.device_len
         self.max_device_len = len(self.input_ids) + self.output_len
         assert 0 <= self.cached_len < self.device_len <= self.max_device_len
         self._alloc_ids_buf()

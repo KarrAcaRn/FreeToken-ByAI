@@ -428,6 +428,57 @@ def test_omitted_max_tokens_honors_server_default():
     assert fallback_state.sent.sampling_params.max_tokens == DEFAULT_MAX_OUTPUT_TOKENS
 
 
+def test_penalties_reach_sampling_params():
+    chat_state = FakeState([UserReply(uid=42, incremental_output="hi", finished=True)])
+    run(handle_chat_completion(
+        ChatCompletionRequest(
+            model="m", messages=[{"role": "user", "content": "hi"}],
+            presence_penalty=0.5, frequency_penalty=-1.25,
+        ),
+        request=None, state=chat_state, model_sampling={},
+    ))
+    params = chat_state.sent.sampling_params
+    assert (params.presence_penalty, params.frequency_penalty) == (0.5, -1.25)
+
+    cmpl_state = FakeState([UserReply(uid=42, incremental_output="hi", finished=True)])
+    run(handle_completion(
+        CompletionRequest(model="m", prompt="hi", frequency_penalty=2.0),
+        request=None, state=cmpl_state, model_sampling={},
+    ))
+    params = cmpl_state.sent.sampling_params
+    assert (params.presence_penalty, params.frequency_penalty) == (0.0, 2.0)
+
+    # explicit null is OpenAI's "unset"
+    null_req = ChatCompletionRequest.model_validate(
+        {"model": "m", "messages": [{"role": "user", "content": "hi"}], "presence_penalty": None}
+    )
+    assert not chat_request_to_genspec(null_req, {}).sampling_params.has_penalty
+
+
+def test_invalid_penalties_are_rejected():
+    for field, value in (
+        ("presence_penalty", float("nan")),
+        ("frequency_penalty", float("inf")),
+        ("presence_penalty", 2.5),
+        ("frequency_penalty", -2.01),
+    ):
+        state = FakeState([])
+        chat = run(handle_chat_completion(
+            ChatCompletionRequest(
+                model="m", messages=[{"role": "user", "content": "hi"}], **{field: value}
+            ),
+            request=None, state=state, model_sampling={},
+        ))
+        cmpl = run(handle_completion(
+            CompletionRequest(model="m", prompt="hi", **{field: value}),
+            request=None, state=state, model_sampling={},
+        ))
+        for response in (chat, cmpl):
+            assert response.status_code == 400
+            assert json.loads(response.body)["error"]["param"] == field
+        assert state.sent is None
+
+
 def test_models_route_returns_served_model_name():
     state = FakeState([])
     app = FastAPI()

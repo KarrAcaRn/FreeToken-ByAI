@@ -173,7 +173,7 @@ def test_user_msg_with_mm_items_survives_the_wire():
     msg = UserMsg(
         uid=9,
         input_ids=torch.arange(16, dtype=torch.int32),
-        sampling_params=SamplingParams(),
+        sampling_params=SamplingParams(presence_penalty=0.5, frequency_penalty=-1.0),
         mm_items=[item],
         mrope_positions=torch.zeros(3, 16, dtype=torch.int32),
         mrope_delta=-3,
@@ -186,6 +186,7 @@ def test_user_msg_with_mm_items_survives_the_wire():
     assert got.precomputed_embeddings is None
     assert torch.equal(got.feature, item.feature)
     assert out.mrope_positions.shape == (3, 16) and out.mrope_delta == -3
+    assert (out.sampling_params.presence_penalty, out.sampling_params.frequency_penalty) == (0.5, -1.0)
 
 
 def test_mm_item_shape_rules():
