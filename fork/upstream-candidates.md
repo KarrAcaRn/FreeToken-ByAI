@@ -7,6 +7,7 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 |---|---|---|
 | ft info + pre-load memory preflight | 6890aeb, 291d603, 63e1752 | **Opened as #595** (branch `feat/ft-info`); follow-ups once #562/#574 and #354/#408 merge upstream |
 | Load dense Gemma-4 GGUFs end to end | 5b0cb77 (merge of #359), 7f2fc79 | Candidate, see below |
+| bench_serving: --api-key and the zero-hit cache report | b36d49d, 23d92b6 (on top of #341) | Candidate, see below |
 
 ## Load dense Gemma-4 GGUFs end to end
 
@@ -35,3 +36,26 @@ How to send it (decide when we do it):
 
 Upstream main has no #494 (mixed-quant GGUF), so a branch from `main` needs the quant-layout part
 dropped or adapted, like `feat/ft-info` was.
+
+## bench_serving: --api-key and the zero-hit cache report
+
+Upstream PR #341 (tuxevil, still open) adds `benchmarks/bench_serving.py`, a client-wall serving
+benchmark. Two fixes on top of it:
+
+- b36d49d: `--api-key` (default `$FREETOKEN_API_KEY`, like `ft serve`) sent as
+  `Authorization: Bearer`. Without it the harness gets 401 from a server started with
+  `--api-key`. Note: `--api-key` itself comes from upstream PR #305, which upstream main may not
+  have yet - then this part waits for #305 (or ships as a no-op option).
+- 23d92b6: the server omits `prompt_tokens_details` for a zero prefix-cache hit (sglang
+  convention), so every fresh prompt read as "no cache report" and the fresh-prefill rate - the
+  harness's main number - was always n/a. The harness now probes once whether a repeated prompt
+  reports a hit; when it does, an absent object counts as a miss. This one applies to upstream
+  main as is.
+
+Tested: RedHatAI/Qwen3.6-35B-A3B-NVFP4 on an RTX 4090, `ft serve ... --enable-cache-report
+--api-key` and `python benchmarks/bench_serving.py --prefill-sizes 1024,4096`: 401 without the
+key; with it fresh prefill 1325 tok/s (1k) / 5238 tok/s (4k), prefix hits 4032/4096 detected,
+decode ~150 tok/s. `tests/benchmarks/test_bench_serving.py` (16 tests) passes.
+
+How to send it: #341 is still open, so the natural route is to suggest both fixes there (review
+comment or a PR against its branch); otherwise a follow-up PR once #341 merges.
