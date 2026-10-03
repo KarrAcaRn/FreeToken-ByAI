@@ -62,6 +62,8 @@ class EngineConfig:
     moe_disk_tier: str = "off"
     expert_ram_experts: int = 0
     disk_fetch_workers: int = 8
+    # skip the startup prefill warmup forwards; first requests then pay the kernel module loads (and the full JIT compile on a cold start)
+    prefill_warmup: bool = True
     # Hybrid CPU/GPU decode (--moe-strategy offload only): which MoE layers decode on
     # the CPU executor instead of the GPU offload/PCIe path. Spec is an explicit id
     # list ("3,7,11"), a count ("8" -> 8 layers evenly strided across depth), or a

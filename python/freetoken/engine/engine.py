@@ -15,6 +15,7 @@ import torch
 from freetoken.attention import AttnType, attention_backend_info, create_attention_backend
 from freetoken.core import Batch, Context, Req, set_global_ctx
 from freetoken.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
+from freetoken.env import ENV
 from freetoken.gpu_select import gpu_identity
 from freetoken.layers import set_rope_device
 from freetoken.layers.quantization import LayerKind, QuantBackend, finalize_quant, set_quant_backend
@@ -640,8 +641,7 @@ class Engine:
             moe_offload_cache=self.moe_offload_cache,
             mrope=config.model_config.model_is_mrope,
         )
-        if config.attention_backend.split(",")[0] == "triton":
-            # Prefill runs on the first comma part; warm its autotune cache.
+        if config.prefill_warmup:
             self._warmup_prefill()
         if config.vram_reserve_mb:
             self._fit_prefill_peak(config.vram_reserve_mb << 20)
@@ -1325,6 +1325,40 @@ class Engine:
             )
         cache.reset_stats()
 
+    def _warmup_prefill_lens(self) -> list[int]:
+        """Prefill lengths that cross every size bucket the in-repo Triton prefill kernels specialize on."""
+        cap = min(self.max_seq_len, self.config.max_forward_len)
+        if ENV.WARMUP_MAX_LEN.value > 0:
+            cap = min(cap, ENV.WARMUP_MAX_LEN.value)
+        mc = self.config.model_config
+        # 16/32/64 BLOCK_M ladders (nvfp4_linear, fused MoE) plus an odd twin each: triton re-specializes int args on % 16 == 0
+        lens = {9, 16, 17, 32, 33, 48, 65, 80}
+        if mc.is_moe:
+            top_k = max(1, mc.num_experts_per_tok)
+            # moe_align leaves its single-CTA path at numel = tokens * top_k > 1024
+            lens.add(1024 // top_k + 1)
+            import triton
+
+            from freetoken.kernel.backend import is_sgl_kernel_installed
+
+            if not is_sgl_kernel_installed():
+                # the single-CTA path keys on (next_pow2(numel), num_warps); walk each cell once
+                seen = set()
+                for tokens in range(2, 1024 // top_k + 1):
+                    numel = tokens * top_k
+                    cell = (triton.next_power_of_2(numel), triton.next_power_of_2(min(16, max(2, numel // 32))))
+                    if cell not in seen:
+                        seen.add(cell)
+                        lens.add(tokens)
+        if cap >= 4096:
+            # act_and_mul flips BLOCK_D at M >= 4096; also GDN chunk_delta_h NT bucket 1 (NT > 32)
+            lens.add(4096)
+        elif mc.has_linear_attention and cap >= 2049:
+            lens.add(2049)
+        if mc.has_linear_attention and cap >= 8193:
+            lens.add(8193)  # chunk_delta_h NT bucket 2 (NT > 128)
+        return sorted(n for n in lens if 2 <= n <= cap)
+
     @torch.inference_mode()
     def _warmup_prefill(self) -> None:
         """Compile the Triton prefill path before the first real request.
@@ -1332,17 +1366,17 @@ class Engine:
         Decode CUDA graph capture warms the decode path, but the first prefill
         can still pay Triton/cublas setup costs.
         """
-        if self.max_seq_len < 2:
+        if AttnType.DSV4 in _required_attn_types(self.config.model_config):
+            # DSV4 prefill reads pool.full_loc_map, which only the scheduler's paged allocation fills
+            logger.info_rank0("Prefill warmup skipped for DSV4.")
             return
-
-        warmup_lens = [min(80, self.max_seq_len)]
-        if self.max_seq_len >= 128:
-            warmup_lens.append(128)
-        warmup_lens = sorted({length for length in warmup_lens if length >= 2})
+        warmup_lens = self._warmup_prefill_lens()
         if not warmup_lens:
             return
-        seconds = self._prefill_dummy(warmup_lens, input_ids=None)
-        logger.info_rank0(f"Prefill warmup complete for lengths {warmup_lens} in {seconds:.3f} s")
+        logger.info_rank0(f"Prefill warmup over {len(warmup_lens)} lengths: {warmup_lens}")
+        seconds = self._prefill_dummy(warmup_lens, input_ids=None, tolerate_errors=True)
+        if seconds is not None:
+            logger.info_rank0(f"Prefill warmup complete for lengths {warmup_lens} in {seconds:.3f} s")
 
     @torch.inference_mode()
     def _fit_prefill_peak(self, reserve: int) -> None:
@@ -1383,11 +1417,15 @@ class Engine:
             "--max-prefill-length"
         )
 
-    def _prefill_dummy(self, lengths: list[int], input_ids: torch.Tensor | None) -> float:
+    def _prefill_dummy(
+        self, lengths: list[int], input_ids: torch.Tensor | None, *, tolerate_errors: bool = False
+    ) -> float | None:
         """Prefill each length on the dummy row, restored afterwards so padded decode replay keeps
-        its dedicated KV slot; returns the GPU seconds spent."""
+        its dedicated KV slot; returns the GPU seconds spent. With ``tolerate_errors`` (the
+        warmup) a failing length is logged and None returned instead of raising."""
         dummy_row = self.page_table[self.dummy_req.table_idx]
         dummy_slot = int(dummy_row[0].item())
+        done: list[int] = []
         started = torch.cuda.Event(enable_timing=True)
         ended = torch.cuda.Event(enable_timing=True)
         started.record(self.stream)
@@ -1408,6 +1446,9 @@ class Engine:
                     sampling_params=None,  # type: ignore[arg-type]
                     cache_handle=None,  # type: ignore[arg-type]
                 )
+                if self.linear_state_pool is not None:
+                    # like dummy_req: GDN state writes land in the padding sink, not a real slot
+                    warm_req.linear_slot_idx = self.linear_state_pool.padding_slot
                 batch = Batch(reqs=[warm_req], phase="prefill")
                 batch.padded_reqs = batch.reqs
                 batch.input_ids = token_ids.to(self.device)
@@ -1420,10 +1461,19 @@ class Engine:
                 self.attn_backend.prepare_metadata(batch)
                 with self.ctx.forward_batch(batch):
                     self.model.forward()
+                # surface async faults here, at the failing length, not past the except
+                torch.cuda.synchronize(self.device)
+                done.append(length)
+        except Exception as exc:
+            if not tolerate_errors or self.config.tp_info.size > 1:
+                raise
+            logger.warning_rank0(f"Prefill warmup stopped after {done}: {type(exc).__name__}: {exc}")
         finally:
             dummy_row.fill_(dummy_slot)
             if self.moe_offload_cache is not None:
                 self.moe_offload_cache.reset()
+        if len(done) != len(lengths):
+            return None
         ended.record(self.stream)
         torch.cuda.synchronize(self.device)
         return started.elapsed_time(ended) / 1000.0
