@@ -800,5 +800,76 @@
     "authors": [
       "Rafael Rincon <rafaeldrincon@gmail.com>"
     ]
+  },
+  "468": {
+    "number": 468,
+    "title": "fix(engine): reject fa attention backend below sm_90 at config time",
+    "head_sha": "f29be24172b2",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "Claims the fa backend (sgl_kernel flash-attn) cannot run below sm_90 and gates it at config time. Refuted on the RTX 4090 (sm_89) with sgl_kernel 0.4.5: flash_attn_varlen_func matches an SDPA reference (max err 0.009 in bf16) and ft serve --attention-backend fa on Qwen3-0.6B gets through CUDA-graph capture and serves. The gate would block a working backend on Ada; the reported failure likely came from an older sgl_kernel build without sm_89 kernels.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Sanjay Sundaram <ssundaram@berkeley.edu>"
+    ]
+  },
+  "466": {
+    "number": 466,
+    "title": "fix(utils): tolerate coalesced msgpack frames in zmq pull queues",
+    "head_sha": "40816fce85ad",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "Buffers msgpack frames in the zmq pull/sub queues so a frame with two packed objects no longer crashes a worker (seen on Windows). ZMQ delivers whole messages, so such a frame points to a sender-side race the PR would mask instead of fix; a frame holding a partial object still crashes (take() raises IndexError on an empty buffer) and its leftover bytes corrupt the next frame. Windows-only symptom with an unknown root cause; not reproducible here.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Cyber-Marty <15370813896@163.com>"
+    ]
+  },
+  "464": {
+    "number": 464,
+    "title": "fix(scheduler): match stop strings with incremental decoding",
+    "head_sha": "3882ef689c67",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "The scheduler matched stop strings on a window of max_chars+1 tokens decoded on its own, so a stop over multi-token characters (rare CJK, emoji under byte-level BPE) was missed, a half-decoded character could match, and the detokenizer then failed to trim the stop. Now matches against the same incremental decode the detokenizer streams. The PR had no tests; fixup adds five (four fail before). Live on Qwen3-0.6B: CJK stop strings trim correctly, same as before for single-token characters.",
+    "commits": [
+      "c6a3d7a",
+      "ea0b4c3"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ]
+  },
+  "461": {
+    "number": 461,
+    "title": "fix(server): loopback-bind the TP rendezvous store, add --dist-port",
+    "head_sha": "b482b86221c7",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "torch's TCPStore server ignores the host and listens on every interface, so the rendezvous store at --port+1 was reachable off-box without authentication, also with one GPU. Verified here: the old store listened on *:PORT (incl. the LAN address), the PR's pre-bound one on 127.0.0.1 only; live server shows 127.0.0.1:30112. Adds --dist-port. Merge conflict with --api-key in args.py/docs resolved by keeping both. Fixup: Windows keeps the previous store with a warning (master_listen_fd with a SOCKET handle is untested there and SO_REUSEADDR lets another socket take the port).",
+    "commits": [
+      "b6dc4fc",
+      "5157d7e"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Shikha Kathrani <99456505+shikhakath@users.noreply.github.com>"
+    ]
+  },
+  "460": {
+    "number": 460,
+    "title": "feat(models): support deepseek v4.1 with native fp8-fp4 kv storage",
+    "head_sha": "cba8ae303b4a",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "15k-line DeepSeek V4.1 port (132 files: new sparse attention, fp8/fp4 KV storage, checkpoint conversion). Like #502, the model is far beyond a single RTX 4090 with 30 GB RAM, so it can be neither used nor verified here, and it reworks shared attention/KV code. Out of scope; it arrives through the upstream sync if upstream merges it.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "ArqAlice <y.tomi0131@gmail.com>"
+    ]
   }
 }
