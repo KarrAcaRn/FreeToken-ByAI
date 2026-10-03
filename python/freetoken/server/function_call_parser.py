@@ -2172,10 +2172,16 @@ class Gemma4Detector(BaseFormatDetector):
         return self.bot_token in text
 
     def scrub_markup(self, text: str) -> str:
-        """Content ends where tool markup begins: an opener the parser could not turn
-        into a call is still protocol framing, not assistant-visible text."""
-        idx = text.find(self._marker_prefix)
-        return text if idx == -1 else text[:idx]
+        """Drop tool markup the parser could not turn into a call: a closed block goes
+        whole, so prose after it survives; an opener that never closed ends the content."""
+        while True:
+            idx = text.find(self._marker_prefix)
+            if idx == -1:
+                return text
+            end = text.find(self.eot_token, idx)
+            if end == -1:
+                return text[:idx]
+            text = text[:idx] + text[end + len(self.eot_token):].lstrip("\n")
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         idx = text.find(self.bot_token)

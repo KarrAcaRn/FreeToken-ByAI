@@ -434,3 +434,16 @@ def test_unparsed_block_keeps_trailing_prose(parser_name):
 
     assert result.calls == []
     assert "Here is the answer: 42." in result.normal_text
+
+
+def test_gemma4_unparsed_closed_block_keeps_trailing_prose():
+    # The markup goes, the answer after a closed (but unparseable) block stays: returning ""
+    # would hand the client an empty message, as for the raw-text detectors above.
+    parser = FunctionCallParser(TOOLS, tool_call_parser="gemma4")
+
+    result = parser.parse_non_stream(
+        "<|tool_call>call:get_weather{bad<tool_call|>\nHere is the answer: 42."
+    )
+
+    assert result.calls == []
+    assert result.normal_text == "Here is the answer: 42."
