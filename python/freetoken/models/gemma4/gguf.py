@@ -102,6 +102,8 @@ def _gguf_quant_layout(model_path: str, num_layers: int, num_experts: int) -> di
         if bad:
             raise ValueError(f"gemma4 GGUF {role} tensors disagree or are missing in layers {bad}")
         layout[role] = tuple(next(iter(types)) for types in values)
+    if not num_experts:  # dense checkpoint: no routed-expert tensors to lay out
+        return layout
     for role, values in (("expert_gate_up", expert_gate_up), ("expert_down", expert_down)):
         missing = [i for i, value in enumerate(values) if value is None]
         if missing:
@@ -125,7 +127,6 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
 
     num_layers = int(g("block_count"))
     hidden = int(g("embedding_length"))
-    num_experts = int(g("expert_count"))
     num_qo_heads = int(g("attention.head_count"))
     kv_per_layer = g("attention.head_count_kv")  # per-layer list
     # True -> sliding-window (SWA) layer, False -> full attention.
@@ -141,6 +142,14 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
     full_kv = int(kv_per_layer[full_layer_ids[0]]) if full_layer_ids else int(kv_per_layer[0])
 
     max_pos = int(g("context_length"))
+    # Dense Gemma-4 checkpoints (gemma-4-12B-it, gemma-4-31B-it) carry no expert fields
+    # in their GGUF metadata; only MoE members (e.g. Gemma-4-26B-A4B) do. Mirror the HF
+    # side (gemma4.config.parse_config): default the expert fields to 0 and derive
+    # moe_enabled from them instead of assuming every GGUF is MoE.
+    num_experts = int(m.get("gemma4.expert_count", 0) or 0)
+    num_experts_per_tok = int(m.get("gemma4.expert_used_count", 0) or 0)
+    moe_intermediate_size = int(m.get("gemma4.expert_feed_forward_length", 0) or 0)
+    moe_enabled = num_experts > 0
     full_rotary = RotaryConfig(
         head_dim=full_head_dim,
         rotary_dim=_full_rotary_dim(shim, full_head_dim),
@@ -173,14 +182,15 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
         tie_word_embeddings=bool(shim.tie_word_embeddings),
         rotary_config=full_rotary,
         num_experts=num_experts,
-        num_experts_per_tok=int(g("expert_used_count")),
-        moe_intermediate_size=int(g("expert_feed_forward_length")),
+        num_experts_per_tok=num_experts_per_tok,
+        moe_intermediate_size=moe_intermediate_size,
         norm_topk_prob=True,
         model_type="gemma4",
         architectures=list(shim.architectures),
-        moe_enabled=True,
-        expert_quant="q4_0",
-        moe_weight_format="q4_0",
+        moe_enabled=moe_enabled,
+        # Native-Q4_0 offload-cache path for the routed experts (MoE checkpoints only).
+        expert_quant="q4_0" if moe_enabled else "none",
+        moe_weight_format="q4_0" if moe_enabled else "none",
         gguf_quant_types=_gguf_quant_layout(shim.model_path, num_layers, num_experts),
         use_qk_norm=True,
         attn_sm_scale=1.0,
