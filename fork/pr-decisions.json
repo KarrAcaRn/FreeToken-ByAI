@@ -412,13 +412,14 @@
     "title": "ci(rocm): add ROCm 10.0.0 Dockerfile and validation workflow",
     "head_sha": "8cd48c05f17e",
     "reviewed_at": "2026-10-03",
-    "decision": "rejected",
-    "reason": "CI for upstream's self-hosted W7900D runner (custom labels); this fork has no such runner, and a full run needs ROCm support PRs not yet adopted. Revisit together with the ROCm backend PRs.",
+    "decision": "deferred",
+    "reason": "CI for upstream's self-hosted W7900D runner (custom labels); this fork has no such runner, and a full run needs ROCm support PRs not yet adopted. Not wrong, just not runnable here yet: revisit together with the ROCm backend PR #217.",
     "commits": [],
     "gpu_untested": false,
     "authors": [
       "LZ-QWQ <lz1830837889@163.com>"
-    ]
+    ],
+    "revisit_with": 217
   },
   "531": {
     "number": 531,
@@ -670,13 +671,14 @@
     "title": "feat(deepseek_v4): serve image input on the V4-Flash-Vision release",
     "head_sha": "d3ac96c0825c",
     "reviewed_at": "2026-10-03",
-    "decision": "rejected",
-    "reason": "1.3k-line vision path for DeepSeek-V4-Flash, a model far beyond a single RTX 4090 with 30 GB RAM, so it can be neither used nor verified here; it also reworks the shared mm pad scheme across every processor and the scheduler's mm spans. Out of scope for this fork; it arrives through the upstream sync if upstream merges it.",
+    "decision": "deferred",
+    "reason": "1.3k-line vision path for DeepSeek-V4-Flash. Not judged on its merits yet: the model is far beyond a single RTX 4090 with 30 GB RAM, so it cannot be run or verified here; it also reworks the shared mm pad scheme across every processor and the scheduler's mm spans, which needs a careful review. Revisit after the queue (or when it lands upstream).",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "Mukkesh Ganesh <mukmckenzie@gmail.com>"
-    ]
+    ],
+    "revisit": "after-queue"
   },
   "494": {
     "number": 494,
@@ -864,12 +866,13 @@
     "title": "feat(models): support deepseek v4.1 with native fp8-fp4 kv storage",
     "head_sha": "cba8ae303b4a",
     "reviewed_at": "2026-10-03",
-    "decision": "rejected",
-    "reason": "15k-line DeepSeek V4.1 port (132 files: new sparse attention, fp8/fp4 KV storage, checkpoint conversion). Like #502, the model is far beyond a single RTX 4090 with 30 GB RAM, so it can be neither used nor verified here, and it reworks shared attention/KV code. Out of scope; it arrives through the upstream sync if upstream merges it.",
+    "decision": "deferred",
+    "reason": "15k-line DeepSeek V4.1 port (132 files: new sparse attention, native fp8/fp4 KV storage, checkpoint conversion). Not judged on its merits yet: the model is far beyond a single RTX 4090 with 30 GB RAM, so it cannot be run or verified here, and it touches shared attention/KV code that needs a careful review. Revisit after the queue (or when it lands upstream).",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "ArqAlice <y.tomi0131@gmail.com>"
-    ]
+    ],
+    "revisit": "after-queue"
   }
 }
