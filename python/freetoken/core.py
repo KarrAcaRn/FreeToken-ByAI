@@ -36,6 +36,10 @@ class SamplingParams:
             value = getattr(self, name)
             if not (math.isfinite(value) and -2.0 <= value <= 2.0):
                 raise ValueError(f"{name} must be a finite number in [-2, 2], got {value}")
+    # Sampled-token logprobs (OpenAI `logprobs`/`top_logprobs`): when on, the sampler
+    # reports the chosen token's raw (pre-temperature) logprob and top-k alternatives.
+    logprobs: bool = False
+    top_logprobs: int = 0
 
     @property
     def is_greedy(self) -> bool:
