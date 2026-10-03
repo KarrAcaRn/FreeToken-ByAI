@@ -281,7 +281,9 @@ def iter_gguf_weights(
     from freetoken.models.gguf.reader import iter_gguf_tensors
     from freetoken.utils import cached_load_hf_config
 
-    assert not include_moe_experts, (
+    config = parse_gguf_config(cached_load_hf_config(model_path))
+    # A dense checkpoint has no routed experts, so the engine asking for them is moot.
+    assert not (include_moe_experts and config.moe_enabled), (
         "gemma4 GGUF stores experts as Q4_0 and only supports the offload backend; "
         "experts are loaded into the offload cache via load_q4_0_expert_sources()."
     )
@@ -290,7 +292,6 @@ def iter_gguf_weights(
 
     # Full-attention layers ship no attn_v (k reused as v); SWA layers do. Knowing which
     # is which lets us emit the fused qkv as soon as its parts are present.
-    config = parse_gguf_config(cached_load_hf_config(model_path))
     k_eq_v_layers = {
         lid
         for lid in range(config.num_layers)
@@ -382,8 +383,12 @@ def iter_gguf_weights(
 
 
 def is_gguf_model(config: ModelConfig) -> bool:
-    """True when the model was parsed from a GGUF checkpoint (native-quant path)."""
-    return getattr(config, "moe_weight_format", None) == "q4_0"
+    """True when the model was parsed from a GGUF checkpoint (native-quant path). A dense GGUF
+    has no Q4_0 experts, so its recorded tensor layout is what marks it."""
+    return (
+        getattr(config, "moe_weight_format", None) == "q4_0"
+        or getattr(config, "gguf_quant_types", None) is not None
+    )
 
 
 class GGUFTiedLMHead:

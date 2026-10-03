@@ -87,3 +87,16 @@ def test_explicit_zero_experts_is_dense(tmp_path):
     cfg = parse_gguf_config(shim)
     assert cfg.moe_enabled is False
     assert cfg.expert_quant == "none"
+
+
+def test_a_dense_gguf_is_still_recognised_as_gguf():
+    # The native-quant layer swap keyed on the Q4_0 expert format, which a dense GGUF does not
+    # have; its recorded tensor layout marks it, or the model is built bf16 and cannot take the
+    # packed weights.
+    from types import SimpleNamespace
+
+    from freetoken.models.gemma4.gguf import is_gguf_model
+
+    assert is_gguf_model(SimpleNamespace(moe_weight_format="q4_0", gguf_quant_types=None))
+    assert is_gguf_model(SimpleNamespace(moe_weight_format="none", gguf_quant_types={"embedding": 2}))
+    assert not is_gguf_model(SimpleNamespace(moe_weight_format="none", gguf_quant_types=None))
