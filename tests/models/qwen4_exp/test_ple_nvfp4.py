@@ -45,7 +45,10 @@ def _synthetic_packed_checkpoint(tmp_path) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _args():
-    return SimpleNamespace(split_ngram_parts=2, ngram_head_dim=HEAD_DIM)
+    # one head over a small prime, padded so the config addresses exactly the two shards' rows
+    return SimpleNamespace(ngram_size=2, num_ngram_heads=1, ngram_vocab_size_base=23,
+                           make_ngram_vocab_size_divisible_by=2 * ROWS, split_ngram_parts=2,
+                           ngram_head_dim=HEAD_DIM)
 
 
 def test_nvfp4_packed_table_loads(tmp_path):
@@ -122,7 +125,21 @@ def test_pinned_nvfp4_gather_matches_reference():
                        ref[ids.reshape(-1).cpu()])
 
     oob = ids.clone()
-    oob[0] = torch.arange(-3, 5)
-    out = table.lookup(oob)
+    oob[0, :8] = torch.arange(-3, 5)
+    out = table.lookup(oob).reshape(*oob.shape, HEAD_DIM)
     assert torch.equal(out[0, :3], torch.zeros(3, HEAD_DIM, dtype=torch.bfloat16, device="cuda"))
     assert torch.equal(out[0, 7], ref[oob[0, 7]].cuda())
+
+
+def test_packed_table_without_its_block_scales_is_rejected(tmp_path):
+    packed, _ = _synthetic_packed_checkpoint(tmp_path)
+    save_file({f"{INFIX}.shard_1.weight": packed[ROWS:]}, str(tmp_path / "ple-b.safetensors"))
+    with pytest.raises(ValueError, match="block-scale shards"):
+        load_ple_table(str(tmp_path), _args(), pin=False)
+
+
+def test_packed_table_without_its_global_scale_is_rejected(tmp_path):
+    _synthetic_packed_checkpoint(tmp_path)
+    (tmp_path / "ple-c.safetensors").unlink()
+    with pytest.raises(ValueError, match="weight_scale_2"):
+        load_ple_table(str(tmp_path), _args(), pin=False)
