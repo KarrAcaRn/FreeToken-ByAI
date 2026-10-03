@@ -26,12 +26,13 @@ def test_family_exposes_a_source_spec_hook(family):
         "the disk tier cannot build a disk index for it")
 
 
-@pytest.mark.parametrize("family", [f for f in NVFP4_FAMILIES if f not in ("glm5_next", "qwen3_5_moe")])
+@pytest.mark.parametrize("family", [f for f in NVFP4_FAMILIES if f not in ("glm5_next", "qwen3_5_moe", "gemma4")])
 def test_hook_returns_the_spec_the_loader_uses(family):
     # glm5_next is excluded here only because its hook reads the checkpoint config to pick
     # between the compressed-tensors and modelopt namings; it is covered by the test below.
-    # qwen3_5_moe builds its spec from the installed QuantConfig's dialect, so it has no static
-    # spec to compare; test_qwen3_5_moe_weight drives the loader through that same hook.
+    # qwen3_5_moe and gemma4 build their spec from the installed QuantConfig's dialect, so they
+    # have no static spec to compare; test_qwen3_5_moe_weight and test_gemma4_compressed_tensors
+    # drive the loader through that same hook.
     mod = importlib.import_module(f"freetoken.models.{family}.weight")
     spec = mod.nvfp4_expert_spec("unused/for/these/families", None)
     assert spec is mod._NVFP4_SOURCE_SPEC
