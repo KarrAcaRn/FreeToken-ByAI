@@ -10,7 +10,7 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 
 ## Load dense Gemma-4 GGUFs end to end
 
-Upstream PR #359 (Cyber-Marty) lets a dense Gemma-4 GGUF's config parse, but on its own the model
+Upstream PR #359 (opened by Cyber-Marty, commit by Circle-Cheng <yc.22319139@gmail.com>) lets a dense Gemma-4 GGUF's config parse, but on its own the model
 still cannot load. Our fixup 7f2fc79 adds the two missing pieces:
 
 - `is_gguf_model` keyed on the Q4_0 expert format, which a dense GGUF does not have, so the model
@@ -30,7 +30,7 @@ How to send it (decide when we do it):
 - #359 is still open upstream: suggest the two fixes there (comment / PR against its branch), so
   its author can complete it - or
 - a follow-up PR on top of #359 once it is merged, or
-- one PR with #359's commit (crediting its author with Co-authored-by) plus our fixes, linking
+- one PR with #359's commit (Co-authored-by: Circle-Cheng <yc.22319139@gmail.com>) plus our fixes, linking
   #359 and its issue #357.
 
 Upstream main has no #494 (mixed-quant GGUF), so a branch from `main` needs the quant-layout part
