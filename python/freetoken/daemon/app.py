@@ -142,11 +142,22 @@ def _parse_ftbench(line: str) -> dict | None:
         return None
 
 
+def _signal_bench_child(proc: asyncio.subprocess.Process, sig: int) -> None:
+    """Signal the bench child's whole process group where groups exist; Windows has no
+    os.killpg (nor start_new_session), so there the child itself is stopped."""
+    if hasattr(os, "killpg"):
+        os.killpg(proc.pid, sig)
+    elif sig == signal.SIGTERM:
+        proc.terminate()
+    else:
+        proc.kill()
+
+
 async def _terminate_and_reap_bench_child(proc: asyncio.subprocess.Process, grace_s: float = 5.0) -> None:
     if proc.returncode is not None:
         return
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        _signal_bench_child(proc, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
     try:
@@ -155,7 +166,7 @@ async def _terminate_and_reap_bench_child(proc: asyncio.subprocess.Process, grac
     except asyncio.TimeoutError:
         pass
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        _signal_bench_child(proc, signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
     await proc.wait()

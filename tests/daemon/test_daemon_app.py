@@ -240,3 +240,23 @@ def test_kill_only_on_ignored_terminate(monkeypatch):
         assert await _wait_gone(pid), "term-trapping child killed after grace"
 
     asyncio.run(run())
+
+
+def test_bench_child_teardown_without_process_groups(monkeypatch):
+    # Windows has no os.killpg: the teardown must stop the child itself, not raise.
+    import asyncio
+    from types import SimpleNamespace
+
+    from freetoken.daemon import app as daemon_app
+
+    monkeypatch.delattr(daemon_app.os, "killpg", raising=False)
+    calls = []
+
+    async def wait():
+        calls.append("wait")
+        proc.returncode = 0
+
+    proc = SimpleNamespace(pid=4242, returncode=None, terminate=lambda: calls.append("terminate"),
+                           kill=lambda: calls.append("kill"), wait=wait)
+    asyncio.run(daemon_app._terminate_and_reap_bench_child(proc, grace_s=1.0))
+    assert calls[:2] == ["terminate", "wait"]
