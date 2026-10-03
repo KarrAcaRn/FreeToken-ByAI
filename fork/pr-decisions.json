@@ -426,7 +426,7 @@
     "head_sha": "b9b8f1b33064",
     "reviewed_at": "2026-10-03",
     "decision": "adopted-with-fixups",
-    "reason": "/v1/models advertised the model ceiling while the engine admits against min(ceiling, num_pages*page_size), so `ft launch` sized agent windows past the KV pool. Fixup: multiply only by the engine-reported page_size (the frontend's config.page_size is unresolved), with a test.",
+    "reason": "/v1/models advertised the model ceiling while the engine admits against min(ceiling, num_pages*page_size), so `ft launch` sized agent windows past the KV pool. Fixup: multiply only by the engine-reported page_size (the frontend's config.page_size is unresolved), with a test. Live on Qwen3-0.6B (RTX 4090): /v1/models reports the 3000-page pool once the engine meta lands.",
     "commits": [
       "37791c3",
       "09bd83d"
@@ -442,7 +442,7 @@
     "head_sha": "e32f8a7b5820",
     "reviewed_at": "2026-10-03",
     "decision": "reimplemented",
-    "reason": "The API accepted presence/frequency penalties but ignored them. PR keeps a vocab-sized count tensor per request and ships no tests; ours rebuilds counts each step from the generated tokens in token_pool on the engine stream (overlap-safe, no state across aborts or table reuse), enforces OpenAI's [-2, 2] with a 400, adds CPU and GPU tests (mixed batch passed on the RTX 4090).",
+    "reason": "The API accepted presence/frequency penalties but ignored them. PR keeps a vocab-sized count tensor per request and ships no tests; ours rebuilds counts each step from the generated tokens in token_pool on the engine stream (overlap-safe, no state across aborts or table reuse), enforces OpenAI's [-2, 2] with a 400, adds CPU and GPU tests (mixed batch passed on the RTX 4090). Live on Qwen3-0.6B under overlap scheduling: an in-process spy over 636 penalty steps found the counted tokens always equal the request's real output prefix; 400 on out-of-range values.",
     "commits": [
       "5a4987c"
     ],
@@ -488,7 +488,7 @@
     "head_sha": "a76d9ecc1f50",
     "reviewed_at": "2026-10-03",
     "decision": "adopted-with-fixups",
-    "reason": "Opt-in per-request TTFT/prefill/decode metrics on chat, messages and responses; complements the cumulative /v1/stats counters from #553. Fixup: the abort test stub (newer than the PR's base) needed the new _prefill_start map.",
+    "reason": "Opt-in per-request TTFT/prefill/decode metrics on chat, messages and responses; complements the cumulative /v1/stats counters from #553. Fixup: the abort test stub (newer than the PR's base) needed the new _prefill_start map. Live on Qwen3-0.6B: metrics object served with plausible TTFT/prefill/decode values.",
     "commits": [
       "9f1d61f",
       "361ef5a"
