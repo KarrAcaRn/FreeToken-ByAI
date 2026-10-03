@@ -208,16 +208,11 @@ def _host_ram_fits_parallel(model_path: str) -> bool:
     """Best-effort: can free host RAM hold the expert banks plus the parallel reader's one
     extra (non-reclaimable) whole-shard buffer? Unknown (non-local path / no /proc) -> True,
     i.e. keep the fast path. Banks ~= checkpoint size (experts dominate); transient ~= the
-    largest shard. Uses MemAvailable (counts reclaimable cache) -- the OOM-relevant figure."""
-    avail = None
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    avail = int(line.split()[1]) * 1024
-                    break
-    except OSError:
-        pass
+    largest shard. Uses MemAvailable (counts reclaimable cache) -- the OOM-relevant figure --
+    clamped to the cgroup limit, which a container's OOM killer enforces instead."""
+    from freetoken.memory import available_host_memory
+
+    avail = available_host_memory()
     if avail is None:
         return True
     try:  # resolve a hub id to its local cache dir (no-op for a local path) so glob sees the shards

@@ -55,11 +55,9 @@ def _default_ftw_dir(model_path: str) -> str:
 
 # ---------------- memory sampling + checksum ----------------
 def _meminfo_available_bytes() -> int:
-    with open("/proc/meminfo") as f:
-        for line in f:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    return 0
+    from freetoken.memory import available_host_memory
+
+    return available_host_memory() or 0
 
 
 def _status_kb(key: str) -> int:
