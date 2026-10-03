@@ -716,10 +716,11 @@
     "title": "fix(swa): keep the prompt head's windowed KV so fan-out can reuse a shared prefix",
     "head_sha": "e6db6264575c",
     "reviewed_at": "2026-10-03",
-    "decision": "adopted",
-    "reason": "With sliding-window attention the radix cache dropped the windowed KV of a shared prompt head, so fan-out (n>1, parallel requests on one prefix) re-prefilled it. Small change in scheduler/cache.py with retention and stress tests; tests/scheduler pass on the RTX 4090 machine.",
+    "decision": "adopted-with-fixups",
+    "reason": "With sliding-window attention the radix cache dropped the windowed KV of a shared prompt head, so fan-out (n>1, parallel requests on one prefix) re-prefilled it. Small change in scheduler/cache.py with retention and stress tests; tests/scheduler pass on the RTX 4090 machine. Later fixup (6f18f27): its stress test set CUDA_VISIBLE_DEVICES='' at import, hiding the GPU from every other test in the same pytest session (130 'Invalid device id' failures); it now patches _maybe_pinned locally instead.",
     "commits": [
-      "5276fe3"
+      "5276fe3",
+      "6f18f27"
     ],
     "gpu_untested": false,
     "authors": [
@@ -874,5 +875,76 @@
       "ArqAlice <y.tomi0131@gmail.com>"
     ],
     "revisit": "after-queue"
+  },
+  "459": {
+    "number": 459,
+    "title": "fix(checkpoint): validate FTW v1 indexes eagerly",
+    "head_sha": "56ed5700337a",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Validates the FTW index once at open (integer ranges, required fields, duplicate keys, safe shard names, shard coverage/sizes, tensor overlaps) and raises FTWFormatError instead of failing deep in mmap/O_DIRECT; 640 lines of tests. Fixup: it also demanded that tensors cover every byte with no gaps, but scripts/ftw_hotfix.py drops/replaces entries and compacts their shards one atomic index swap at a time, promising a loadable FTW at every step and after an interrupted run; those indexes have unreferenced bytes inside a shard. Gaps are now accepted, overlaps still rejected. On the RTX 4090: a fresh ft checkpoint of Qwen3-0.6B validates (227 tensors) and generates token-identical greedy output to the safetensors path.",
+    "commits": [
+      "e3cf187",
+      "d5dff2f"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Léon Avic Simmons <Avicennasis@gmail.com>"
+    ]
+  },
+  "456": {
+    "number": 456,
+    "title": "Lowvram 4gb",
+    "head_sha": "e54c44c948c7",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "Built on a much older main: it would revert large parts of current code (quant config plumbing, moe_strategy, gpu selection, EngineConfig post-init), defines resolved_kv_dtype twice, adds [WEIGHT-DIAG] debug prints, and ships AI work logs and a PDF under docs/. Its fp8 KV storage is on main via #354. The CPU-resident embedding idea is planned as our own --embed-device cpu after the queue, crediting this PR's author (see deferred CPU-embedding work).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "BenMohStem <BenMohStem@users.noreply.github.com>"
+    ]
+  },
+  "451": {
+    "number": 451,
+    "title": "docs(moe): report shared expert banks across replicas",
+    "head_sha": "2bb81e4620e2",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "Field report of a two-replica experiment on 2x RTX 5090 that relies on an external shared-bank shim not in the repo; linked from the README it reads like a supported feature. Documents something FreeToken does not contain.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "kuangrenaigc-stack <286874960+kuangrenaigc-stack@users.noreply.github.com>"
+    ]
+  },
+  "447": {
+    "number": 447,
+    "title": "feat(moe): owner-local expert parallelism and tensor parallelism",
+    "head_sha": "81d034d4a2c0",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "reason": "5k-line owner-local expert parallelism + TP for Qwen3.8-Flash-Next on the offload MoE backend (experts partitioned whole across ranks, one all-reduce per MoE layer, graph-capturable routing). Not judged on its merits yet: needs several GPUs and the Flash-Next weights, neither available here. Revisit after the queue.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "zhanglei <lei.zhang@long-horn.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "440": {
+    "number": 440,
+    "title": "fix(models): build o_proj row-parallel in the remaining column-parallel families",
+    "head_sha": "aa3fabaa1994",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "gemma4, qwen3_5_moe and muse_glimmer paired a head-sharded qkv with a replicated o_proj, which would be silently wrong under TP>1 (no all-reduce); LinearOProj is the row-parallel layer every other family uses and is identical at TP=1. Checked on the RTX 4090: Qwen3.8-27B-NVFP4 (qwen3_5 attention) gives token-identical greedy output on three prompts before and after.",
+    "commits": [
+      "b0544e0"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "gberasmus87 <gberasmus87@gmail.com>"
+    ]
   }
 }
