@@ -220,3 +220,19 @@ def test_snapshot_server_derives_cache_geometry(monkeypatch):
     assert result["cache"]["moe_total_slots"] == 80
     assert result["cache"]["moe_residency"] == pytest.approx(0.5)
     assert result["cache"]["mamba_vram_bytes"] == 21
+
+
+def test_api_key_is_sent_as_a_bearer_header(monkeypatch):
+    # A server started with --api-key answers 401 to every unauthenticated request.
+    import benchmarks.bench_serving as bench
+
+    monkeypatch.delenv("FREETOKEN_API_KEY", raising=False)
+    assert bench.parse_args([]).api_key is None
+    monkeypatch.setenv("FREETOKEN_API_KEY", "from-env")
+    assert bench.parse_args([]).api_key == "from-env"
+    assert bench.parse_args(["--api-key", "flag"]).api_key == "flag"
+
+    monkeypatch.setattr(bench, "_API_KEY", "k")
+    assert bench._headers(True) == {"Content-Type": "application/json", "Authorization": "Bearer k"}
+    monkeypatch.setattr(bench, "_API_KEY", None)
+    assert bench._headers(False) == {}

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 import time
@@ -104,6 +105,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--label", default=None, help="optional label stored in run metadata"
     )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("FREETOKEN_API_KEY"),
+        help="bearer key for a server started with --api-key (default: $FREETOKEN_API_KEY)",
+    )
     args = parser.parse_args(argv)
     if args.decode_tokens < 1:
         parser.error("--decode-tokens must be positive")
@@ -131,6 +137,17 @@ def _decode_error_body(error: urllib.error.HTTPError) -> str:
         return "<unreadable response>"
 
 
+# Set from --api-key by main(); sent as "Authorization: Bearer" on every request.
+_API_KEY: str | None = None
+
+
+def _headers(content_type: bool) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"} if content_type else {}
+    if _API_KEY:
+        headers["Authorization"] = f"Bearer {_API_KEY}"
+    return headers
+
+
 def request_json(
     method: str,
     url: str,
@@ -147,7 +164,7 @@ def request_json(
         url,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json"} if data is not None else {},
+        headers=_headers(data is not None),
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -195,7 +212,7 @@ def stream_chat_completion(
         f"{origin}/v1/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=_headers(True),
     )
     started_at = time.perf_counter()
     try:
@@ -691,7 +708,9 @@ def print_human_summary(result: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _API_KEY
     args = parse_args(argv)
+    _API_KEY = args.api_key
     try:
         result = run_benchmark(args)
         if args.json_out:
