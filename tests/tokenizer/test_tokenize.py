@@ -285,3 +285,66 @@ def test_tokenize_survives_an_unhashable_effort():
     manager.tokenize([msg])
 
     assert "reasoning_effort" not in tokenizer.chat_template_kwargs
+
+
+class SystemFirstTokenizer:
+    """A chat template that, like Qwen3.6+, raises unless the only system message is first."""
+
+    def __init__(self) -> None:
+        self.rendered = []
+
+    def apply_chat_template(self, messages, **kwargs):
+        from jinja2 import TemplateError
+
+        for i, m in enumerate(messages):
+            if m["role"] == "system" and i != 0:
+                raise TemplateError("System message must be at the beginning.")
+        self.rendered.append(messages)
+        return "|".join(f"{m['role']}:{m['content']}" for m in messages)
+
+
+def _render(tokenizer, messages):
+    msg = TokenizeMsg(uid=1, text=messages, sampling_params=SamplingParams())
+    return TokenizeManager(tokenizer).render_prompt(msg)
+
+
+def test_render_hoists_and_merges_system_messages_when_the_template_rejects_them():
+    prompt = _render(
+        SystemFirstTokenizer(),
+        [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "q1"},
+            {"role": "system", "content": "now answer in German"},
+            {"role": "user", "content": "q2"},
+        ],
+    )
+    assert prompt == "system:be terse\n\nnow answer in German|user:q1|user:q2"
+
+
+def test_render_keeps_a_mid_conversation_system_message_the_template_accepts():
+    # A template that renders system messages in place (Qwen3) keeps the order as sent.
+    class InPlace:
+        def apply_chat_template(self, messages, **kwargs):
+            self.messages = messages
+            return "rendered"
+
+    tokenizer = InPlace()
+    messages = [
+        {"role": "user", "content": "q1"},
+        {"role": "system", "content": "s"},
+    ]
+    _render(tokenizer, messages)
+    assert tokenizer.messages == messages
+
+
+def test_render_reraises_a_template_error_unrelated_to_system_order():
+    from jinja2 import TemplateError
+
+    class Rejecting:
+        def apply_chat_template(self, messages, **kwargs):
+            raise TemplateError("Conversation roles must alternate")
+
+    with pytest.raises(TemplateError, match="alternate"):
+        _render(Rejecting(), [{"role": "user", "content": "q"}])
+    with pytest.raises(TemplateError, match="alternate"):
+        _render(Rejecting(), [{"role": "user", "content": "q"}, {"role": "system", "content": "s"}])

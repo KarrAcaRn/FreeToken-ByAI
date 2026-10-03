@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, List
 import torch
 from freetoken.message import TokenizeMsg, UserMsg
 from freetoken.utils import init_logger
+from jinja2 import TemplateError
 from transformers import PreTrainedTokenizerBase
 
 if TYPE_CHECKING:
@@ -64,6 +65,7 @@ class TokenizeManager:
         self._thinking_profile: ThinkingProfile | None = None
         self._effort_lock = threading.Lock()
         self._logged_effort_maps: set[tuple[Any, str | None]] = set()
+        self._logged_system_hoist = False
 
     def tokenize(self, msgs: List[TokenizeMsg]) -> List[UserMsg]:
         results: List[UserMsg] = []
@@ -136,14 +138,35 @@ class TokenizeManager:
             )
         if tools is not None:
             chat_template_kwargs = {**chat_template_kwargs, "tools": tools}
-        prompt = self.tokenizer.apply_chat_template(
+        try:
+            prompt = self._apply_template(messages, chat_template_kwargs)
+        except TemplateError:
+            # Some templates (Qwen3.6+: "System message must be at the beginning") reject a
+            # system message anywhere but first, which OpenAI clients do send. Only then retry
+            # with the system messages hoisted and merged -- a template that renders them in
+            # place keeps the conversation as sent.
+            hoisted = _hoist_system_messages(messages)
+            if hoisted is None:
+                raise
+            prompt = self._apply_template(hoisted, chat_template_kwargs)
+            if not self._logged_system_hoist:
+                self._logged_system_hoist = True
+                logger.info(
+                    "chat template rejected a system message after the first turn; "
+                    "merging system messages into one at the front"
+                )
+        assert isinstance(prompt, str)
+        return prompt
+
+    def _apply_template(
+        self, messages: list[dict[str, Any]], chat_template_kwargs: dict[str, Any]
+    ) -> str:
+        return self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
             **chat_template_kwargs,
         )
-        assert isinstance(prompt, str)
-        return prompt
 
     def effort_profile(self) -> EffortProfile:
         """The checkpoint's effort vocabulary, probed on first use and cached
@@ -195,6 +218,21 @@ class TokenizeManager:
         else:
             sanitized["reasoning_effort"] = mapped
         return sanitized
+
+
+def _hoist_system_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """The conversation with every system message merged (blank-line separated) into one
+    at the front, or None when that changes nothing (no system message after the first
+    position) or a system message carries non-text content."""
+    systems = [m for m in messages if m.get("role") == "system"]
+    if not systems or (len(systems) == 1 and messages[0] is systems[0]):
+        return None
+    if any(not isinstance(m.get("content") or "", str) for m in systems):
+        return None
+    merged = "\n\n".join(m["content"] for m in systems if m.get("content"))
+    return [{"role": "system", "content": merged}] + [
+        m for m in messages if m.get("role") != "system"
+    ]
 
 
 def _load_dsv4_encoder_if_needed(tokenizer: PreTrainedTokenizerBase) -> ModuleType | None:
