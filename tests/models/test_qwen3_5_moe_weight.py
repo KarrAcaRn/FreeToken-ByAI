@@ -179,6 +179,9 @@ MODELOPT_MIXED = {
 MODELOPT_MIXED_A16 = {**MODELOPT_MIXED, "quantized_layers": {
     **MODELOPT_MIXED["quantized_layers"], **{f"{LM}.layers.{l}.mlp.experts": {"quant_algo": "W4A16_NVFP4", "group_size": 16} for l in (0, 1)}}}
 MODELOPT_MIXED_NOINPUT = {**MODELOPT_MIXED, "with_input_scale": False}
+# Apodex-1.1-mini-NVFP4 (upstream #294): NVFP4 experts with a per-tensor FP8 shared expert
+MODELOPT_MIXED_FP8_SHARED = {**MODELOPT_MIXED, "quantized_layers": {
+    **MODELOPT_MIXED["quantized_layers"], **{m: {"quant_algo": "FP8"} for m in SHARED}}}
 # sakamakismile/Qwen3.6-27B-NVFP4: every Linear of the dense model, GDN in_proj included
 CT_NVFP4_DENSE = _ct({"group_0": {**NVFP4_GROUP, "targets": ["Linear"]}}, ["lm_head"], "nvfp4-pack-quantized")
 # RedHatAI/Qwen3.6-35B-A3B-NVFP4: every Linear but the GDN, the routers and lm_head
@@ -215,7 +218,11 @@ def _layout(name: str) -> tuple[bool, dict | None, dict[str, torch.Tensor]]:
         return moe, QWEN_FP8, raw
     if name.startswith("modelopt_mixed"):
         _quantize(raw, GDN_QKVZ_OUT + ATTN, _fp8_tensor)
-        _quantize(raw, SHARED + ["lm_head"], lambda w: _nvfp4(w, ct=False))
+        if name == "modelopt_mixed_fp8_shared":
+            _quantize(raw, SHARED, _fp8_tensor)
+            _quantize(raw, ["lm_head"], lambda w: _nvfp4(w, ct=False))
+        else:
+            _quantize(raw, SHARED + ["lm_head"], lambda w: _nvfp4(w, ct=False))
         _experts(raw, lambda w: _nvfp4(w, ct=False))
         # _a16: the W4A16 layers ship no activation scale (ornith-ai); _noinput: no layer does and the config says with_input_scale false (jhone888)
         if name == "modelopt_mixed_a16":
@@ -224,7 +231,8 @@ def _layout(name: str) -> tuple[bool, dict | None, dict[str, torch.Tensor]]:
             stripped = lambda k: name == "modelopt_mixed_noinput"
         for key in [k for k in raw if k.endswith(".input_scale") and stripped(k)]:
             del raw[key]
-        return moe, {"modelopt_mixed_a16": MODELOPT_MIXED_A16, "modelopt_mixed_noinput": MODELOPT_MIXED_NOINPUT}.get(name, MODELOPT_MIXED), raw
+        return moe, {"modelopt_mixed_a16": MODELOPT_MIXED_A16, "modelopt_mixed_noinput": MODELOPT_MIXED_NOINPUT,
+                     "modelopt_mixed_fp8_shared": MODELOPT_MIXED_FP8_SHARED}.get(name, MODELOPT_MIXED), raw
     if name == "ct_nvfp4_dense":
         _quantize(raw, GDN_QKVZ_OUT + GDN_BA + ATTN + DENSE_MLP, lambda w: _nvfp4(w, ct=True))
         return moe, CT_NVFP4_DENSE, raw
@@ -253,7 +261,7 @@ def _layout(name: str) -> tuple[bool, dict | None, dict[str, torch.Tensor]]:
     raise KeyError(name)
 
 
-LAYOUTS = ["bf16", "fp8_block", "modelopt_mixed", "modelopt_mixed_a16", "modelopt_mixed_noinput", "ct_nvfp4_dense", "ct_nvfp4_moe", "ct_mixed_fast", "ct_tensor_fp8_moe", "ct_block_moe", "ct_block_experts"]
+LAYOUTS = ["bf16", "fp8_block", "modelopt_mixed", "modelopt_mixed_a16", "modelopt_mixed_noinput", "modelopt_mixed_fp8_shared", "ct_nvfp4_dense", "ct_nvfp4_moe", "ct_mixed_fast", "ct_tensor_fp8_moe", "ct_block_moe", "ct_block_experts"]
 
 
 def _config_json(moe: bool, quantization_config) -> dict:
@@ -425,9 +433,16 @@ def test_modelopt_fp8_scales_broadcast_per_part_and_input_scale_is_the_max(check
     else:
         assert torch.equal(loaded["model.layers.1.self_attn.qkv_proj.input_scale"], torch.stack([raw[f"{attn}.{p}_proj.input_scale"] for p in "qkv"]).max())
         assert loaded["model.layers.1.self_attn.o_proj.input_scale"].shape == ()
-    # NVFP4 shared expert: each part keeps its own block scales and global
     shared = f"{LM}.layers.0.mlp.shared_expert"
     fused = "model.layers.0.mlp.shared_expert.gate_up_proj"
+    if name == "modelopt_mixed_fp8_shared":
+        # per-tensor FP8 shared expert (Apodex): native fp8, each part's scale broadcast over its rows
+        assert loaded[f"{fused}.weight"].dtype is torch.float8_e4m3fn
+        expected = torch.cat([raw[f"{shared}.{p}_proj.weight_scale"].expand(I) for p in ("gate", "up")])
+        assert torch.equal(loaded[f"{fused}.weight_scale"], expected)
+        assert f"{fused}.weight_global" not in loaded
+        return
+    # NVFP4 shared expert: each part keeps its own block scales and global
     assert _same(loaded[f"{fused}.weight"][:I], raw[f"{shared}.gate_proj.weight"])
     assert _same(loaded[f"{fused}.weight_scale"][I:], raw[f"{shared}.up_proj.weight_scale"])
     glob = loaded[f"{fused}.weight_global"]
