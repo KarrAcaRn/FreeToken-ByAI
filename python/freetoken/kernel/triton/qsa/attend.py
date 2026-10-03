@@ -5,9 +5,13 @@
 
 from __future__ import annotations
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
+
+from freetoken.utils.arch import is_rocm
 
 
 @triton.jit
@@ -224,6 +228,31 @@ def _qsa_merge_splitk_kernel(
     )
 
 
+@functools.cache
+def _max_shared_mem(device_index: int) -> int:
+    try:
+        return int(
+            triton.runtime.driver.active.utils.get_device_properties(device_index)[
+                "max_shared_mem"
+            ]
+        )
+    except Exception:
+        return 64 * 1024  # RDNA's LDS per workgroup
+
+
+def _rocm_fit_tile(block_n: int, head_dim: int, elem_size: int, device: torch.device) -> int:
+    """Shrink the GB300-tuned K/V tile so it fits RDNA's 64KB LDS.
+
+    Runs single-stage (a second stage doubles the staged K/V) and leaves half the LDS
+    for the Q tile and the dot-operand layout conversions.
+    """
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    budget = _max_shared_mem(index) // 2
+    while block_n > 16 and 2 * block_n * head_dim * elem_size > budget:
+        block_n //= 2
+    return block_n
+
+
 def qsa_sparse_paged_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -276,6 +305,10 @@ def qsa_sparse_paged_attention(
         block_n, target_splits, partial_warps = 64, 4, 2
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
+    num_stages = 2
+    if is_rocm():
+        block_n = _rocm_fit_tile(block_n, head_dim, q.element_size(), q.device)
+        num_stages = 1
 
     num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
     # Avoid empty splits when the selection width is smaller than the profile.
@@ -335,7 +368,7 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         num_warps=partial_warps,
-        num_stages=2,
+        num_stages=num_stages,
     )
     if num_splits == 1:
         return out

@@ -213,7 +213,8 @@ class CpuMoeExecutor:
             ):
                 logger.info_rank0(
                     "cpu-moe flag handshake unavailable: CUDA stream memory operations "
-                    "are not supported here (Windows WDDM / vGPU / old driver); using "
+                    "are not supported here (Windows WDDM / vGPU / old driver / ROCm "
+                    "without hipGraph memop replay); using "
                     "the cudaLaunchHostFunc sync"
                 )
                 self._flag_sync = False

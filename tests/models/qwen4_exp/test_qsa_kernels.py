@@ -501,3 +501,21 @@ def test_capture_graph_provisions_the_block_topk_scratch():
     assert backend._scratch("topk_scratch", 2, width, dtype=torch.int32).data_ptr() == (
         static.data_ptr()
     )
+
+
+@pytest.mark.parametrize(
+    "lds,head_dim,block_n,expected",
+    [
+        (64 * 1024, 256, 64, 32),
+        (64 * 1024, 128, 64, 64),
+        (64 * 1024, 512, 64, 16),
+        (160 * 1024, 256, 64, 64),
+    ],
+)
+def test_rocm_attend_tile_fits_lds(monkeypatch, lds, head_dim, block_n, expected):
+    import freetoken.kernel.triton.qsa.attend as attend
+
+    monkeypatch.setattr(attend, "_max_shared_mem", lambda index: lds)
+    tile = attend._rocm_fit_tile(block_n, head_dim, 2, torch.device("cuda", 0))
+    assert tile == expected
+    assert tile >= 16 and (tile == 16 or 2 * tile * head_dim * 2 <= lds // 2)

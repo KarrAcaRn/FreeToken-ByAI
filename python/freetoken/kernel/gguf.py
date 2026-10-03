@@ -51,8 +51,19 @@ def _c_compiler_for(cxx: str) -> str:
 def _module():
     from torch.utils.cpp_extension import load
 
-    extra_cuda_cflags = ["-O3", "--expt-relaxed-constexpr"]
-    host_cxx = _host_compiler()
+    from freetoken.utils.arch import get_rocm_gfx_arch, is_rocm
+
+    if is_rocm():
+        # hipcc rejects --expt-relaxed-constexpr and -ccbin. Without an explicit target
+        # torch builds for PYTORCH_ROCM_ARCH or every arch torch itself was built for.
+        extra_cuda_cflags = ["-O3"]
+        arch = get_rocm_gfx_arch()
+        if arch is not None:
+            extra_cuda_cflags.append(f"--offload-arch={arch}")
+        host_cxx = None
+    else:
+        extra_cuda_cflags = ["-O3", "--expt-relaxed-constexpr"]
+        host_cxx = _host_compiler()
     if host_cxx is not None:
         # Point both nvcc's host pass (-ccbin) and torch's C++ compile (CXX) at a
         # libtorch/nvcc-compatible compiler. Force (not setdefault): the system

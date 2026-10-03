@@ -44,6 +44,54 @@ def fused_topk(
     return fused_topk_softmax(gating_output, topk, renormalize, num_token_non_padded)
 
 
+def _torch_moe_align_block_size(
+    topk_ids: torch.Tensor, block_size: int, num_experts: int
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pure-torch ``moe_align_block_size`` with the same buffers and contract.
+
+    No host sync, so it is CUDA/HIP-graph capturable. Tokens keep their flat order
+    within an expert (stable sort), a valid instance of the reference's unordered
+    contract. Blocks past ``num_tokens_post_pad`` hold the last expert id.
+    """
+    device = topk_ids.device
+    numel = topk_ids.numel()
+    effective_E = num_experts + 1
+    if numel < effective_E:
+        max_num_tokens_padded = numel * block_size
+    else:
+        max_num_tokens_padded = numel + effective_E * (block_size - 1)
+    max_num_m_blocks = div_ceil(max_num_tokens_padded, block_size)
+
+    ids = topk_ids.reshape(-1).long()
+    valid = (ids >= 0) & (ids < effective_E)
+    # Invalid ids go to a trailing bin that sorts last and owns no padded region.
+    bins = torch.where(valid, ids, effective_E)
+    counts = torch.zeros(effective_E + 1, dtype=torch.int64, device=device)
+    counts.scatter_add_(0, bins, torch.ones_like(bins))
+    padded = (counts[:effective_E] + block_size - 1) // block_size * block_size
+    padded_end = torch.cumsum(padded, 0)
+    padded_start = padded_end - padded
+    count_start = torch.cumsum(counts, 0) - counts
+
+    sorted_bins, order = torch.sort(bins, stable=True)
+    rank = torch.arange(numel, device=device) - count_start[sorted_bins]
+    in_range = sorted_bins < effective_E
+    pos = padded_start[sorted_bins.clamp(max=effective_E - 1)] + rank
+    # The extra trailing slot absorbs the invalid ids and is sliced off.
+    pos = torch.where(in_range, pos, max_num_tokens_padded)
+    sorted_ids = torch.full(
+        (max_num_tokens_padded + 1,), numel, dtype=torch.int32, device=device
+    )
+    sorted_ids.scatter_(0, pos, order.to(torch.int32))
+
+    block_end = (padded_end // block_size).to(torch.int32)
+    blocks = torch.arange(max_num_m_blocks, dtype=torch.int32, device=device)
+    expert_ids = torch.searchsorted(block_end, blocks, right=True, out_int32=True)
+    expert_ids.clamp_(max=effective_E - 1)
+    num_tokens_post_pad = padded_end[-1:].to(torch.int32)
+    return sorted_ids[:max_num_tokens_padded], expert_ids, num_tokens_post_pad
+
+
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -84,9 +132,13 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    from freetoken.kernel.backend import is_sgl_kernel_installed
+    from freetoken.kernel.backend import is_rocm, is_sgl_kernel_installed
 
     if not is_sgl_kernel_installed():
+        if is_rocm():
+            # Triton 3.8's AMD backend drops the masked scatter-store of the Triton
+            # kernel on RDNA, leaving expert_ids misaligned with sorted_token_ids.
+            return _torch_moe_align_block_size(topk_ids, block_size, num_experts)
         from freetoken.kernel.triton.moe_align import (
             moe_align_block_size as triton_moe_align_block_size,
         )

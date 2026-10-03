@@ -10,7 +10,19 @@
 #define WARP_SIZE 32
 #endif
 
-// Warp-shuffle wrappers the donor pulls from sgl-kernel's utils.h (CUDA variants).
+// Warp-shuffle wrappers the donor pulls from sgl-kernel's utils.h. HIP's *_sync
+// shuffles static_assert a 64-bit mask; the callers pass uint32_t(-1) for a full
+// wave32 reduction, so ROCm uses the unmasked shuffle like sgl-kernel's ROCm branch.
+#if defined(USE_ROCM)
+#ifndef SGLANG_SHFL_XOR_SYNC
+#define SGLANG_SHFL_XOR_SYNC(mask, var, lane_mask) __shfl_xor((var), (lane_mask))
+#endif
+#ifndef SGLANG_SHFL_XOR_SYNC_WIDTH
+#define SGLANG_SHFL_XOR_SYNC_WIDTH(mask, var, lane_mask, width) \
+  __shfl_xor((var), (lane_mask), (width))
+#endif
+#endif
+
 #ifndef SGLANG_SHFL_XOR_SYNC
 #define SGLANG_SHFL_XOR_SYNC(mask, var, lane_mask) __shfl_xor_sync((mask), (var), (lane_mask))
 #endif

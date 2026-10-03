@@ -369,3 +369,85 @@ def test_fused_topk_softmax_is_cuda_graph_capturable():
     torch.cuda.synchronize()
     assert (ids[:3] != -1).all()
     assert (ids[3:] == -1).all()
+
+
+def _check_moe_align(topk_ids, block_size, num_experts, sorted_ids, expert_ids, ntpp):
+    flat = topk_ids.reshape(-1).cpu().tolist()
+    numel = len(flat)
+    sorted_ids, expert_ids = sorted_ids.cpu().tolist(), expert_ids.cpu().tolist()
+    start = 0
+    for e in range(num_experts + 1):
+        tokens = sorted(i for i, x in enumerate(flat) if x == e)
+        padded = -(-len(tokens) // block_size) * block_size
+        region = sorted_ids[start:start + padded]
+        assert sorted(region[:len(tokens)]) == tokens
+        assert all(t == numel for t in region[len(tokens):])
+        assert all(x == e for x in expert_ids[start // block_size:(start + padded) // block_size])
+        start += padded
+    assert int(ntpp.item()) == start
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    "num_tokens,top_k,num_experts,block_size",
+    [(1, 4, 8, 16), (3, 2, 64, 16), (64, 8, 32, 64), (300, 8, 128, 64), (0, 8, 16, 16)],
+)
+def test_torch_moe_align_block_size_matches_contract(
+    device, num_tokens, top_k, num_experts, block_size
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    from freetoken.moe.fused import _torch_moe_align_block_size
+
+    gen = torch.Generator().manual_seed(num_tokens + num_experts)
+    topk_ids = torch.randint(0, num_experts, (num_tokens, top_k), generator=gen, dtype=torch.int32)
+    if num_tokens > 2:
+        topk_ids[-2:] = -1  # padded rows are dropped, as fused_topk masks them
+    topk_ids = topk_ids.to(device)
+
+    sorted_ids, expert_ids, ntpp = _torch_moe_align_block_size(topk_ids, block_size, num_experts)
+    numel = topk_ids.numel()
+    if numel < num_experts + 1:
+        assert sorted_ids.numel() == numel * block_size
+    else:
+        assert sorted_ids.numel() == numel + (num_experts + 1) * (block_size - 1)
+    assert sorted_ids.dtype == expert_ids.dtype == ntpp.dtype == torch.int32
+    assert expert_ids.numel() == -(-sorted_ids.numel() // block_size)
+    _check_moe_align(topk_ids, block_size, num_experts, sorted_ids, expert_ids, ntpp)
+
+
+def test_moe_align_block_size_uses_torch_path_on_rocm(monkeypatch):
+    import freetoken.kernel.backend as backend
+    import freetoken.moe.fused as fused
+
+    calls = []
+    monkeypatch.setattr(backend, "is_rocm", lambda: True)
+    monkeypatch.setattr(backend, "is_sgl_kernel_installed", lambda: False)
+    monkeypatch.setattr(
+        fused, "_torch_moe_align_block_size", lambda *args: calls.append(args) or "torch"
+    )
+    assert fused.moe_align_block_size(torch.zeros(1, 1, dtype=torch.int32), 16, 4) == "torch"
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_torch_moe_align_block_size_is_cuda_graph_capturable():
+    from freetoken.moe.fused import _torch_moe_align_block_size
+
+    num_experts, block_size = 16, 16
+    topk_ids = torch.randint(0, num_experts, (8, 4), dtype=torch.int32, device="cuda")
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        _torch_moe_align_block_size(topk_ids, block_size, num_experts)
+    torch.cuda.current_stream().wait_stream(stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = _torch_moe_align_block_size(topk_ids, block_size, num_experts)
+
+    topk_ids.copy_(torch.randint(0, num_experts, (8, 4), dtype=torch.int32, device="cuda"))
+    graph.replay()
+    torch.cuda.synchronize()
+    _check_moe_align(topk_ids, block_size, num_experts, *out)

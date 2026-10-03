@@ -575,6 +575,7 @@ float dot_nvfp4_i8_avx512vnni(const uint8_t* packed, const uint8_t* scale, float
 // frequency (GEMV workers -1.5x: the reported edge regression). Availability is
 // probed functionally at startup (memops_probe); anything unsupported (Windows WDDM,
 // vGPU, old drivers) falls back to the cudaLaunchHostFunc path.
+#if !FREETOKEN_USE_ROCM
 #if defined(_WIN32)
 #include <windows.h>
 static void* cumemop_dlopen() { return (void*)::LoadLibraryA("nvcuda.dll"); }
@@ -614,6 +615,73 @@ static bool cumemop_resolve() {
   }();
   return resolved;
 }
+#else
+// ROCm: amdhip64 is linked, so the HIP memops are called directly. GEQ and DEFAULT
+// share the CUDA encodings (hipStreamWaitValueGte == 0).
+using cuMemOp64_fn = int (*)(void* stream, unsigned long long addr, unsigned long long value,
+                             unsigned int flags);
+static constexpr unsigned int kCuWaitValueGeq = hipStreamWaitValueGte;
+static constexpr unsigned int kCuWriteDefault = 0x0;
+
+static int hip_write64(void* stream, unsigned long long addr, unsigned long long value,
+                       unsigned int flags) {
+  return static_cast<int>(hipStreamWriteValue64(reinterpret_cast<hipStream_t>(stream),
+                                                reinterpret_cast<void*>(addr), value, flags));
+}
+static int hip_wait64(void* stream, unsigned long long addr, unsigned long long value,
+                      unsigned int flags) {
+  return static_cast<int>(hipStreamWaitValue64(reinterpret_cast<hipStream_t>(stream),
+                                               reinterpret_cast<void*>(addr), value, flags,
+                                               ~0ULL));
+}
+static cuMemOp64_fn g_cu_write64 = hip_write64;
+static cuMemOp64_fn g_cu_wait64 = hip_wait64;
+static bool cumemop_resolve() { return true; }
+
+// ROCm 7.14 captures stream memops into a hipGraph but does not replay them, which
+// would turn the decode-graph handshake into a silent no-op; ROCm 10 replays them.
+// Probe a replay on a private stream instead of trusting the runtime version:
+// graph = WAIT(flag >= 1) -> WRITE(flag = 3), launched with flag = 0. A replayed WAIT
+// must hold the WRITE back until the host releases it, and the WRITE must land.
+static bool hipmemops_graph_probe(uintptr_t scratch_addr) {
+  auto* flag = reinterpret_cast<volatile int64_t*>(scratch_addr);
+  hipStream_t s = nullptr;
+  if (hipStreamCreateWithFlags(&s, hipStreamNonBlocking) != hipSuccess) return false;
+  hipGraph_t graph = nullptr;
+  hipGraphExec_t exec = nullptr;
+  bool ok = false;
+  bool wedged = false;
+  if (hipStreamBeginCapture(s, hipStreamCaptureModeThreadLocal) == hipSuccess) {
+    const bool queued = hip_wait64(s, scratch_addr, 1ULL, kCuWaitValueGeq) == 0 &&
+                        hip_write64(s, scratch_addr, 3ULL, kCuWriteDefault) == 0;
+    const bool captured = hipStreamEndCapture(s, &graph) == hipSuccess && graph != nullptr;
+    if (queued && captured &&
+        hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0) == hipSuccess) {
+      *flag = 0;
+      if (hipGraphLaunch(exec, s) == hipSuccess) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const bool held = *flag == 0 && hipStreamQuery(s) == hipErrorNotReady;
+        *flag = 1;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        hipError_t q;
+        while ((q = hipStreamQuery(s)) == hipErrorNotReady &&
+               std::chrono::steady_clock::now() < deadline)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        wedged = q == hipErrorNotReady;
+        ok = held && q == hipSuccess && *flag == 3;
+      }
+    }
+  }
+  // A WAIT that never wakes leaves work queued; leak the stream rather than block on it.
+  if (!wedged) {
+    if (exec != nullptr) hipGraphExecDestroy(exec);
+    if (graph != nullptr) hipGraphDestroy(graph);
+    hipStreamDestroy(s);
+  }
+  (void)hipGetLastError();
+  return ok;
+}
+#endif
 
 // Functional probe on a scratch pinned int64: enqueue WRITE(7) + WAIT(>=7) + sync.
 // Returns true only if the whole memop path works on THIS stream/device/driver.
@@ -622,7 +690,12 @@ static bool cumemops_probe(uintptr_t stream, uintptr_t scratch_addr) {
   auto* s = reinterpret_cast<void*>(stream);
   if (g_cu_write64(s, (unsigned long long)scratch_addr, 7ULL, kCuWriteDefault) != 0) return false;
   if (g_cu_wait64(s, (unsigned long long)scratch_addr, 7ULL, kCuWaitValueGeq) != 0) return false;
+#if FREETOKEN_USE_ROCM
+  if (cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(stream)) != cudaSuccess) return false;
+  return hipmemops_graph_probe(scratch_addr);
+#else
   return cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(stream)) == cudaSuccess;
+#endif
 }
 
 // GPU side of the flag handshake (see the block comment above): enqueued on the
