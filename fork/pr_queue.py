@@ -31,8 +31,8 @@ def load_log():
 
 
 def pending(prs, log):
-    """Undecided PRs, deferred ones whose head moved, and -- once nothing else is left -- the PRs
-    deferred with ``revisit: "after-queue"``."""
+    """Undecided PRs, deferred ones whose head moved or whose ``revisit_with`` PR got a decision,
+    and -- once nothing else is left -- the PRs deferred with ``revisit: "after-queue"``."""
     todo, last = [], []
     for pr in prs:
         entry = log.get(str(pr["number"]))
@@ -40,6 +40,9 @@ def pending(prs, log):
             todo.append(pr)
         elif entry.get("revisit") == "after-queue":
             last.append(pr)
+        # stacked on another PR: review once that one is decided
+        elif entry["decision"] == "deferred" and str(entry.get("revisit_with")) in log:
+            todo.append(pr)
         # the log keeps a 12-char head; GitHub reports the full sha
         elif entry["decision"] in RECHECK_ON_NEW_HEAD and not pr["head"]["sha"].startswith(entry.get("head_sha", "")):
             todo.append(pr)
@@ -55,6 +58,7 @@ def render(log):
         reason = e["reason"].replace("|", "\\|").replace("\n", " ")
         gpu = " (GPU untested)" if e.get("gpu_untested") else ""
         gpu += " (revisit after the queue)" if e.get("revisit") == "after-queue" else ""
+        gpu += f" (revisit with #{e['revisit_with']})" if e.get("revisit_with") else ""
         link = f"[#{num}](https://github.com/{UPSTREAM}/pull/{num})"
         # names only: the emails stay in the JSON for Co-authored-by trailers
         authors = ", ".join(a.split(" <")[0] for a in e.get("authors", []))
