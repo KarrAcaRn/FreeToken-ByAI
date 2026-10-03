@@ -1433,7 +1433,12 @@ def _ensure_expandable_segments() -> None:
     if os.environ.get("PYTORCH_ALLOC_CONF") or os.environ.get("PYTORCH_CUDA_ALLOC_CONF"):
         return
     try:
-        torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        # torch 2.11 deprecates torch.cuda.memory._set_allocator_settings in favour of the
+        # device-generic accelerator API; keep the old call for builds without it.
+        set_settings = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
+        if set_settings is None:
+            set_settings = torch.cuda.memory._set_allocator_settings
+        set_settings("expandable_segments:True")
     except Exception as exc:  # pragma: no cover - depends on torch build
         logger.info_rank0(f"Could not enable expandable_segments ({exc}); continuing")
         return
