@@ -701,3 +701,17 @@ def test_nested_markup_in_parameter_value_stays_opaque_outside_minimax_m3(parser
     )
 
     assert args == {"node": "<code>1</code>"}
+
+@pytest.mark.parametrize("parser_name", SCHEMA_AWARE_PARSERS)
+@pytest.mark.parametrize("streaming", [False, True], ids=["one-shot", "streaming"])
+@pytest.mark.parametrize(
+    "prop_schema",
+    [{"description": "a page number"}, {"enum": ["123", "456"]}],
+    ids=["description-only", "enum-only"],
+)
+def test_untyped_schema_keeps_the_string_default(parser_name, streaming, prop_schema):
+    # A property without "type" and without a $ref to resolve was always a string; only a
+    # union or an unresolvable ref has an unknown type that warrants loose JSON parsing.
+    args = _parse_args(parser_name, prop_schema, None, "123", streaming=streaming)
+
+    assert args == {"limit": "123"}

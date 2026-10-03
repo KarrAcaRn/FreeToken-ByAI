@@ -417,6 +417,10 @@ class BaseFormatDetector(ABC):
             result = dict(schema)
             result["type"] = "array"
             return result
+        if "$ref" not in schema:
+            # No type and nothing to infer one from ({"enum": [...]}, {"description": ...}):
+            # keep the parser's string default, so "123" stays "123" and the value streams.
+            return schema
         result = dict(schema)
         result["type"] = "loose"
         return result
