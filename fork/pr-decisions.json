@@ -1782,5 +1782,92 @@
       "Erich Stuntebeck <erichstuntebeck@airia.com>"
     ],
     "superseded_by": 211
+  },
+  "196": {
+    "number": 196,
+    "title": "perf(gguf): sm_120 dispatch thresholds + upstream int8-MMA MMQ port (Ornith)",
+    "head_sha": "242c37a4ecd7",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "27.8k lines (117 files): GGUF dispatch thresholds for sm_120 (consumer Blackwell), a port of llama.cpp's int8-MMA MMQ kernels, Ornith attention/bench tooling. Not judged on its merits yet: its tuning targets sm_120, which is not available here (RTX 4090 is sm_89), and it is far too large for a batch review. Revisit after the queue (the MMQ part may also matter for sm_89 GGUF prefill, which runs at only ~1100 tok/s on the Gemma-4 12B).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "probe <probe@example.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "192": {
+    "number": 192,
+    "title": "demo: intentionally duplicate maintenance gate (radar fixture)",
+    "head_sha": "07d1fbc38baf",
+    "reviewed_at": "2026-10-04",
+    "decision": "rejected",
+    "reason": "By its own description a deliberate code duplication ('so duplication-radar has a clear true-positive fixture') across three API modules; a test fixture for an external tool, not a change for the server. #191 does the opposite (dedupes the gate) and is adopted.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Mitali Agrawal <mitaliagrawal@Mitalis-MacBook-Air.local>"
+    ]
+  },
+  "191": {
+    "number": 191,
+    "title": "refactor(server): dedupe maintenance gate across API entrypoints",
+    "head_sha": "39706696fc51",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "Moves the copied maintenance_state checks (loading/failed/rebuilding -> 503) into server/maintenance.py so OpenAI, Anthropic, Responses and /generate answer consistently. Merged cleanly; no gate copies left (the rebuild endpoint and the status API keep their own state handling by design). Server tests pass.",
+    "commits": [
+      "6581bfd"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Mitali Agrawal <mitaliagrawal@Mitalis-MacBook-Air.local>"
+    ]
+  },
+  "190": {
+    "number": 190,
+    "title": "fix(gemma4-gguf): accept scalar attention.head_count_kv",
+    "head_sha": "e0750da25a73",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted-with-fixups",
+    "reason": "llama.cpp writes gemma4.attention.head_count_kv as a scalar when every layer shares it; the parser indexed it as a list and crashed. Normalised to a per-layer list. The PR had no test; fixup adds one (fails before). Live: the dense Gemma-4 12B GGUF (per-layer form) still loads, correct answers, ~94.6 tok/s decode. Supersedes #64.",
+    "commits": [
+      "ec58a00",
+      "f1b0ccf"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "qxZap <MileaMihai@outlook.it>"
+    ]
+  },
+  "177": {
+    "number": 177,
+    "title": "fix(attention): map grouped decode heads to KV groups",
+    "head_sha": "4bb61c3e68bd",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "The Triton grouped decode kernel numbered head blocks globally, so for GQA groups spanning more than one 16-head tile with a partial tail (e.g. 48/2, 40/2, 80/4) the tail block computed query heads of the next KV group against the wrong KV head. Blocks are now laid out per KV group. On the RTX 4090: the PR's new cases fail on next (3/6) and pass with the fix; all 49 triton attention tests pass; Gemma-4 12B (triton backend) unchanged at ~94.6 tok/s.",
+    "commits": [
+      "f914717"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ]
+  },
+  "64": {
+    "number": 64,
+    "title": "gemma4/gguf: accept a scalar attention.head_count_kv",
+    "head_sha": "fe0f35e51779",
+    "reviewed_at": "2026-10-04",
+    "decision": "superseded",
+    "reason": "Same fix as #190 (broadcast a scalar head_count_kv to every layer, hit by the official gemma-4 E2B QAT q4_0 GGUF). Superseded by #190, adopted in the same batch with a test.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "rhyce.git <rhyce@comley.dev>"
+    ],
+    "superseded_by": 190
   }
 }
