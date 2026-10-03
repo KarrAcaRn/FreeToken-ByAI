@@ -7,6 +7,8 @@ import subprocess
 import urllib.request
 
 UPSTREAM = "FlashML-org/FreeToken"
+# The fork's integration branch: main mirrors upstream, adopted PRs land here.
+WORK = "next"
 HERE = pathlib.Path(__file__).parent
 LOG = HERE / "pr-decisions.json"
 TABLE = HERE / "pr-decisions.md"
@@ -72,26 +74,26 @@ def git(*args):
 
 
 def overlap(num, log):
-    """What may already cover PR ``num``: main's commits since its base and other PRs on its files."""
+    """What may already cover PR ``num``: the work branch's commits since its base and other PRs on its files."""
     ref = f"refs/pr-heads/{num}"
     # refs/pr-heads/ stays out of the branch list
     if subprocess.run(["git", "fetch", "-q", "upstream", f"+refs/pull/{num}/head:{ref}"]).returncode:
         raise SystemExit(f"#{num} has no upstream PR head (an issue number?)")
     open_nums = [pr["number"] for pr in open_prs() if pr["number"] != num]
     git("fetch", "-q", "upstream", *[f"+refs/pull/{n}/head:refs/pr-heads/{n}" for n in open_nums])
-    base = git("merge-base", "main", ref).strip()
+    base = git("merge-base", WORK, ref).strip()
     files = set(git("diff", "--name-only", f"{base}..{ref}").split())
     print(f"# PR #{num}: {len(files)} files, base {base[:12]}")
     if not files:
-        print("nothing left to apply: main already contains this PR's head")
+        print(f"nothing left to apply: {WORK} already contains this PR's head")
         return
-    # main moved on after the PR branched: a fix or refactor there may make it obsolete
-    print("## main since the PR's base, on its files")
-    print(git("log", "--oneline", f"{base}..main", "--", *files) or "(none)\n", end="")
+    # the work branch moved on after the PR branched: a fix or refactor there may make it obsolete
+    print(f"## {WORK} since the PR's base, on its files")
+    print(git("log", "--oneline", f"{base}..{WORK}", "--", *files) or "(none)\n", end="")
     print("## other open PRs touching the same files")
     hits, decided = [], []
     for n in open_nums:
-        shared = files & set(git("diff", "--name-only", f"main...refs/pr-heads/{n}").split())
+        shared = files & set(git("diff", "--name-only", f"{WORK}...refs/pr-heads/{n}").split())
         if not shared:
             continue
         if str(n) in log:
