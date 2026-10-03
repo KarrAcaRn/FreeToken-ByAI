@@ -100,3 +100,10 @@ def test_a_dense_gguf_is_still_recognised_as_gguf():
     assert is_gguf_model(SimpleNamespace(moe_weight_format="q4_0", gguf_quant_types=None))
     assert is_gguf_model(SimpleNamespace(moe_weight_format="none", gguf_quant_types={"embedding": 2}))
     assert not is_gguf_model(SimpleNamespace(moe_weight_format="none", gguf_quant_types=None))
+
+
+def test_scalar_head_count_kv_is_broadcast_to_every_layer(tmp_path):
+    # llama.cpp writes head_count_kv as a scalar when every layer shares it (upstream #190).
+    scalar = parse_gguf_config(make_shim({"gemma4.attention.head_count_kv": 2}, tmp_path))
+    per_layer = parse_gguf_config(make_shim({}, tmp_path))
+    assert scalar.num_kv_heads == per_layer.num_kv_heads == 2
