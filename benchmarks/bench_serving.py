@@ -372,7 +372,7 @@ def calibrate_prompt(
 
 
 def sample_metrics(
-    result: StreamResult, target_prompt_tokens: int | None = None
+    result: StreamResult, target_prompt_tokens: int | None = None, cache_report: bool = False
 ) -> dict[str, Any]:
     usage = result.usage
     prompt_tokens = int(usage["prompt_tokens"])
@@ -388,6 +388,10 @@ def sample_metrics(
     )
     decode_steps = max(0, completion_tokens - 1)
     cached_tokens = _usage_cached_tokens(usage)
+    if cached_tokens is None and cache_report:
+        # The server omits prompt_tokens_details for a zero hit (sglang convention), so once
+        # reporting is known to be on, an absent object is a miss, not an unknown.
+        cached_tokens = 0
     new_prompt_tokens = (
         prompt_tokens - cached_tokens if cached_tokens is not None else None
     )
@@ -528,12 +532,21 @@ def _suffix(tokens: int) -> str:
 
 
 def run_request(
-    origin: str, model_id: str, prompt: str, max_tokens: int, timeout: float
+    origin: str, model_id: str, prompt: str, max_tokens: int, timeout: float,
+    cache_report: bool = False,
 ) -> dict[str, Any]:
     result = stream_chat_completion(
         origin, generation_payload(model_id, prompt, max_tokens), timeout=timeout
     )
-    return sample_metrics(result)
+    return sample_metrics(result, cache_report=cache_report)
+
+
+def detect_cache_report(origin: str, model_id: str, timeout: float) -> bool:
+    """True when the server reports prefix-cache hits (ft serve --enable-cache-report): a
+    repeated prompt must come back with prompt_tokens_details."""
+    prompt = _prompt_with_chars(f"BENCHMARK_CACHE_PROBE_{uuid.uuid4().hex}", 512)
+    run_request(origin, model_id, prompt, 1, timeout)
+    return run_request(origin, model_id, prompt, 1, timeout)["cached_tokens"] is not None
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
@@ -551,6 +564,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         f"MoE: {snapshot['cache']['moe_slots']}/{snapshot['cache']['moe_total_slots']} slots",
         flush=True,
     )
+    cache_report = detect_cache_report(origin, model_id, args.request_timeout)
+    print(f"prefix-cache report: {'on' if cache_report else 'off (hit columns stay n/a)'}", flush=True)
 
     for warmup in range(args.warmup_runs):
         prompt, _ = calibrate_prompt(
@@ -580,7 +595,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 f"BENCHMARK_PREFILL_{run_id}_{target}_{repetition}",
                 args.request_timeout,
             )
-            sample = run_request(origin, model_id, prompt, 1, args.request_timeout)
+            sample = run_request(origin, model_id, prompt, 1, args.request_timeout, cache_report)
             sample.update(target_prompt_tokens=target, repetition=repetition)
             samples.append(sample)
         prefill_targets.append(
@@ -602,7 +617,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             args.request_timeout,
         )
         sample = run_request(
-            origin, model_id, prompt, args.decode_tokens, args.request_timeout
+            origin, model_id, prompt, args.decode_tokens, args.request_timeout, cache_report
         )
         sample["repetition"] = repetition
         decode_samples.append(sample)
@@ -622,7 +637,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "identical": base,
             "small_suffix": base + _suffix(args.cache_suffix_tokens),
         }.items():
-            sample = run_request(origin, model_id, prompt, 1, args.request_timeout)
+            sample = run_request(origin, model_id, prompt, 1, args.request_timeout, cache_report)
             sample["case"] = name
             row[name] = sample
         prefix_samples.append(row)
@@ -647,6 +662,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "top_k": -1,
             "ignore_eos": True,
             "warmup_runs": args.warmup_runs,
+            "cache_report": cache_report,
             "repetitions": args.repetitions,
             "decode_tokens": args.decode_tokens,
             "cache_prefix_tokens": args.cache_prefix_tokens,

@@ -236,3 +236,25 @@ def test_api_key_is_sent_as_a_bearer_header(monkeypatch):
     assert bench._headers(True) == {"Content-Type": "application/json", "Authorization": "Bearer k"}
     monkeypatch.setattr(bench, "_API_KEY", None)
     assert bench._headers(False) == {}
+
+
+def test_a_reporting_server_omits_the_details_for_a_miss():
+    # With --enable-cache-report the server still drops prompt_tokens_details on a zero hit, so
+    # a fresh prompt is a miss once reporting is known to be on, and its prefill rate counts.
+    metrics = sample_metrics(_stream_result(cached_tokens=None), cache_report=True)
+    assert metrics["cached_tokens"] == 0
+    assert metrics["client_wall_effective_prefill_tps"] is not None
+
+
+def test_detect_cache_report_looks_at_the_repeated_prompt(monkeypatch):
+    import benchmarks.bench_serving as bench
+
+    seen = []
+
+    def fake_run(origin, model_id, prompt, max_tokens, timeout, cache_report=False):
+        seen.append(prompt)
+        return {"cached_tokens": 500 if len(seen) == 2 else None}
+
+    monkeypatch.setattr(bench, "run_request", fake_run)
+    assert bench.detect_cache_report("o", "m", 1.0) is True
+    assert seen[0] == seen[1]
