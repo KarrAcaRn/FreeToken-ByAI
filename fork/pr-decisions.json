@@ -457,14 +457,15 @@
     "head_sha": "5046e4a00f94",
     "reviewed_at": "2026-10-03",
     "decision": "deferred",
-    "reason": "Stacked on the still-undecided #499 (KV host-offload, its commits are in this diff); 1.5k lines, opt-in via env flags. Review together with #499 once the queue reaches it.",
+    "reason": "Stacked on the still-undecided #499 (KV host-offload, its commits are in this diff); 1.5k lines, opt-in via env flags. Review together with #499 once the queue reaches it. 2026-10-03: #499 deferred until after the queue, so this follows it.",
     "commits": [],
     "gpu_untested": false,
     "authors": [
       "AlReis <258541404+alvarorsouza-arch@users.noreply.github.com>",
       "alvarorsouza-arch <alvaro.r.souza@gmail.com>"
     ],
-    "revisit_with": 499
+    "revisit_with": 499,
+    "revisit": "after-queue"
   },
   "507": {
     "number": 507,
@@ -601,6 +602,80 @@
     "gpu_untested": false,
     "authors": [
       "AlReis <258541404+alvarorsouza-arch@users.noreply.github.com>"
+    ]
+  },
+  "500": {
+    "number": 500,
+    "title": "perf(moe): single-launch prefill buffer invalidation without hidden sync",
+    "head_sha": "dc9216c11313",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Replaces the per-buffer prefill invalidation with a single launch and drops a hidden host sync; adds offload tests. Fixup: trimmed the long invalidation comments to the repo's comment style. tests/moe/test_offload.py passes on the RTX 4090.",
+    "commits": [
+      "fd86809",
+      "58cd469"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "chrisqian <chrisqian@example.com>"
+    ]
+  },
+  "594": {
+    "number": 594,
+    "title": "feat(qwen4_exp): support ModelOpt QAD checkpoints (NVFP4 PLE tables, MXFP8 dense)",
+    "head_sha": "7e4b10d9ddc6",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Loads ModelOpt QAD checkpoints: NVFP4-packed PLE tables and MXFP8 dense scales under .weight_scale. Merge conflict resolved by routing the NVFP4 table through main's validating scan_ple_table and host-RAM admission check. Fixup: the scan checks the row count against the n-gram config, and the cuda gather oob test indexes per row. qwen4_exp tests pass on the RTX 4090 (3 test_qsa_backend chunked-prefill failures predate the merge); the NVFP4 gather path itself is not exercised end to end on sm_89.",
+    "commits": [
+      "5cd6642",
+      "a2b4fe2"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Eva (port) <eva@local>"
+    ]
+  },
+  "495": {
+    "number": 495,
+    "title": "fix(scheduler): wait for rank subscribers before first broadcast",
+    "head_sha": "5b96b6518547",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "Real ZMQ slow-joiner race: with tp>1, rank 0 could broadcast before a rank's SUB subscription reached the PUB, dropping the message and hanging both ranks. XPUB + wait_for_subscribers closes it; both ranks reach the IO mixin right after engine init, so the 30 s wait cannot deadlock. Small, with a pub/sub test; tests/utils pass. TP>1 itself is not testable on the single 4090.",
+    "commits": [
+      "736c7e9"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Cyber-Marty <15370813896@163.com>"
+    ]
+  },
+  "499": {
+    "number": 499,
+    "title": "feat(kvcache): host-RAM KV tier for sparse-attention models (--kv-host-pages)",
+    "head_sha": "6c316e2c9371",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Its fp8 parts (16-bit indexer dtype guard, k/v scales on the QSA attend) are already on main via #354. The remaining host-RAM KV tier (~700 lines: LRU GPU page cache over a pinned host mirror, per-row prefill attend loop) only serves QSA models (qwen4_exp / Flash-Next), ships without tests, and cannot be run here: only the Flash-Next config is cached and 30 GB RAM cannot hold its weights. Interesting for long context; revisit after the queue together with #525 and the CPU-embedding work.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "alvarorsouza-arch <alvaro.r.souza@gmail.com>"
+    ]
+  },
+  "502": {
+    "number": 502,
+    "title": "feat(deepseek_v4): serve image input on the V4-Flash-Vision release",
+    "head_sha": "d3ac96c0825c",
+    "reviewed_at": "2026-10-03",
+    "decision": "rejected",
+    "reason": "1.3k-line vision path for DeepSeek-V4-Flash, a model far beyond a single RTX 4090 with 30 GB RAM, so it can be neither used nor verified here; it also reworks the shared mm pad scheme across every processor and the scheduler's mm spans. Out of scope for this fork; it arrives through the upstream sync if upstream merges it.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
     ]
   }
 }
