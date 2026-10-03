@@ -230,11 +230,12 @@ def convert_checkpoint(
     from freetoken.moe.expert_banks import load_expert_banks
     from .ftw import is_ftw_checkpoint
 
+    # before _resolve_source, so a repo id is not downloaded only to be refused
+    _refuse_occupied_output(out_dir)
     source_id = model_path
     model_path = _resolve_source(model_path)
     if is_ftw_checkpoint(model_path):
         raise SystemExit(f"{model_path} is already an FTW checkpoint")
-    _refuse_occupied_output(out_dir)
     tp = try_get_tp_info()
     if tp is None:
         set_tp_info(rank=0, size=1)

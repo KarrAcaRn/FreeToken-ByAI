@@ -58,3 +58,17 @@ def test_empty_absent_or_unrelated_output_dirs_pass(tmp_path):
     (other / "config.json").write_text("{}")  # copied metadata alone is not FTW output
     (other / "notes.ftw.bak").write_bytes(b"")
     assert _refuse_occupied_output(str(other)) is None
+
+
+def test_hf_repo_id_is_refused_before_it_is_downloaded(tmp_path, monkeypatch):
+    import freetoken.checkpoint.convert as convert
+
+    def no_download(model_path):
+        raise AssertionError("_resolve_source ran before the output check")
+
+    monkeypatch.setattr(convert, "_resolve_source", no_download)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "freetoken-00000.ftw").write_bytes(b"\0" * 64)
+    with pytest.raises(SystemExit, match="already holds an FTW checkpoint"):
+        convert_checkpoint("some-org/some-model", str(out))
