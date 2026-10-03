@@ -84,13 +84,15 @@ of 16), so a card that held N tokens holds close to 2N. Each `(token, kv head)` 
 keeps its own fp32 scale, which costs ~3% back at `head_dim=128`. Requirements and
 trade-offs:
 
-- Needs the **triton** attention backend; `--attn auto` selects it (and refuses an
-  explicit `fi`/`fa`/`trtllm`, which cannot be shown to apply these scales).
-- Works on the plain paged, hybrid-SWA and QSA sparse (Qwen3.8-Flash-Next) KV pools.
-  On QSA the block-selection index keys stay 16-bit; only the selected K/V rows are
-  read back as codes. MLA/DSA latent KV, DeepSeek-V4's tiered pool and the block-sparse
-  MiniMax-M3 pool stay 16-bit; asking for fp8 there fails at startup rather than
-  silently ignoring the flag.
+- Needs an attention backend that decodes the codes: **triton** for plain paged and
+  hybrid-SWA pools, **qsa_sparse** and **dsa** for the sparse ones. `--attn auto` selects
+  it (and refuses an explicit `fi`/`fa`/`trtllm`, which cannot be shown to apply these
+  scales).
+- Works on the plain paged, hybrid-SWA, QSA sparse (Qwen3.8-Flash-Next) and MLA/DSA KV
+  pools. On QSA the block-selection index keys stay 16-bit, and on DSA the index-key and
+  tail tiers do; only the selected K/V or latent rows are read back as codes.
+  DeepSeek-V4's tiered pool and the block-sparse MiniMax-M3 pool stay 16-bit; asking for
+  fp8 there fails at startup rather than silently ignoring the flag.
 - The same bytes on every GPU FreeToken targets: the codes sit in a plain byte buffer
   and are decoded in software, so the cache holds identical data and produces identical
   numbers on any card (the fp8 type is deliberately kept out of the kernels, which is

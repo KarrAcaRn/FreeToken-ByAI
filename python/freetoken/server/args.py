@@ -467,9 +467,10 @@ def parse_args(
         help=(
             "KV-cache storage format. 'bf16' (default) stores the compute dtype; 'fp8'"
             " stores e4m3 codes plus one fp32 scale per (token, kv head), roughly "
-            "doubling the tokens that fit in the same VRAM. Requires the triton"
-            " attention backend and a plain paged, hybrid-SWA or QSA sparse KV pool"
-            " (not MLA/DSA, DSV4, or MiniMax-M3 block-sparse models)."
+            "doubling the tokens that fit in the same VRAM. Needs an attention backend"
+            " that decodes the codes (--attn auto picks triton, qsa_sparse or dsa) and a"
+            " plain paged, hybrid-SWA, QSA sparse or MLA/DSA KV pool (not DSV4 or"
+            " MiniMax-M3 block-sparse models)."
         ),
     )
 
