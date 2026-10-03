@@ -1023,5 +1023,76 @@
     "authors": [
       "tspeaks <speaks_tyler@yahoo.com>"
     ]
+  },
+  "413": {
+    "number": 413,
+    "title": "fix(models): support llm-compressor NVFP4 MoE export variants",
+    "head_sha": "f8d6a56b360c",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "reason": "Adds detection and loaders for llm-compressor Qwen3.5-MoE NVFP4 export variants (per-expert vs stacked experts, GDN left bf16/fp8, format-only configs, NVFP4 lm_head/embed, single-file checkpoints). Some gaps are still real on main (its tests show format-only configs detected as 'none' and compressed-tensors block-fp8 refused), but the PR predates the QuantConfig refactor (#418/#438) and conflicts in all six code files, so it needs a reimplementation on the new layers, verified against a real export. Revisit together with the MoE test model choice (a Qwen3.5/3.6-MoE NVFP4 export would make it directly testable).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Stephen J. Thompson <stephen@digitalgraveyard.info>"
+    ],
+    "revisit": "after-queue"
+  },
+  "412": {
+    "number": 412,
+    "title": "fix(bench): show how to use custom bandwidth profiles",
+    "head_sha": "20d81c507e94",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "ft bench bw -o <path> wrote a profile that serving never read unless FREETOKEN_BENCHBW_PATH pointed at it; the report now prints that export. bench_profile.py reads exactly that variable. Test passes.",
+    "commits": [
+      "22364c2"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Earl Co <info@earlco.in>"
+    ]
+  },
+  "406": {
+    "number": 406,
+    "title": "docs(models): qualify full GLM-5.3 on H200 Serverless",
+    "head_sha": "d01f3147cb2f",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "reason": "Documents full GLM-5.3 on the existing glm_moe_dsa path with a community NVFP4 conversion (LibertAIDAI/GLM-5.3-NVFP4), renames the AOT entry to it with the NVIDIA/zai 5.2 names as aliases, adds a config test and ~900 lines of raw H200 benchmark JSON. Not judged on its merits yet: the model cannot run or be verified here. Revisit after the queue.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Earl Co <info@earlco.in>"
+    ],
+    "revisit": "after-queue"
+  },
+  "405": {
+    "number": 405,
+    "title": "fix(models): serve qwen4_exp FTW checkpoints with PLE streamed from source",
+    "head_sha": "06e4ec600150",
+    "reviewed_at": "2026-10-03",
+    "decision": "superseded",
+    "reason": "Falls back to the conversion source to stream the Flash-Next PLE table from an FTW dir. Superseded by #420 on main (3d919e9): the converter now writes the PLE table next to the FTW, and scripts/ftw_hotfix.py adds it to FTWs converted before that.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Ahmed Hassanin <eng.ahmd@ymail.com>"
+    ],
+    "superseded_by": "3d919e9 (#420)"
+  },
+  "399": {
+    "number": 399,
+    "title": "fix(cpu-moe): honor padded fp8 scale strides, add avx512f tier and float64 parity (builds on #36)",
+    "head_sha": "56a51835df7e",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "reason": "Stacked on #36 (block-FP8 expert GEMV for the CPU/hybrid MoE backends, still undecided): it carries #36's commit plus a padded-scale-stride fix, an AVX-512F fp8 tier and float64 parity tests. Review together with #36; CPU code, so it can be tested here then (this VM has AVX2 only).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "ChenyuHe <hechenyu@zju.edu.cn>"
+    ],
+    "revisit_with": 36
   }
 }
