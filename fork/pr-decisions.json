@@ -419,5 +419,83 @@
     "authors": [
       "LZ-QWQ <lz1830837889@163.com>"
     ]
+  },
+  "531": {
+    "number": 531,
+    "title": "fix(server): clamp /v1/models context_length to the allocated KV pool",
+    "head_sha": "b9b8f1b33064",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "/v1/models advertised the model ceiling while the engine admits against min(ceiling, num_pages*page_size), so `ft launch` sized agent windows past the KV pool. Fixup: multiply only by the engine-reported page_size (the frontend's config.page_size is unresolved), with a test.",
+    "commits": [
+      "37791c3",
+      "09bd83d"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Oscar Rojas <116426609+oscar-investmatic@users.noreply.github.com>"
+    ]
+  },
+  "527": {
+    "number": 527,
+    "title": "fix(sampling): apply presence and frequency penalties",
+    "head_sha": "e32f8a7b5820",
+    "reviewed_at": "2026-10-03",
+    "decision": "reimplemented",
+    "reason": "The API accepted presence/frequency penalties but ignored them. PR keeps a vocab-sized count tensor per request and ships no tests; ours rebuilds counts each step from the generated tokens in token_pool on the engine stream (overlap-safe, no state across aborts or table reuse), enforces OpenAI's [-2, 2] with a 400, adds CPU and GPU tests (mixed batch passed on the RTX 4090).",
+    "commits": [
+      "5a4987c"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ]
+  },
+  "525": {
+    "number": 525,
+    "title": "feat(kvcache): host-resident prefix tier for hybrid GDN models (snapshots + KV pages)",
+    "head_sha": "5046e4a00f94",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "reason": "Stacked on the still-undecided #499 (KV host-offload, its commits are in this diff); 1.5k lines, opt-in via env flags. Review together with #499 once the queue reaches it.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "AlReis <258541404+alvarorsouza-arch@users.noreply.github.com>",
+      "alvarorsouza-arch <alvaro.r.souza@gmail.com>"
+    ],
+    "revisit_with": 499
+  },
+  "507": {
+    "number": 507,
+    "title": "feat(glm5_next): serve GLM-5.3-Flash with tensor parallelism",
+    "head_sha": "3045f7832847",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "TP for glm5_next (MLA/DSA heads, KDA heads, MLPs, NVFP4 experts sharded on I); TP=1 paths unchanged, author ran it on 4x A4000. Fixup: the TP test fixture lacked num_key_value_heads, which transformers 5.16 validates. Single-GPU tests pass; TP itself untested here (one GPU).",
+    "commits": [
+      "865ed79",
+      "8d1bb61"
+    ],
+    "gpu_untested": true,
+    "authors": [
+      "Carlos Alvarado <carlos-alvarado@outlook.com>"
+    ]
+  },
+  "504": {
+    "number": 504,
+    "title": "feat(server): serve per-request inference metrics under --enable-metrics-report",
+    "head_sha": "a76d9ecc1f50",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Opt-in per-request TTFT/prefill/decode metrics on chat, messages and responses; complements the cumulative /v1/stats counters from #553. Fixup: the abort test stub (newer than the PR's base) needed the new _prefill_start map.",
+    "commits": [
+      "9f1d61f",
+      "361ef5a"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "yajun <leamon@stu.xidian.edu.cn>"
+    ]
   }
 }
