@@ -29,9 +29,20 @@ def kv_storage_bytes_per_elem(config) -> int:
     quant = getattr(config, "kv_quant", "none")
     if quant == "fp8":
         return 1
+    if quant == "nvfp4":
+        raise ValueError("nvfp4 KV packs two elements per byte; size rows with kv_row_bytes")
     if quant != "none":
         raise ValueError(f"unknown kv_quant {quant!r}")
     return config.dtype.itemsize
+
+
+def kv_row_bytes(head_dim: int, config) -> int:
+    """Storage bytes of one (token, kv head) row of K or V, without its scales."""
+    if getattr(config, "kv_quant", "none") == "nvfp4":
+        if head_dim % 16:
+            raise ValueError("NVFP4 KV requires head_dim divisible by 16")
+        return head_dim // 2
+    return head_dim * kv_storage_bytes_per_elem(config)
 
 
 def kv_scale_bytes_per_token(spec, config) -> int:
@@ -59,15 +70,9 @@ def spec_kv_bytes_per_token(spec, config) -> int:
 
     ``index_ratio`` > 1 (QSA) stores one index key per token group, not per token; that slab's
     ring and scratch rows are fixed-size and priced in QSAKVCache.kv_cost instead."""
-    if getattr(config, "kv_quant", "none") == "nvfp4":
-        if spec.head_dim % 16:
-            raise ValueError("NVFP4 KV requires head_dim divisible by 16")
-        row_bytes = spec.head_dim // 2
-    else:
-        row_bytes = spec.head_dim * kv_storage_bytes_per_elem(config)
     per_token = (
         (1 if spec.mla else 2)  # MLA latent groups store one slab (V aliases K)
-        * row_bytes
+        * kv_row_bytes(spec.head_dim, config)
         * div_even(spec.num_kv_heads, config.tp_info.size, allow_replicate=True)
         * spec.num_layers
     )
