@@ -1274,5 +1274,78 @@
     "authors": [
       "Yasitha Herath <35001977+amodhyh@users.noreply.github.com>"
     ]
+  },
+  "317": {
+    "number": 317,
+    "title": "fix(ftw): preserve auxiliary expert banks",
+    "head_sha": "c7be5d068b3c",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "reason": "Serializes 'auxiliary' expert banks (a second row geometry) into a nested FTW checkpoint and loads them back. Nothing on next produces auxiliary banks: the only producer of ExpertBanks.auxiliary_sources is the still-undecided older PR #260, so this is stacked on it. Review together with #260.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Erik Bogado <erikbogado@gmail.com>"
+    ],
+    "revisit_with": 260
+  },
+  "316": {
+    "number": 316,
+    "title": "fix(rocm): avoid indirect host pointers during HIP graph capture",
+    "head_sha": "e86df587b944",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted-with-fixups",
+    "reason": "Under HIP graph capture the fused expert copy's device-side pointer table loses its pinned-host mappings; the copy now falls back to per-bank copies there. CUDA is untouched (torch.version.hip is None). Conflict with next's disk-tier debug print (#337) resolved by keeping both; fixup: the PR's stub lacked next's _disk_tier attribute. Tests pass on the RTX 4090 (the ROCm-only test skips); Qwen3.6 MoE unchanged (~7900 prefill / ~139 decode tok/s). ROCm itself cannot be tested here.",
+    "commits": [
+      "46806e5",
+      "8c1f4fe"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Erik Bogado <erikbogado@gmail.com>"
+    ]
+  },
+  "315": {
+    "number": 315,
+    "title": "Fix GGUF user-defined token atomicity",
+    "head_sha": "6d5cfe697c23",
+    "reviewed_at": "2026-10-03",
+    "decision": "adopted",
+    "reason": "GGUF user-defined tokens (token_type 4, e.g. <think>) keep their vocab id but transformers' GGUF conversion may not register them, so encode() split them into subwords. They are now re-added as non-special atomic tokens, only when actually split, without changing vocab size. Checked on the Gemma-4 12B GGUF: its 7 user-defined tokens already encode atomically, so nothing changes there; it matters for other GGUF architectures (e.g. once qwen35moe GGUF arrives). Tests pass.",
+    "commits": [
+      "66a1ade"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Sebastián Real <tuxevil@gmail.com>"
+    ]
+  },
+  "300": {
+    "number": 300,
+    "title": "feat: Automatic KV/MoE Laddering for decode speed vs context-length trade off ( upto 33% faster decode ) ",
+    "head_sha": "1b90e9fc97a7",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "reason": "--enable-kv-ladder: start with a small KV cache and grow it at request boundaries by shrinking the GPU expert cache (runtime rebuild), so short requests keep more experts resident. Relevant to our Qwen3.6 MoE work (expert cache vs context, TTFT floor), but needs a rework on next: it reads kwargs['moe_backend'], which next renamed to moe_strategy (crashes as soon as the flag is used), conflicts in scheduler.py and docs, and ships no tests. Revisit after the queue together with the MoE work items.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Aswinkumar <aswinkumar1999@gmail.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "298": {
+    "number": 298,
+    "title": "Support poolside/Laguna-S-2.1-NVFP4, and fix serving from source on Windows",
+    "head_sha": "2684e9ff25d3",
+    "reviewed_at": "2026-10-03",
+    "decision": "deferred",
+    "reason": "Two unrelated changes: a new Laguna model family (poolside/Laguna-S-2.1-NVFP4, ~100 GB) and a Windows serving fix (ZMQ over localhost TCP where ipc:// is missing, selector event loop, fadvise/mmap guards). Neither can be run or verified here (model far beyond the RTX 4090 / 30 GB RAM, no Windows box). Not judged on its merits yet; revisit after the queue (ideally split into the two changes).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Ahmed Hassanin <eng.ahmd@ymail.com>"
+    ],
+    "revisit": "after-queue"
   }
 }
