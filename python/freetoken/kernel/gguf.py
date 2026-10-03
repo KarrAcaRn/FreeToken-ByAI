@@ -62,7 +62,12 @@ def _module():
             extra_cuda_cflags.append(f"--offload-arch={arch}")
         host_cxx = None
     else:
-        extra_cuda_cflags = ["-O3", "--expt-relaxed-constexpr"]
+        # ``-std=c++20`` is load-bearing, not a modernization: nvcc's host pass rewrites
+        # ``static_cast<typename decltype(impl_->list)::difference_type>`` in libtorch's
+        # ``ATen/core/List_inl.h`` into a form that drops the ``typename``, which g++ 12/13/15
+        # reject under C++17. C++20 (P0634) makes ``typename`` implicit in a static_cast
+        # type-id. torch only appends its own ``-std=c++17`` when no ``-std=`` is present.
+        extra_cuda_cflags = ["-O3", "--expt-relaxed-constexpr", "-std=c++20"]
         host_cxx = _host_compiler()
     if host_cxx is not None:
         # Point both nvcc's host pass (-ccbin) and torch's C++ compile (CXX) at a
