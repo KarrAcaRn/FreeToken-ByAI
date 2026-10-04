@@ -43,3 +43,65 @@ def test_verify_blocks_neither_leak_nor_reuse_pages(cache_type, accepted):
     with cm.lazy_free_region():
         cm.cache_req(req, finished=True)
     cm.check_integrity()
+
+
+def _hybrid():
+    from freetoken.kvcache.linear_state_pool import LinearStatePool
+    from freetoken.models.config import LinearGatedDeltaGroupConfig
+
+    g = LinearGatedDeltaGroupConfig(
+        name="linear", layer_ids=(0,), num_key_heads=2, num_value_heads=4,
+        key_head_dim=16, value_head_dim=16, conv_kernel_dim=4, output_gate="silu",
+    )
+    pool = LinearStatePool(group=g, num_slots=16, dtype=torch.bfloat16,
+                           device=torch.device("cpu"), tp_size=1)
+    page_table = torch.zeros(2, 256, dtype=torch.int32)
+    return pool, CacheManager(256, 1, page_table, "hybrid_radix", linear_state_pool=pool)
+
+
+@pytest.mark.parametrize("state_ahead", [False, True])
+def test_hybrid_finish_frees_ahead_pages(state_ahead):
+    pool, cm = _hybrid()
+    req = _req(cm, list(range(1, 20)), max_new=100)
+    req.linear_slot_idx, req.mamba_ping_pong = pool.alloc(1)[0], tuple(pool.alloc(2))
+    for a in [3, 7, 0]:
+        cm.allocate_paged([req], ahead=BLOCK)
+        req.append_host(torch.arange(a + 1, dtype=torch.int32))
+        req.cached_len = req.device_len
+    req.linear_state_ahead = state_ahead
+    with cm.lazy_free_region():
+        cm.cache_req(req, finished=True)
+    cm.check_integrity()
+    tree_slots = cm.prefix_cache.mamba_evictable_size + cm.prefix_cache.mamba_protected
+    # a state that ran past cached_len is never attached to the cached prefix
+    assert tree_slots == (0 if state_ahead else 1)
+    assert pool.num_free_slots + tree_slots == pool.num_slots - 1
+
+
+@pytest.mark.parametrize("eos_at,ahead", [(None, False), (3, False), (1, True), (0, True)])
+def test_multi_token_drain_marks_a_state_past_the_stop(eos_at, ahead):
+    from freetoken.scheduler.scheduler import Scheduler
+
+    eos = 99
+    tokens = torch.tensor([5, 6, 7, 8], dtype=torch.int32)  # 3 accepted drafts + the bonus
+    if eos_at is not None:
+        tokens[eos_at] = eos
+    req = Req(input_ids=torch.arange(1, 11, dtype=torch.int32), table_idx=0, cached_len=9,
+              output_len=50, uid=0, sampling_params=SamplingParams(), cache_handle=None)
+    req.cached_len, req.device_len = 10, 11  # complete_one ran: the anchor's KV is in
+    freed = []
+    sched = SimpleNamespace(
+        eos_token_ids={eos}, finished_reqs=set(), _match_stop_str=lambda r: None,
+        decode_manager=SimpleNamespace(remove_req=lambda r: None),
+        _free_req_resources=lambda r: freed.append((r.cached_len, r.linear_state_ahead)),
+    )
+    finished = set()
+    Scheduler._drain_multi_token(sched, req, tokens, 0, 4, [], finished, None)
+    kept = 4 if eos_at is None else eos_at + 1
+    # every kept token but the last has its KV written
+    assert req.cached_len == 9 + kept
+    assert req.input_ids.numel() == 10 + kept
+    if eos_at is None:
+        assert not finished and not freed
+    else:
+        assert freed == [(9 + kept, ahead)]

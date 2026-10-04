@@ -8,14 +8,12 @@ import math
 import os
 import socket
 import sys
-import time
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Callable, Dict, Iterable, NamedTuple, Tuple
+from typing import Any, Dict, Iterable, NamedTuple, Tuple
 
 import torch
 from freetoken.attention import AttnType, attention_backend_info, create_attention_backend
-from freetoken.attention.linear import FLAMetadata
 from freetoken.core import Batch, Context, Req, set_global_ctx
 from freetoken.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from freetoken.env import ENV
@@ -32,16 +30,12 @@ from freetoken.moe.host_banks import PinFailed
 from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cache
 from freetoken.speculative.utils import (
     AdaptiveGate,
-    VerifyState,
     clone_hidden_outputs,
-    contiguous_accept_len,
-    rejection_residual_sample,
+    commit_graph_linear_state,
     rejection_sample_chain,
     rejection_step,
     repeat_sampling_args,
-    restore_graph_linear_state_for_commit,
     restore_linear_state_for_commit,
-    restore_linear_state_slot,
     restore_verify_state,
     sampling_probs,
     select_output_tokens,
@@ -59,7 +53,7 @@ from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
-    _linear_pool_min_slots, _linear_pool_num_slots, state_pool_bytes,
+    _linear_pool_min_slots, _linear_pool_num_slots, dflash_verify_bytes_per_token, state_pool_bytes,
 )
 
 logger = init_logger(__name__)
@@ -68,42 +62,26 @@ logger = init_logger(__name__)
 # so the window is coarse; it is short enough that a normal-length reply still produces a
 # few reports rather than one at the very end.
 MOE_STATS_INTERVAL = 256
-_DEBUG_DFLASH_FLOW = os.environ.get("DEBUG_DFLASH_FLOW", "0") == "1"
-_DEBUG_DFLASH_TIMING = os.environ.get("FREETOKEN_DEBUG_DFLASH_TIMING", "0") == "1"
-_DEBUG_DFLASH_METRICS = os.environ.get("FREETOKEN_DEBUG_DFLASH_METRICS", "0") == "1"
-_DFLASH_METRICS_INTERVAL = int(os.environ.get("FREETOKEN_DFLASH_METRICS_INTERVAL", "100"))
-_DFLASH_GRAPH_TARGET = os.environ.get("FREETOKEN_DFLASH_GRAPH_TARGET", "1") == "1"
-_DFLASH_GRAPH_VERIFY = os.environ.get("FREETOKEN_DFLASH_GRAPH_VERIFY", "1") == "1"
-_DFLASH_TARGET_VERIFY_GRAPH = os.environ.get("FREETOKEN_DFLASH_TARGET_VERIFY_GRAPH", "1") == "1"
-_DFLASH_ADAPTIVE = os.environ.get("FREETOKEN_DFLASH_ADAPTIVE", "1") == "1"
-_DFLASH_ADAPTIVE_MARGIN = float(os.environ.get("FREETOKEN_DFLASH_ADAPTIVE_MARGIN", "1.15"))
-_DFLASH_ADAPTIVE_MIN_CYCLES = int(os.environ.get("FREETOKEN_DFLASH_ADAPTIVE_MIN_CYCLES", "8"))
-_DFLASH_ADAPTIVE_EVAL_INTERVAL = int(os.environ.get("FREETOKEN_DFLASH_ADAPTIVE_EVAL_INTERVAL", "8"))
-_DFLASH_ADAPTIVE_REPROBE_EVERY = int(os.environ.get("FREETOKEN_DFLASH_ADAPTIVE_REPROBE_EVERY", "8"))
-
-
-def _debug_dflash(message: str) -> None:
-    if _DEBUG_DFLASH_FLOW:
-        logger.warning_rank0("[DFLASH_FLOW] " + message)
-
-
-def _dflash_timing_now(device: torch.device) -> float | None:
-    if not _DEBUG_DFLASH_TIMING:
-        return None
-    torch.cuda.synchronize(device)
-    return time.perf_counter()
-
-
-def _dflash_elapsed_ms(start: float | None, end: float | None) -> float:
-    if start is None or end is None:
-        return 0.0
-    return (end - start) * 1000.0
+# DFlash adaptive gate: per request, speculation stops when its cycles measure slower than
+# plain decode by more than the margin (speculative/utils.AdaptiveGate)
+_DFLASH_ADAPTIVE_MARGIN = 1.15
+_DFLASH_ADAPTIVE_MIN_CYCLES = 8
+_DFLASH_ADAPTIVE_EVAL_INTERVAL = 8
+_DFLASH_ADAPTIVE_REPROBE_EVERY = 8
+_DFLASH_METRICS_INTERVAL = 100  # cycles between the debug-level acceptance summaries
 
 
 def _dflash_target_verify_graph_lens(worker, *, enabled: bool) -> list[int] | None:
     if worker is None or not enabled:
         return None
     return list(range(1, worker.block_size + 1))
+
+
+def _dflash_gdn_layers(model) -> list:
+    """The target's GDN layers in pool order, for the graph verify's commit (empty: no GDN)."""
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    ops = getattr(layers, "op_list", None) or []
+    return [op.linear_attn for op in ops if hasattr(getattr(op, "linear_attn", None), "dflash_commit")]
 
 
 def _dflash_can_draft(worker, req) -> bool:
@@ -128,86 +106,8 @@ def _dflash_target_verify_graph_enabled_for_config(config: EngineConfig) -> bool
     model_config = getattr(config, "model_config", None)
     moe_strategy = getattr(config, "moe_strategy", "auto")
     return (
-        _DFLASH_TARGET_VERIFY_GRAPH
-        and not is_offload_moe_strategy(moe_strategy)
+        not is_offload_moe_strategy(moe_strategy)
         and (not getattr(model_config, "is_moe", False) or moe_strategy == "fused")
-    )
-
-
-def _dflash_can_verify_with_target_graph(graph_runner, batch, worker, verify_len: int, *, enabled: bool) -> bool:
-    return (
-        enabled
-        and graph_runner.can_use_dflash_target_verify_graph(batch, verify_len)
-        and graph_runner.can_return_hidden_layers(worker.target_layer_ids)
-    )
-
-
-def _dflash_can_verify_token_with_graph(graph_runner, batch, worker, *, enabled: bool) -> bool:
-    return (
-        enabled
-        and graph_runner.can_use_cuda_graph(batch)
-        and graph_runner.can_return_hidden_layers(worker.target_layer_ids)
-    )
-
-
-def _dflash_verify_path_flags(
-    graph_runner,
-    batch,
-    worker,
-    verify_len: int,
-    *,
-    target_graph_enabled: bool,
-) -> tuple[bool, bool]:
-    verified_with_target_graph = _dflash_can_verify_with_target_graph(
-        graph_runner, batch, worker, verify_len, enabled=target_graph_enabled,
-    )
-    verified_with_decode = (
-        not verified_with_target_graph
-        and verify_len > 0
-    )
-    return verified_with_target_graph, verified_with_decode
-
-
-def _debug_dflash_timing(message: str) -> None:
-    if _DEBUG_DFLASH_TIMING:
-        logger.warning_rank0("[DFLASH_TIMING] " + message)
-
-
-def _dflash_timing_log_message(
-    *,
-    uid: int,
-    cached_len: int,
-    context_len: int,
-    block_size: int,
-    verify_len: int,
-    accepted: int,
-    commit_len: int,
-    output_tokens: int,
-    target_ms: float,
-    draft_ms: float,
-    context_kv_append_ms: float,
-    draft_model_forward_ms: float,
-    verify_prepare_ms: float,
-    verify_forward_ms: float,
-    verify_select_ms: float,
-    replay_prepare_ms: float,
-    replay_forward_ms: float,
-    total_ms: float,
-) -> str:
-    return (
-        f"uid={uid} cached={cached_len} context={context_len} "
-        f"block={block_size} verify_len={verify_len} accepted={accepted} "
-        f"commit_len={commit_len} out={output_tokens} "
-        f"target_ms={target_ms:.3f} "
-        f"draft_ms={draft_ms:.3f} "
-        f"context_kv_append_ms={context_kv_append_ms:.3f} "
-        f"draft_model_forward_ms={draft_model_forward_ms:.3f} "
-        f"verify_prepare_ms={verify_prepare_ms:.3f} "
-        f"verify_forward_ms={verify_forward_ms:.3f} "
-        f"verify_select_ms={verify_select_ms:.3f} "
-        f"replay_prepare_ms={replay_prepare_ms:.3f} "
-        f"replay_forward_ms={replay_forward_ms:.3f} "
-        f"total_ms={total_ms:.3f}"
     )
 
 
@@ -727,18 +627,6 @@ def _dflash_sample_and_select(
     return select_output_tokens(base_token, draft_to_verify, verify_tokens)
 
 
-def _dflash_verify_replay_len(
-    commit_len: int,
-    verify_len: int,
-    *,
-    verified_with_decode: bool,
-    verified_with_target_graph: bool,
-) -> int:
-    if verified_with_decode or verified_with_target_graph:
-        return 0
-    return commit_len
-
-
 class Engine:
     def __init__(self, config: EngineConfig):
         assert not torch.cuda.is_initialized()
@@ -801,9 +689,10 @@ class Engine:
                 block_size=config.speculative_dflash_block_size,
                 draft_quant=config.speculative_draft_quant,
                 linear_state_bytes_per_token=(
-                    state_pool_bytes(config, num_slots=1)
+                    dflash_verify_bytes_per_token(config)
                     if _dflash_target_verify_graph_enabled_for_config(config) else 0
                 ),
+                max_context_len=config.max_seq_len,
             )
             logger.info_rank0(
                 f"DFlash enabled: block_size={self.dflash_worker.block_size}, "
@@ -923,9 +812,13 @@ class Engine:
                 margin=_DFLASH_ADAPTIVE_MARGIN,
                 reprobe_every=_DFLASH_ADAPTIVE_REPROBE_EVERY,
             )
-            if _DFLASH_ADAPTIVE
+            if self.dflash_worker is not None and config.speculative_adaptive
             else None
         )
+        # GDN targets: the layers a graph verify's commit replays, and its small device inputs
+        self._dflash_gdn_layers = _dflash_gdn_layers(self.model) if self.dflash_worker is not None else []
+        self._dflash_slot_buf = torch.zeros(1, dtype=torch.int32, device=self.device)
+        self._dflash_cu_seqlens_cache: dict[int, torch.Tensor] = {}
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
 
@@ -1609,15 +1502,25 @@ class Engine:
                 return self._forward_batch_dflash(batch, args)
 
         use_graph = self.graph_runner.can_use_cuda_graph(batch)
+        # DFlash runs one request at a time; every target forward of it (prefill chunks, and
+        # the plain decode steps when the gate is off) feeds the draft's context
+        worker = self.dflash_worker if batch.size == 1 else None
         with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
-            if use_graph:
+            if worker is not None:
+                req = batch.reqs[0]
+                if batch.is_prefill:
+                    worker.begin_request(req.uid, req.input_ids, req.cached_len)
+                if use_graph:
+                    logits, hidden_states = self.graph_runner.replay(
+                        batch, return_hidden_layers=worker.target_layer_ids
+                    )
+                else:
+                    logits, hidden_states = self.model.forward(
+                        return_hidden_layers=worker.target_layer_ids
+                    )
+                worker.store_hidden_states(hidden_states, req.cached_len)
+            elif use_graph:
                 logits = self.graph_runner.replay(batch)
-            elif self.dflash_worker is not None and batch.is_prefill:
-                # Extract hidden states for DFlash context buffer
-                logits, hidden_states = self.model.forward(
-                    return_hidden_layers=self.dflash_worker.target_layer_ids
-                )
-                self.dflash_worker.store_hidden_states(hidden_states)
             else:
                 logits = self.model.forward()
         if self.cpu_moe_executor is not None:
@@ -1731,434 +1634,214 @@ class Engine:
         return sorted(n for n in lens if 2 <= n <= cap)
 
     def _forward_batch_dflash(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
-        """DFlash1-style decode with accepted-prefix plus bonus-token output."""
+        """One DFlash cycle for a single decoding request: draft a block from the anchor (the
+        last emitted token, KV not written yet), verify anchor + drafts in one target forward,
+        keep the accepted prefix plus the target's bonus token."""
         worker = self.dflash_worker
-        timing_start = _dflash_timing_now(self.device)
-        gate = self._dflash_gate
-        gate_active = gate is not None and self.device.type == "cuda"
-        if gate_active:
-            gate_cycle_start = torch.cuda.Event(enable_timing=True)
-            gate_cycle_start.record(self.stream)
+        gate = self._dflash_gate if self.device.type == "cuda" else None
+        if gate is not None:
+            cycle_start = torch.cuda.Event(enable_timing=True)
+            cycle_start.record(self.stream)
 
-        _debug_dflash(
-            "engine-start "
-            + "; ".join(
-                f"uid={r.uid} cached={r.cached_len} device={r.device_len} "
-                f"input={batch.input_ids.tolist()} positions={batch.positions.tolist()}"
-                for r in batch.reqs
-            )
-        )
-        # The anchor is the last emitted token (the previous verify's bonus): its KV is not
-        # written yet. The verify block starts with it, so one target forward per cycle writes
-        # the anchor's KV, checks the drafts, and yields the next bonus and the hidden states
-        # the next draft conditions on (the reference DFlash loop).
         req = batch.reqs[0]
         base_token = batch.input_ids[:1].to(torch.int32)
-        position = req.cached_len
-        target_start = target_end = None
-        draft_start = _dflash_timing_now(self.device)
-        draft_tokens = worker.draft(None, base_token, position, sampling_args=args)
-        draft_end = _dflash_timing_now(self.device)
+        old_cached_len = req.cached_len
+        draft_tokens = worker.draft(base_token, old_cached_len, sampling_args=args)
+        # room for the accepted drafts plus the bonus (_dflash_can_draft gated this at >= 1)
+        num_verify = min(draft_tokens.numel() - 1, req.max_device_len - req.device_len - 1)
+        draft_to_verify = draft_tokens[1 : 1 + num_verify]
+        verify_input = torch.cat([base_token[:1], draft_to_verify])
+        verify_len = verify_input.numel()
+        verify_state = snapshot_verify_state(batch, req)
+        pool = self.linear_state_pool
+        slot = (req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx) if pool is not None else None
+        verified_with_graph = False
+        try:
+            req.append_host(draft_to_verify.cpu())  # the anchor is input_ids' last token already
+            req.device_len = old_cached_len + verify_len
+            batch.phase = "prefill"
+            batch.padded_reqs = batch.reqs
+            batch.input_ids = verify_input.to(self.device)
+            batch.positions = torch.arange(
+                old_cached_len, old_cached_len + verify_len, dtype=torch.int32, device=self.device
+            )
+            batch.out_loc = self.page_table[req.table_idx, old_cached_len : old_cached_len + verify_len]
+            batch.fla_metadata = None
+            self.attn_backend.prepare_metadata(batch)
 
-        output_tokens = base_token[:1].clone()
-        accepted = 0
-        verify_len = 0
-        verify_tokens = None
-        commit_len = 0
-        verify_prepare_ms = 0.0
-        verify_forward_ms = 0.0
-        verify_select_ms = 0.0
-        replay_prepare_ms = 0.0
-        replay_forward_ms = 0.0
-        replay_len = 0
-        target_forward_count = 0
-        target_call_count = 0
-
-        draft_to_verify = draft_tokens[1:]
-        # room for the accepted drafts plus the bonus (dflash_can_draft gated this at >= 1)
-        max_candidates = max(0, req.max_device_len - req.device_len - 1)
-        num_verify = min(len(draft_to_verify), max_candidates)
-        draft_candidate_count = num_verify
-        if num_verify > 0:
-            draft_to_verify = draft_to_verify[:num_verify]
-            verify_input = torch.cat([base_token[:1], draft_to_verify])
-            verify_len = verify_input.numel()
-            verify_state = snapshot_verify_state(batch, req)
-            old_cached_len = verify_state.req_cached_len
-
-            linear_state_snapshot = None
-            verify_linear_snapshots = []
-            verify_linear_graph_snapshots = None
-            commit_verify_linear_snapshots = None
-            if self.linear_state_pool is not None:
-                linear_slot = req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
-                linear_state_snapshot = (
-                    linear_slot,
-                    snapshot_linear_state_slot(
-                        self.linear_state_pool, linear_slot,
-                        out=worker.pre_verify_snapshot(self.linear_state_pool),
-                    ),
-                )
-
-            try:
-                verify_prepare_start = _dflash_timing_now(self.device)
-                req.append_host(draft_to_verify.cpu())  # the anchor is input_ids' last token already
-                req.device_len = old_cached_len + verify_len
-
-                batch.phase = "prefill"
-                batch.padded_reqs = batch.reqs
-                batch.input_ids = verify_input.to(self.device)
-                batch.positions = torch.arange(
-                    old_cached_len, old_cached_len + verify_len,
-                    dtype=torch.int32, device=self.device,
-                )
-                batch.out_loc = self.page_table[
-                    req.table_idx, old_cached_len : old_cached_len + verify_len
-                ]
-                batch.fla_metadata = None
-                self.attn_backend.prepare_metadata(batch)
-                verify_prepare_end = _dflash_timing_now(self.device)
-                verify_prepare_ms = _dflash_elapsed_ms(verify_prepare_start, verify_prepare_end)
-
-                verify_forward_start = _dflash_timing_now(self.device)
-                if gate_active:
-                    gate_target_start = torch.cuda.Event(enable_timing=True)
-                    gate_target_start.record(self.stream)
-                verified_with_target_graph, verified_with_decode = _dflash_verify_path_flags(
-                    self.graph_runner,
-                    batch,
-                    worker,
-                    verify_len,
-                    target_graph_enabled=_DFLASH_TARGET_VERIFY_GRAPH,
-                )
-                if verified_with_target_graph:
-                    try:
-                        if linear_state_snapshot is not None:
-                            restore_linear_state_slot(
-                                self.linear_state_pool,
-                                linear_state_snapshot[0],
-                                linear_state_snapshot[1],
-                            )
-                        with self.ctx.forward_batch(batch):
-                            target_result = self.graph_runner.replay_dflash_target_verify(
-                                batch,
-                                verify_len,
-                                return_hidden_layers=worker.target_layer_ids,
-                                return_linear_snapshots=linear_state_snapshot is not None,
-                            )
-                        if linear_state_snapshot is not None:
-                            verify_logits, verify_hidden_states, verify_linear_graph_snapshots = target_result
-                        else:
-                            verify_logits, verify_hidden_states = target_result
-                    except RuntimeError as exc:
-                        logger.warning_rank0(
-                            f"DFlash target-verify graph failed ({type(exc).__name__}: {exc}); "
-                            "falling back to decode-loop verify"
-                        )
-                        restore_verify_state(batch, req, verify_state)
-                        verified_with_target_graph = False
-                        verified_with_decode = True
-                    if verified_with_target_graph:
-                        verify_select_start = _dflash_timing_now(self.device)
-                        output_tokens, accepted = _dflash_sample_and_select(
-                            self.sampler, args, worker,
-                            base_token, draft_to_verify, verify_logits, verify_len,
-                        )
-                        verify_select_end = _dflash_timing_now(self.device)
-                        verify_select_ms = _dflash_elapsed_ms(verify_select_start, verify_select_end)
-                if not verified_with_target_graph and verified_with_decode:
-                    verify_tokens_parts = []
-                    verify_hidden_parts = None
-                    sampling_verify = use_sampling_verify(args, worker)
-                    sampling_uniform = (
-                        torch.rand(draft_to_verify.numel(), dtype=torch.float32, device=self.device)
-                        if sampling_verify
-                        else None
-                    )
-                    for i in range(verify_len):
-                        position_i = old_cached_len + i
-                        req.cached_len = position_i
-                        req.device_len = position_i + 1
-                        batch.phase = "decode"
-                        batch.padded_reqs = batch.reqs
-                        batch.input_ids = verify_input[i : i + 1].to(self.device)
-                        batch.positions = torch.tensor(
-                            [position_i], dtype=torch.int32, device=self.device,
-                        )
-                        batch.out_loc = self.page_table[
-                            req.table_idx, position_i : position_i + 1
-                        ]
-                        batch.fla_metadata = None
-                        self.attn_backend.prepare_metadata(batch)
-                        with self.ctx.forward_batch(batch):
-                            if _dflash_can_verify_token_with_graph(
-                                self.graph_runner,
-                                batch,
-                                worker,
-                                enabled=_DFLASH_GRAPH_VERIFY,
-                            ):
-                                logits_i, hidden_states_i = self.graph_runner.replay(
-                                    batch,
-                                    return_hidden_layers=worker.target_layer_ids,
-                                )
-                            else:
-                                logits_i, hidden_states_i = self.model.forward(
-                                    return_hidden_layers=worker.target_layer_ids
-                                )
-                        logits_i = logits_i[:1]
-                        hidden_states_i = clone_hidden_outputs(
-                            [h[:1] for h in hidden_states_i]
-                        )
-                        if linear_state_snapshot is not None:
-                            verify_linear_snapshots.append(
-                                snapshot_linear_state_slot(
-                                    self.linear_state_pool, linear_state_snapshot[0]
-                                )
-                            )
-                        if verify_hidden_parts is None:
-                            verify_hidden_parts = [[] for _ in hidden_states_i]
-                        for layer_parts, hidden_i in zip(verify_hidden_parts, hidden_states_i):
-                            layer_parts.append(hidden_i)
-
-                        verify_select_start = _dflash_timing_now(self.device)
-                        if sampling_verify:
-                            p_row = sampling_probs(logits_i, args)[0]
-                            num_candidates = draft_to_verify.numel()
-                            if i < num_candidates:
-                                accepted_i, bonus_i = rejection_step(
-                                    p_row,
-                                    worker.last_draft_probs[i],
-                                    int(draft_to_verify[i].item()),
-                                    float(sampling_uniform[i].item()),
-                                )
-                                if accepted_i:
-                                    token_i = draft_to_verify[i : i + 1].to(torch.int32)
-                                    verify_tokens_parts.append(token_i)
-                                    verify_tokens = torch.cat(verify_tokens_parts, dim=0)
-                                else:
-                                    output_tokens = torch.cat([
-                                        base_token[:1],
-                                        draft_to_verify[:i].to(base_token.dtype),
-                                        bonus_i.view(1).to(base_token.dtype),
-                                    ])
-                                    accepted = i
-                                    verify_len = i + 1
-                                    verify_select_end = _dflash_timing_now(self.device)
-                                    verify_select_ms += _dflash_elapsed_ms(
-                                        verify_select_start, verify_select_end
-                                    )
-                                    break
-                                verify_select_end = _dflash_timing_now(self.device)
-                                verify_select_ms += _dflash_elapsed_ms(
-                                    verify_select_start, verify_select_end
-                                )
-                                continue
-                            token_i = torch.multinomial(p_row[None], 1)[0].to(torch.int32)
-                            verify_tokens_parts.append(token_i)
-                            verify_tokens = torch.cat(verify_tokens_parts, dim=0)
-                            output_tokens = torch.cat([
-                                base_token[:1],
-                                draft_to_verify.to(base_token.dtype),
-                                token_i.to(base_token.dtype),
-                            ])
-                            accepted = num_candidates
-                            verify_len = i + 1
-                            verify_select_end = _dflash_timing_now(self.device)
-                            verify_select_ms += _dflash_elapsed_ms(
-                                verify_select_start, verify_select_end
-                            )
-                            break
-                        else:
-                            token_i = self.sampler.sample(logits_i, args).to(torch.int32)
-                            verify_tokens_parts.append(token_i)
-                            verify_tokens = torch.cat(verify_tokens_parts, dim=0)
-                            candidate_output, candidate_accepted, done = (
-                                select_streaming_output_tokens(
-                                    base_token, draft_to_verify, verify_tokens
-                                )
-                            )
-                            verify_select_end = _dflash_timing_now(self.device)
-                            verify_select_ms += _dflash_elapsed_ms(
-                                verify_select_start, verify_select_end
-                            )
-                            if done:
-                                output_tokens = candidate_output
-                                accepted = candidate_accepted
-                                verify_len = i + 1
-                                break
-
-                    verify_hidden_states = [
-                        torch.cat(layer_parts, dim=0) for layer_parts in verify_hidden_parts
-                    ]
-                elif not verified_with_target_graph:
+            if gate is not None:
+                target_start = torch.cuda.Event(enable_timing=True)
+                target_start.record(self.stream)
+            output_tokens = None
+            if self.graph_runner.can_use_dflash_target_verify_graph(
+                batch, verify_len
+            ) and self.graph_runner.can_return_hidden_layers(worker.target_layer_ids):
+                try:
                     with self.ctx.forward_batch(batch):
-                        verify_hidden, verify_hidden_states = self.model.model.forward(
-                            batch.input_ids,
+                        result = self.graph_runner.replay_dflash_target_verify(
+                            batch,
+                            verify_len,
                             return_hidden_layers=worker.target_layer_ids,
+                            return_linear_snapshots=pool is not None,
                         )
-                        verify_logits = worker.target_logits(verify_hidden)
-                    verify_select_start = _dflash_timing_now(self.device)
+                    verify_logits, verify_hidden = result[0], result[1]
                     output_tokens, accepted = _dflash_sample_and_select(
-                        self.sampler, args, worker,
-                        base_token, draft_to_verify, verify_logits, verify_len,
+                        self.sampler, args, worker, base_token, draft_to_verify, verify_logits, verify_len,
                     )
-                    verify_select_end = _dflash_timing_now(self.device)
-                    verify_select_ms = _dflash_elapsed_ms(verify_select_start, verify_select_end)
-                verify_forward_end = _dflash_timing_now(self.device)
-                verify_forward_ms = _dflash_elapsed_ms(verify_forward_start, verify_forward_end)
-                if gate_active:
-                    gate_target_end = torch.cuda.Event(enable_timing=True)
-                    gate_target_end.record(self.stream)
-                _debug_dflash(
-                    f"verify-select uid={req.uid} base={base_token[:1].tolist()} "
-                    f"draft={draft_to_verify.tolist()} "
-                    f"verify={(verify_tokens if verify_tokens is not None else output_tokens[1:]).tolist()} "
-                    f"accepted={accepted} output={output_tokens.tolist()}"
-                )
-
-                commit_len = output_tokens.numel() - 1
-                if commit_len > 0:
-                    worker.store_hidden_states([h[:commit_len] for h in verify_hidden_states])
-                replay_len = _dflash_verify_replay_len(
-                    commit_len,
-                    verify_len,
-                    verified_with_decode=verified_with_decode,
-                    verified_with_target_graph=verified_with_target_graph,
-                )
-                if linear_state_snapshot is not None:
-                    linear_slot, snapshot = linear_state_snapshot
-                    if (
-                        verified_with_target_graph
-                        and verify_linear_graph_snapshots is not None
-                    ):
-                        restore_graph_linear_state_for_commit(
-                            self.linear_state_pool,
-                            linear_slot,
-                            snapshot,
-                            verify_linear_graph_snapshots,
-                            commit_len,
+                    if pool is not None:
+                        # the graph verify left the slot untouched: advance it over the kept tokens
+                        commit_len = output_tokens.numel() - 1
+                        commit_graph_linear_state(
+                            self._dflash_gdn_layers, pool, self._dflash_slot_tensor(slot),
+                            self._dflash_cu_seqlens(commit_len), result[2], commit_len,
                         )
-                        linear_state_snapshot = None
-                    elif verified_with_decode:
-                        if not (verify_len > 0 and commit_len == verify_len):
-                            restore_linear_state_for_commit(
-                                self.linear_state_pool,
-                                linear_slot,
-                                snapshot,
-                                verify_linear_snapshots,
-                                commit_len,
-                            )
-                        linear_state_snapshot = None
-                    elif replay_len > 0:
-                        restore_linear_state_slot(self.linear_state_pool, linear_slot, snapshot)
-                    elif not (verify_len > 0 and commit_len == verify_len):
-                        restore_linear_state_slot(self.linear_state_pool, linear_slot, snapshot)
-                        linear_state_snapshot = None
-
-                restore_verify_state(batch, req, verify_state)
-
-                if replay_len == 0 and False:
-                    replay_len = commit_len
-                verify_target_forwards = verify_len if verified_with_decode else 1
-                verify_target_calls = verify_len if verified_with_decode else 1
-                target_forward_count = verify_target_forwards + replay_len
-                target_call_count = verify_target_calls + replay_len
-                if replay_len > 0:
-                    replay_prepare_start = _dflash_timing_now(self.device)
-                    replay_input = verify_input[:replay_len]
-                    req.append_host(replay_input.cpu())
-                    replay_prepare_end = _dflash_timing_now(self.device)
-                    replay_prepare_ms = _dflash_elapsed_ms(replay_prepare_start, replay_prepare_end)
-
-                    replay_forward_start = _dflash_timing_now(self.device)
-                    for i in range(replay_len):
-                        position_i = old_cached_len + i
-                        req.cached_len = position_i
-                        req.device_len = position_i + 1
-                        batch.phase = "decode"
-                        batch.padded_reqs = batch.reqs
-                        batch.input_ids = replay_input[i : i + 1].to(self.device)
-                        batch.positions = torch.tensor(
-                            [position_i], dtype=torch.int32, device=self.device,
-                        )
-                        batch.out_loc = self.page_table[
-                            req.table_idx, position_i : position_i + 1
-                        ]
-                        batch.fla_metadata = None
-                        self.attn_backend.prepare_metadata(batch)
-                        with self.ctx.forward_batch(batch):
-                            self.model.model.forward(
-                                batch.input_ids,
-                                return_hidden_layers=worker.target_layer_ids,
-                            )
-                    replay_forward_end = _dflash_timing_now(self.device)
-                    replay_forward_ms = _dflash_elapsed_ms(replay_forward_start, replay_forward_end)
-                    linear_state_snapshot = None
-            finally:
-                if linear_state_snapshot is not None:
-                    linear_slot, snapshot = linear_state_snapshot
-                    restore_linear_state_slot(self.linear_state_pool, linear_slot, snapshot)
-                restore_verify_state(batch, req, verify_state)
+                    verified_with_graph = True
+                except RuntimeError as exc:
+                    logger.warning_rank0(
+                        f"DFlash target-verify graph failed ({type(exc).__name__}: {exc}); "
+                        "falling back to decode-loop verify"
+                    )
+                    output_tokens = None
+            if output_tokens is None:
+                output_tokens, accepted, verify_hidden = self._dflash_verify_decode_loop(
+                    batch, req, args, base_token, draft_to_verify, verify_input, old_cached_len, slot,
+                )
+            if gate is not None:
+                target_end = torch.cuda.Event(enable_timing=True)
+                target_end.record(self.stream)
+            commit_len = output_tokens.numel() - 1
+            worker.store_hidden_states([h[:commit_len] for h in verify_hidden], old_cached_len)
+        finally:
+            restore_verify_state(batch, req, verify_state)
 
         # the anchor's KV is written now; the reply is what follows it
-        for r in batch.reqs:
-            r.complete_one()
+        req.complete_one()
         output_tokens = output_tokens[1:]
-
-        if draft_candidate_count > 0:
-            self.dflash_metrics.record(
-                draft_candidates=draft_candidate_count,
-                accepted=accepted,
-                emitted_tokens=output_tokens.numel(),
-                target_forwards=target_forward_count,
-                target_calls=target_call_count,
-                replay_forwards=replay_len,
+        self.dflash_metrics.record(
+            draft_candidates=num_verify,
+            accepted=accepted,
+            emitted_tokens=output_tokens.numel(),
+            target_forwards=1 if verified_with_graph else commit_len,
+            target_calls=1 if verified_with_graph else commit_len,
+            replay_forwards=0,
+        )
+        if self.dflash_metrics.drafts % _DFLASH_METRICS_INTERVAL == 0:
+            logger.debug_rank0(
+                "[DFLASH_METRICS] " + _dflash_metrics_log_message(self.dflash_metrics.summary())
             )
-            if _DEBUG_DFLASH_METRICS and _DFLASH_METRICS_INTERVAL > 0 and self.dflash_metrics.drafts > 0 and self.dflash_metrics.drafts % _DFLASH_METRICS_INTERVAL == 0:
-                logger.warning_rank0(
-                    "[DFLASH_METRICS] "
-                    + _dflash_metrics_log_message(self.dflash_metrics.summary())
-                )
 
         output_tokens_cpu = output_tokens.to("cpu", non_blocking=True)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)
-        if gate_active:
-            gate_cycle_end = torch.cuda.Event(enable_timing=True)
-            gate_cycle_end.record(self.stream)
+        if gate is not None:
+            cycle_end = torch.cuda.Event(enable_timing=True)
+            cycle_end.record(self.stream)
             gate.record_events(
-                cycle=(gate_cycle_start, gate_cycle_end),
-                target=(gate_target_start, gate_target_end),
+                cycle=(cycle_start, cycle_end),
+                target=(target_start, target_end),
                 out_tokens=output_tokens.numel(),
+                baseline_scale=(
+                    self.graph_runner.dflash_plain_over_verify.get(verify_len, 1.0)
+                    if verified_with_graph
+                    else 1.0
+                ),
             )
-        timing_end = _dflash_timing_now(self.device)
-        _debug_dflash_timing(_dflash_timing_log_message(
-            uid=req.uid,
-            cached_len=req.cached_len,
-            context_len=worker.context_length,
-            block_size=worker.block_size,
-            verify_len=verify_len,
-            accepted=accepted,
-            commit_len=commit_len,
-            output_tokens=output_tokens.numel(),
-            target_ms=_dflash_elapsed_ms(target_start, target_end),
-            draft_ms=_dflash_elapsed_ms(draft_start, draft_end),
-            context_kv_append_ms=getattr(worker, "last_context_kv_append_ms", 0.0),
-            draft_model_forward_ms=getattr(worker, "last_draft_model_forward_ms", 0.0),
-            verify_prepare_ms=verify_prepare_ms,
-            verify_forward_ms=verify_forward_ms,
-            verify_select_ms=verify_select_ms,
-            replay_prepare_ms=replay_prepare_ms,
-            replay_forward_ms=replay_forward_ms,
-            total_ms=_dflash_elapsed_ms(timing_start, timing_end),
-        ))
         return ForwardOutput(
             output_tokens, output_tokens_cpu, copy_done_event,
             num_tokens=output_tokens.numel(),
             force_drain=True,
         )
 
-    @torch.inference_mode()
+    def _dflash_slot_tensor(self, slot: int) -> torch.Tensor:
+        t = self._dflash_slot_buf
+        t.fill_(slot)
+        return t
+
+    def _dflash_cu_seqlens(self, n: int) -> torch.Tensor:
+        t = self._dflash_cu_seqlens_cache.get(n)
+        if t is None:
+            t = self._dflash_cu_seqlens_cache[n] = torch.tensor([0, n], dtype=torch.int32, device=self.device)
+        return t
+
+    def _dflash_verify_decode_loop(
+        self, batch, req, args, base_token, draft_to_verify, verify_input, old_cached_len, slot,
+    ) -> tuple[torch.Tensor, int, list[torch.Tensor]]:
+        """Verify token by token through the decode path (no verify graph for this length or
+        target, e.g. an offloaded MoE): stops at the first rejected draft. Returns the output
+        tokens (anchor first), the accepted count and the kept tokens' hidden states."""
+        worker = self.dflash_worker
+        pool = self.linear_state_pool
+        pre_verify = snapshot_linear_state_slot(pool, slot) if pool is not None else None
+        step_states = []
+        hidden_parts: list[list[torch.Tensor]] | None = None
+        verify_tokens_parts = []
+        sampling_verify = use_sampling_verify(args, worker)
+        num_candidates = draft_to_verify.numel()
+        uniform = (
+            torch.rand(num_candidates, dtype=torch.float32, device=self.device) if sampling_verify else None
+        )
+        output_tokens, accepted = None, 0
+        for i in range(verify_input.numel()):
+            position_i = old_cached_len + i
+            req.cached_len = position_i
+            req.device_len = position_i + 1
+            batch.phase = "decode"
+            batch.padded_reqs = batch.reqs
+            batch.input_ids = verify_input[i : i + 1].to(self.device)
+            batch.positions = torch.tensor([position_i], dtype=torch.int32, device=self.device)
+            batch.out_loc = self.page_table[req.table_idx, position_i : position_i + 1]
+            batch.fla_metadata = None
+            self.attn_backend.prepare_metadata(batch)
+            with self.ctx.forward_batch(batch):
+                if self.graph_runner.can_use_cuda_graph(batch) and self.graph_runner.can_return_hidden_layers(
+                    worker.target_layer_ids
+                ):
+                    logits_i, hidden_i = self.graph_runner.replay(
+                        batch, return_hidden_layers=worker.target_layer_ids
+                    )
+                else:
+                    logits_i, hidden_i = self.model.forward(return_hidden_layers=worker.target_layer_ids)
+            logits_i = logits_i[:1]
+            hidden_i = clone_hidden_outputs([h[:1] for h in hidden_i])
+            if pool is not None:
+                step_states.append(snapshot_linear_state_slot(pool, slot))
+            if hidden_parts is None:
+                hidden_parts = [[] for _ in hidden_i]
+            for parts, h in zip(hidden_parts, hidden_i):
+                parts.append(h)
+
+            if sampling_verify:
+                p_row = sampling_probs(logits_i, args)[0]
+                if i < num_candidates:
+                    accepted_i, bonus_i = rejection_step(
+                        p_row, worker.last_draft_probs[i], int(draft_to_verify[i].item()), float(uniform[i].item()),
+                    )
+                    if accepted_i:
+                        continue
+                    output_tokens = torch.cat([
+                        base_token[:1], draft_to_verify[:i].to(base_token.dtype), bonus_i.view(1).to(base_token.dtype),
+                    ])
+                    accepted = i
+                    break
+                token_i = torch.multinomial(p_row[None], 1)[0].to(torch.int32)
+                output_tokens = torch.cat([
+                    base_token[:1], draft_to_verify.to(base_token.dtype), token_i.to(base_token.dtype),
+                ])
+                accepted = num_candidates
+                break
+            verify_tokens_parts.append(self.sampler.sample(logits_i, args).to(torch.int32))
+            candidate, candidate_accepted, done = select_streaming_output_tokens(
+                base_token, draft_to_verify, torch.cat(verify_tokens_parts, dim=0)
+            )
+            if done:
+                output_tokens, accepted = candidate, candidate_accepted
+                break
+
+        commit_len = output_tokens.numel() - 1
+        if pool is not None and commit_len < len(step_states):
+            restore_linear_state_for_commit(pool, slot, pre_verify, step_states, commit_len)
+        return output_tokens, accepted, [torch.cat(parts, dim=0) for parts in hidden_parts]
+
     def _warmup_prefill(self) -> None:
         """Compile the Triton prefill path before the first real request.
 
@@ -2746,13 +2429,6 @@ def _adjust_config(config: EngineConfig):
 
     if config.cuda_graph_max_bs is None:
         override("cuda_graph_max_bs", config.max_running_req)
-
-    if dflash_enabled and getattr(config, "cache_type", "radix") != "naive":
-        logger.warning_rank0(
-            "DFlash currently requires prompt tokens to be forwarded into its context buffer; "
-            "forcing cache_type='naive' to disable prefix reuse."
-        )
-        override("cache_type", "naive")
 
     if is_dsv4:
         _adjust_dsv4_config(config, override)

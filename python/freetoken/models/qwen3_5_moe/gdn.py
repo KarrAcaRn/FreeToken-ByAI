@@ -194,6 +194,10 @@ class Qwen3_5GatedDeltaNet(BaseOP):
                     _dflash_conv_state_steps(pre_conv_state, conv_in)
                 )
                 mixed = _dflash_conv_mixed_steps(pre_conv_state, conv_in, self._conv_weight())
+                if fla.dflash_gdn_mixed is not None:
+                    fla.dflash_gdn_mixed[li].copy_(mixed)
+                    fla.dflash_gdn_ab[li, 0].copy_(a)
+                    fla.dflash_gdn_ab[li, 1].copy_(b)
             else:
                 mixed = self._conv_decode(conv_in, fla.cache_indices, pool)  # [B, conv_dim]
             B = mixed.shape[0]
@@ -201,18 +205,11 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             q = qf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
             k = kf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
             v = vf.reshape(1, B, self.num_v_heads, self.head_v_dim).to(dtype)
-            recurrent_indices = getattr(fla, "dflash_recurrent_state_indices", None)
             core_out = gdn_decode_fla(
                 q, k, v, a, b, A_log=self.A_log, dt_bias=self.dt_bias,
                 state_source=pool.recurrent_states[li], indices=fla.cache_indices,
                 cu_seqlens=fla.cu_seqlens, scale=self.head_k_dim ** -0.5,
-                disable_state_update=getattr(fla, "dflash_disable_state_update", False),
-                intermediate_states_buffer=getattr(fla, "dflash_recurrent_states_buffer", None),
-                intermediate_state_indices=(
-                    recurrent_indices[li : li + 1]
-                    if recurrent_indices is not None
-                    else None
-                ),
+                disable_state_update=fla.dflash_disable_state_update,
             )
         else:
             mixed = self._conv_prefill(
@@ -247,6 +244,28 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         z = z.reshape(-1, self.head_v_dim)
         out = self.norm.forward(core_out, z).reshape(total, -1)
         return self.out_proj.forward(out)
+
+
+    def dflash_commit(
+        self,
+        pool,
+        slot: torch.Tensor,        # [1] int32: the request's live slot
+        cu_seqlens: torch.Tensor,  # [2] int32: [0, n]
+        mixed: torch.Tensor,       # [n, conv_dim]: the verify's post-conv q/k/v of the kept tokens
+        ab: torch.Tensor,          # [2, n, num_v_heads]: their raw a/b gates
+    ) -> None:
+        """Advance the live recurrent state over the first n tokens of a DFlash verify, from
+        the inputs the verify stored (it left the slot untouched)."""
+        n = mixed.shape[0]
+        qf, kf, vf = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        gdn_decode_fla(
+            qf.reshape(1, n, self.num_k_heads, self.head_k_dim),
+            kf.reshape(1, n, self.num_k_heads, self.head_k_dim),
+            vf.reshape(1, n, self.num_v_heads, self.head_v_dim),
+            ab[0], ab[1], A_log=self.A_log, dt_bias=self.dt_bias,
+            state_source=pool.recurrent_states[pool.local_index(self.layer_id)], indices=slot,
+            cu_seqlens=cu_seqlens, scale=self.head_k_dim ** -0.5,
+        )
 
 
 __all__ = ["Qwen3_5GatedDeltaNet"]

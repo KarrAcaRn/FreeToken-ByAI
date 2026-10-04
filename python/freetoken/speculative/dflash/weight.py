@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Iterator
 import torch
 from freetoken.models.loader import iter_weight_files
-from freetoken.utils import nvtx_annotate
 
 
 def iter_dflash_weights(

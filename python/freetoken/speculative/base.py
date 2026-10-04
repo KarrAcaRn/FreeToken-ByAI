@@ -39,7 +39,6 @@ class BaseSpecWorker(ABC):
     @abstractmethod
     def draft(
         self,
-        hidden_states: list[torch.Tensor],
         base_token_id: torch.Tensor,
         position: int,
         *,
@@ -48,12 +47,12 @@ class BaseSpecWorker(ABC):
         """Generate ``block_size`` draft tokens in parallel."""
 
     @abstractmethod
-    def store_hidden_states(self, hidden_states: list[torch.Tensor]) -> None:
+    def store_hidden_states(self, hidden_states: list[torch.Tensor], start_position: int) -> None:
         """Store target hidden states as draft context."""
 
     @abstractmethod
-    def reset_context(self) -> None:
-        """Clear context when a request finishes."""
+    def finish_request(self, token_ids: torch.Tensor) -> None:
+        """A request finished; its context may carry over to the next one."""
 
     @abstractmethod
     def target_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:

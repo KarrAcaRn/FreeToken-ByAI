@@ -56,9 +56,10 @@ class GraphCaptureBuffer:
     # Decode GDN query indptr = arange(bs+1); a constant per captured bs, filled once.
     fla_cu_seqlens: torch.Tensor
     fla_has_initial_state: torch.Tensor | None = None
+    # DFlash verify on a GDN target: per-token conv states and recurrence inputs (FLAMetadata)
     dflash_conv_states: torch.Tensor | None = None
-    dflash_recurrent_states: torch.Tensor | None = None
-    dflash_recurrent_state_indices: torch.Tensor | None = None
+    dflash_gdn_mixed: torch.Tensor | None = None
+    dflash_gdn_ab: torch.Tensor | None = None
 
     @classmethod
     def init(
@@ -105,7 +106,7 @@ class GraphCaptureBuffer:
         hidden_dtype: torch.dtype | None = None,
         num_hidden_layers: int = 0,
         linear_state_pool=None,
-        shared_snapshots: tuple[torch.Tensor, torch.Tensor] | None = None,
+        shared_storage: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> GraphCaptureBuffer:
         buffer = cls.init(
             verify_len,
@@ -118,26 +119,22 @@ class GraphCaptureBuffer:
         buffer.table_idx = torch.zeros(1, dtype=torch.int32, device=device)
         buffer.fla_cu_seqlens = torch.tensor([0, verify_len], dtype=torch.int32, device=device)
         buffer.fla_has_initial_state = torch.ones(1, dtype=torch.bool, device=device)
-        if shared_snapshots is not None:
-            # contiguous views of one flat storage, in the [len, layers, ...] / [layers, len, ...]
-            # layouts the verify kernels write (_ensure_dflash_target_verify_linear_buffers)
-            conv_shape = (verify_len, *linear_state_pool.conv_states[:, 0].shape)
-            rec = linear_state_pool.recurrent_states
-            rec_shape = (rec.shape[0], verify_len, *rec.shape[2:])
-            buffer.dflash_conv_states = shared_snapshots[0][: math.prod(conv_shape)].view(conv_shape)
-            buffer.dflash_recurrent_states = shared_snapshots[1][: math.prod(rec_shape)].view(rec_shape)
-        elif linear_state_pool is not None:
-            snapshot_len = max(verify_len - 1, 0)
-            buffer.dflash_conv_states = torch.empty(
-                (snapshot_len, *linear_state_pool.conv_states[:, 0].shape),
-                dtype=linear_state_pool.conv_states.dtype,
-                device=device,
-            )
-            buffer.dflash_recurrent_states = torch.empty(
-                (snapshot_len, *linear_state_pool.recurrent_states[:, 0].shape),
-                dtype=linear_state_pool.recurrent_states.dtype,
-                device=device,
-            )
+        if linear_state_pool is not None:
+            # contiguous views of storage shared by every verify len (the graphs never run at
+            # once), laid out [len, layers, ...] / [layers, len, ...] / [layers, 2, len, ...]
+            if shared_storage is None:
+                shared_storage = _alloc_dflash_verify_storage(
+                    linear_state_pool, verify_len, hidden_dtype or torch.bfloat16, device)
+            conv, rec = linear_state_pool.conv_states, linear_state_pool.recurrent_states
+            layers, conv_dim, num_v = conv.shape[0], conv.shape[2], rec.shape[2]
+            conv_shape = (verify_len, layers, conv_dim, conv.shape[3])
+            mixed_shape = (layers, verify_len, conv_dim)
+            ab_shape = (layers, 2, verify_len, num_v)
+            conv_store, input_store = shared_storage
+            buffer.dflash_conv_states = conv_store[: math.prod(conv_shape)].view(conv_shape)
+            n_mixed = math.prod(mixed_shape)
+            buffer.dflash_gdn_mixed = input_store[:n_mixed].view(mixed_shape)
+            buffer.dflash_gdn_ab = input_store[n_mixed : n_mixed + math.prod(ab_shape)].view(ab_shape)
         return buffer
 
     def set_batch(self, batch: Batch) -> None:
@@ -189,57 +186,18 @@ class GraphCaptureBuffer:
         batch.out_loc = self.out_loc[:verify_len]
         batch.positions = self.positions[:verify_len]
         batch.linear_table_idx = self.table_idx[:1]
-        dflash_conv_states = None
-        dflash_recurrent_states = None
-        dflash_recurrent_state_indices = None
-        if return_linear_snapshots:
-            self._ensure_dflash_target_verify_linear_buffers(verify_len)
-            dflash_conv_states = self.dflash_conv_states
-            dflash_recurrent_states = self.dflash_recurrent_states
-            dflash_recurrent_state_indices = self.dflash_recurrent_state_indices
+        linear = return_linear_snapshots
+        if linear and self.dflash_conv_states is None:
+            raise RuntimeError("DFlash target verify graph requires linear snapshot buffers")
         batch.fla_metadata = FLAMetadata(
             cu_seqlens=self.fla_cu_seqlens[:2],
             cache_indices=self.table_idx[:1],
             has_initial_state=self.fla_has_initial_state,
-            dflash_disable_state_update=return_linear_snapshots,
-            dflash_conv_states_buffer=dflash_conv_states,
-            dflash_recurrent_states_buffer=dflash_recurrent_states,
-            dflash_recurrent_state_indices=dflash_recurrent_state_indices,
+            dflash_disable_state_update=linear,
+            dflash_conv_states_buffer=self.dflash_conv_states if linear else None,
+            dflash_gdn_mixed=self.dflash_gdn_mixed if linear else None,
+            dflash_gdn_ab=self.dflash_gdn_ab if linear else None,
         )
-
-    def _ensure_dflash_target_verify_linear_buffers(self, verify_len: int) -> None:
-        if self.dflash_conv_states is None or self.dflash_recurrent_states is None:
-            raise RuntimeError("DFlash target verify graph requires linear snapshot buffers")
-        if self.dflash_conv_states.shape[0] != verify_len:
-            self.dflash_conv_states = torch.empty(
-                (verify_len, *self.dflash_conv_states.shape[1:]),
-                dtype=self.dflash_conv_states.dtype,
-                device=self.dflash_conv_states.device,
-            )
-        num_layers = self.dflash_conv_states.shape[1]
-        if (
-            self.dflash_recurrent_states.shape[0] != num_layers
-            or self.dflash_recurrent_states.shape[1] != verify_len
-        ):
-            self.dflash_recurrent_states = torch.empty(
-                (
-                    num_layers,
-                    verify_len,
-                    *self.dflash_recurrent_states.shape[2:],
-                ),
-                dtype=self.dflash_recurrent_states.dtype,
-                device=self.dflash_recurrent_states.device,
-            )
-        if (
-            self.dflash_recurrent_state_indices is None
-            or self.dflash_recurrent_state_indices.numel() != self.dflash_recurrent_states.shape[0]
-        ):
-            self.dflash_recurrent_state_indices = torch.arange(
-                self.dflash_recurrent_states.shape[0],
-                dtype=torch.int32,
-                device=self.dflash_recurrent_states.device,
-            )
-
 
 
 def _determine_cuda_graph_bs(
@@ -272,21 +230,35 @@ def _dflash_target_verify_lens_within_budget(
     lens: List[int],
     linear_state_pool,
     budget_bytes: int,
+    hidden_dtype: torch.dtype = torch.bfloat16,
 ) -> List[int]:
-    """Keep the verify lens whose GDN snapshot buffer fits in ``budget_bytes``. All target-verify
-    graphs share one buffer of per-token conv/recurrent states sized for the longest kept len
-    (the graphs never run at once). A dropped len falls back to decode-loop verify at runtime,
-    so this is a pure performance/robustness gate."""
+    """Keep the verify lens whose GDN commit buffers fit in ``budget_bytes``. All target-verify
+    graphs share one buffer sized for the longest kept len (the graphs never run at once). A
+    dropped len falls back to decode-loop verify at runtime, so this is a pure
+    performance/robustness gate."""
     if linear_state_pool is None:
         return list(lens)
-    per_token_bytes = _linear_state_bytes_per_token(linear_state_pool)
+    per_token_bytes = dflash_verify_bytes_per_token(linear_state_pool, hidden_dtype)
     return [n for n in sorted(lens) if n * per_token_bytes <= budget_bytes]
 
 
-def _linear_state_bytes_per_token(linear_state_pool) -> int:
+def dflash_verify_bytes_per_token(linear_state_pool, hidden_dtype: torch.dtype) -> int:
+    """Bytes a verified token keeps for the GDN commit: per linear layer, the conv state after
+    it, its post-conv q/k/v and its a/b gates (the commit replays the recurrence from them)."""
     conv = linear_state_pool.conv_states        # [layers, slots, conv_dim, K-1]
     rec = linear_state_pool.recurrent_states    # [layers, slots, heads, K, V]
-    return (conv[:, 0].numel() * conv.element_size()) + (rec[:, 0].numel() * rec.element_size())
+    layers, conv_dim, num_v = conv.shape[0], conv.shape[2], rec.shape[2]
+    elem = torch.empty((), dtype=hidden_dtype).element_size()
+    return conv[:, 0].numel() * conv.element_size() + layers * (conv_dim + 2 * num_v) * elem
+
+
+def _alloc_dflash_verify_storage(linear_state_pool, verify_len: int, hidden_dtype, device):
+    conv, rec = linear_state_pool.conv_states, linear_state_pool.recurrent_states
+    layers, conv_dim, num_v = conv.shape[0], conv.shape[2], rec.shape[2]
+    return (
+        torch.empty(verify_len * conv[:, 0].numel(), dtype=conv.dtype, device=device),
+        torch.empty(verify_len * layers * (conv_dim + 2 * num_v), dtype=hidden_dtype, device=device),
+    )
 
 
 class GraphRunner:
@@ -326,6 +298,9 @@ class GraphRunner:
         self.hidden_size = hidden_size
         self.hidden_dtype = hidden_dtype
         self.dflash_target_verify_lens = sorted(set(dflash_target_verify_lens or []))
+        # verify len -> plain decode time / verify time, for the adaptive gate's baseline
+        self.dflash_plain_over_verify: Dict[int, float] = {}
+        self._plain_decode_ms: float | None = None
         self._capture_graphs(max_seq_len, vocab_size, model)
 
     def _reset_moe_offload_cache(self) -> None:
@@ -403,6 +378,9 @@ class GraphRunner:
         self._reset_moe_offload_cache()
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
+        if self.dflash_target_verify_lens and 1 in self.graph_map:
+            # timed now, while the decode buffers still hold the bs=1 capture inputs
+            self._plain_decode_ms = self._time_replay(self.graph_map[1])
         self._capture_dflash_target_verify_graphs(max_seq_len, vocab_size, model, pool)
 
     def _capture_dflash_target_verify_graphs(
@@ -415,12 +393,12 @@ class GraphRunner:
         if not self.dflash_target_verify_lens:
             return
         linear_state_pool = get_global_ctx().linear_state_pool
-        shared_snapshots = None
+        shared_storage = None
         if linear_state_pool is not None:
             # the engine released the draft worker's reservation for this buffer just before
             budget = int(get_free_memory(self.device) * 0.9)
             kept = _dflash_target_verify_lens_within_budget(
-                self.dflash_target_verify_lens, linear_state_pool, budget
+                self.dflash_target_verify_lens, linear_state_pool, budget, self.hidden_dtype
             )
             if len(kept) < len(self.dflash_target_verify_lens):
                 logger.warning_rank0(
@@ -431,12 +409,8 @@ class GraphRunner:
             self.dflash_target_verify_lens = kept
             if not kept:
                 return
-            n = max(kept)
-            conv, rec = linear_state_pool.conv_states, linear_state_pool.recurrent_states
-            shared_snapshots = (
-                torch.empty(n * conv[:, 0].numel(), dtype=conv.dtype, device=self.device),
-                torch.empty(n * rec[:, 0].numel(), dtype=rec.dtype, device=self.device),
-            )
+            shared_storage = _alloc_dflash_verify_storage(
+                linear_state_pool, max(kept), self.hidden_dtype, self.device)
         init_verify = getattr(self.attn_backend, "init_dflash_target_verify_capture_graph", None)
         prepare_capture = getattr(self.attn_backend, "prepare_for_dflash_target_verify_capture", None)
         if init_verify is None or prepare_capture is None:
@@ -454,7 +428,7 @@ class GraphRunner:
                 hidden_dtype=self.hidden_dtype,
                 num_hidden_layers=len(self.hidden_layer_ids),
                 linear_state_pool=linear_state_pool,
-                shared_snapshots=shared_snapshots,
+                shared_storage=shared_storage,
             )
             buffer.fla_cu_seqlens = torch.tensor(
                 [0, verify_len], dtype=torch.int64, device=self.device
@@ -481,10 +455,34 @@ class GraphRunner:
                 self._reset_moe_offload_cache()
             self.dflash_target_verify_graph_map[verify_len] = graph
             self.dflash_target_verify_buffers[verify_len] = buffer
+            if self._plain_decode_ms is not None:
+                verify_ms = self._time_replay(graph)
+                if verify_ms > 0:
+                    self.dflash_plain_over_verify[verify_len] = self._plain_decode_ms / verify_ms
 
         logger.info_rank0(
             f"DFlash target verify graphs captured for lens {self.dflash_target_verify_lens}"
         )
+        if self.dflash_plain_over_verify:
+            ratios = ", ".join(f"{n}: {r:.2f}" for n, r in self.dflash_plain_over_verify.items())
+            logger.info_rank0(
+                f"DFlash plain decode {self._plain_decode_ms:.2f} ms; plain/verify ratio by len {{{ratios}}}"
+            )
+
+    def _time_replay(self, graph: torch.cuda.CUDAGraph, iters: int = 10) -> float:
+        """Median ms of a captured graph replayed on its own (dummy) capture inputs."""
+        graph.replay()  # warm
+        times = []
+        for _ in range(iters):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record(self.stream)
+            graph.replay()
+            end.record(self.stream)
+            end.synchronize()
+            times.append(start.elapsed_time(end))
+        self._reset_moe_offload_cache()
+        return sorted(times)[len(times) // 2]
     def _run_model_into_buffer(
         self,
         model: BaseLLMModel,
@@ -551,7 +549,6 @@ class GraphRunner:
         buffer = self.dflash_target_verify_buffers[verify_len]
         assert not wants_hidden or buffer.hidden_states is not None
         assert not return_linear_snapshots or buffer.dflash_conv_states is not None
-        assert not return_linear_snapshots or buffer.dflash_recurrent_states is not None
         original_phase = batch.phase
         batch.phase = "decode"
         try:
@@ -569,12 +566,11 @@ class GraphRunner:
         logits = buffer.logits[:verify_len]
         linear_snapshots = None
         if return_linear_snapshots:
-            assert buffer.dflash_conv_states is not None
-            assert buffer.dflash_recurrent_states is not None
+            # per-token conv states and the recurrence inputs, for the commit
             linear_snapshots = (
                 buffer.dflash_conv_states[:verify_len],
-                # a view: the commit copies out the one accepted state, never all of them
-                buffer.dflash_recurrent_states[:, :verify_len].transpose(0, 1),
+                buffer.dflash_gdn_mixed[:, :verify_len],
+                buffer.dflash_gdn_ab[:, :, :verify_len],
             )
         if wants_hidden:
             assert buffer.hidden_states is not None

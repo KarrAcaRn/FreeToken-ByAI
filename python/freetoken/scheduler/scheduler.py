@@ -542,13 +542,8 @@ class Scheduler(SchedulerIOMixin):
     def _drain_multi_token(self, req, next_tokens_cpu, i, num_tokens, reply, new_finished_reqs, batch):
         tokens = next_tokens_cpu[i * num_tokens:(i + 1) * num_tokens]
         emit_count = _multi_token_emit_count(req.input_ids.numel(), req.max_device_len, tokens.numel())
-        if emit_count == 0:
-            if req not in self.finished_reqs:
-                self.decode_manager.remove_req(req)
-                self._free_req_resources(req)
-                new_finished_reqs.add(req)
-            return
         appended = 0
+        finished = emit_count == 0
         for t in tokens[:emit_count]:
             t_scalar = int(t.item())
             req.append_host(t.unsqueeze(0))
@@ -559,14 +554,19 @@ class Scheduler(SchedulerIOMixin):
             finished = hit_length or hit_eos or matched_stop is not None
             finish_reason = ("stop" if (hit_eos or matched_stop is not None) else "length") if finished else None
             reply.append(DetokenizeMsg(uid=req.uid, next_token=t_scalar, finished=finished, finish_reason=finish_reason, matched_stop=matched_stop, stop_strs=req.sampling_params.stop_strs or None))
-            if finished and req not in self.finished_reqs:
-                self.decode_manager.remove_req(req)
-                self._free_req_resources(req)
-                new_finished_reqs.add(req)
+            if finished:
                 break
-        if req not in new_finished_reqs and appended > 1:
+        # The step wrote the KV of the anchor and the accepted drafts, i.e. of every emitted
+        # token but the last: advance past the ones the request keeps
+        if appended > 1:
             req.device_len += appended - 1
             req.cached_len += appended - 1
+        if finished and req not in self.finished_reqs:
+            # stopped inside the block: the GDN state already ran past the kept tokens
+            req.linear_state_ahead = appended < tokens.numel()
+            self.decode_manager.remove_req(req)
+            self._free_req_resources(req)
+            new_finished_reqs.add(req)
 
     def _kv_usage_pages(self) -> Tuple[int, int]:
         """(used_pages, total_pages) of the KV page pool.
@@ -770,9 +770,9 @@ class Scheduler(SchedulerIOMixin):
         # Polymorphic free: the DSV4 manager returns the request's window pages + cmp/idx blocks
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).
-        # DFlash: clear context buffer when the request finishes
+        # DFlash: the next request may continue this one's draft context (multi-turn chat)
         if self.engine.dflash_worker is not None:
-            self.engine.dflash_worker.reset_context()
+            self.engine.dflash_worker.finish_request(req.input_ids)
         self.cache_manager.cache_req(req, finished=True)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1
