@@ -2225,5 +2225,242 @@
     "authors": [
       "Oliver Heard <ogwh1990@gmail.com>"
     ]
+  },
+  "30": {
+    "number": 30,
+    "title": "fix(deepseek_v4): resolve HF repo ids to local cache when serving",
+    "head_sha": "3e030966e7d5",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "DSV4's loader checked config/index files with raw os.path.join(model_path, ...), which fails when --model is a bare HF repo id; resolves it to the cache snapshot. Not judged on its merits yet: DeepSeek-V4 cannot run here. Revisit after the queue with the other DSV4 PRs (#105, #116).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "James Palmer <james.pa@outlook.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "24": {
+    "number": 24,
+    "title": "fix(cuda): support Turing GPUs",
+    "head_sha": "35668da6db1e",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Gates flashinfer/sgl_kernel/triton_kernels on sm_80+ (their wheels have no Turing kernels), uses a smaller Triton attention tile when opt-in shared memory is <= 64 KiB, and adds 7.5 to the kernel-cache arch list. Neutral on sm_80+ (checked: the backend probes are cached, the tile change only applies below 64 KiB). But it conflicts in 4 files with next's ROCm restructuring (#132, device_capability()), and its arch list replaces 8.0 with 7.5 - an A100 would lose its prebuilt kernels. Needs a reimplementation on next (use device_capability(), keep 8.0, add 7.5), and Turing itself cannot be tested here. Revisit after the queue.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Lukas Rakauskas <rakauskaslukas123@gmail.com>"
+    ],
+    "revisit": "after-queue"
+  },
+  "23": {
+    "number": 23,
+    "title": "feat: add simple ROCm GPU support for RDNA3 (gfx1100-1103)",
+    "head_sha": "27c0977b6f2f",
+    "reviewed_at": "2026-10-04",
+    "decision": "superseded",
+    "reason": "Basic ROCm/RDNA3 support (hip_compat.h shim, ROCm detection in arch.py, ROCm build/JIT flags). Superseded by #132 (0d652e7, RDNA3 and RDNA4 runtime foundation) on next, which already has is_rocm, get_rocm_gfx_arch, _hip_cflags and csrc/include/freetoken/hip_compat.h.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "bouclem <bouclement2012@gmail.com>"
+    ],
+    "superseded_by": "0d652e7 (#132)"
+  },
+  "586": {
+    "number": 586,
+    "title": "refactor(hf): merge an override into the section's own dict, with no fallback [draft]",
+    "head_sha": "c242b1fa49f2",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft: drops the `or {}` fallback when merging an --hf-overrides section (our #573 code), which changes behaviour for sections transformers computes as properties. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "583": {
+    "number": 583,
+    "title": "docs(gpu): name the NVML free-memory read in gpu_select, and the platform the test fakes [draft]",
+    "head_sha": "4f502c8a2ab6",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft (Windows): sizes memory pools against the VRAM other processes leave free on Windows. Windows cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "582": {
+    "number": 582,
+    "title": "test(quant): skip declined local checkpoints and label cache paths portably [draft]",
+    "head_sha": "64827fd4daea",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft: test-only tweak in tests/models/test_quant_config.py (skip declined local checkpoints, portable cache-path labels). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "581": {
+    "number": 581,
+    "title": "test(checkpoint): read an FTW checkpoint through the mmap path [draft]",
+    "head_sha": "c1863238935c",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft (Windows): read checkpoints without O_DIRECT/posix_fadvise/PROT_READ. Windows cannot be tested here; overlaps the Windows part of #298. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "580": {
+    "number": 580,
+    "title": "fix(windows): stop on backend death through the server's own SIGTERM handler [draft]",
+    "head_sha": "0e50062f9ccc",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft (Windows): loopback ZMQ and a selector event loop for serving on Windows. Windows cannot be tested here; overlaps the Windows part of #298. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ]
+  },
+  "491": {
+    "number": 491,
+    "title": "refactor(moe): extract hybrid decode orchestration [draft]",
+    "head_sha": "00e4bb17863d",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft: 2.3k-line refactor extracting the hybrid MoE decode orchestration (34 files). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ]
+  },
+  "400": {
+    "number": 400,
+    "title": "plan(rocm): unified gfx1100 MoE optimization plan [draft]",
+    "head_sha": "76291d2bf1f3",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft ROCm follow-up to #132 ('Help/pr 132'). ROCm cannot be tested here; belongs with the ROCm group (#137, #217, #241, #260). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "assistant.pi <assistant.pi@fireworks.ai>"
+    ]
+  },
+  "378": {
+    "number": 378,
+    "title": "fix(rocm): make CPU MoE graph replay safe [draft]",
+    "head_sha": "b395144d9bdb",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft (ROCm): graph-replay safety for the CPU/hybrid MoE backends on ROCm. ROCm cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ]
+  },
+  "293": {
+    "number": 293,
+    "title": "fix(qwen4_exp): fix NVFP4 FTW weight loading, QSA indexer, and PLE tables [draft]",
+    "head_sha": "5fc94dd6add1",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft: qwen4_exp (Flash-Next) NVFP4 FTW loading, QSA indexer and PLE tables. Flash-Next cannot run here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Clayton Rush Williams <Clayton.R.Williams@protonmail.com>"
+    ]
+  },
+  "199": {
+    "number": 199,
+    "title": "fix(moe): report non-hybrid fetch telemetry accurately [draft]",
+    "head_sha": "a9f8824ed6a7",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft: 3.7k-line MoE work (non-hybrid fetch telemetry, heterogeneous GGUF cache row pooling). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "pedro-moser <pedro.niederauer.moser@gmail.com>"
+    ]
+  },
+  "197": {
+    "number": 197,
+    "title": "fix(server): preserve Poolside typed argument coercion [draft]",
+    "head_sha": "5f7ad9d3caf1",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft: Poolside V1 tool/reasoning parsers (for Laguna, #298). Model cannot run here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "pedro-moser <pedro.niederauer.moser@gmail.com>"
+    ]
+  },
+  "189": {
+    "number": 189,
+    "title": "fix(installer): strip AppImage library paths from children [draft]",
+    "head_sha": "28005c80f221",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft: strips AppImage library paths from child processes in the desktop installer. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "Yuu <206304251+nekomario28@users.noreply.github.com>"
+    ]
+  },
+  "135": {
+    "number": 135,
+    "title": "test(distributed): preserve the single-rank communication path [draft]",
+    "head_sha": "3675d03e1711",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft (ROCm): route TP communication through RCCL. ROCm/multi-GPU cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ]
+  },
+  "134": {
+    "number": 134,
+    "title": "fix(rocm): explicitly gate NVFP4 CUDA backends [draft]",
+    "head_sha": "c4f4a36e945a",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft (ROCm): gate CUDA-only optional backends on ROCm. ROCm cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ]
+  },
+  "133": {
+    "number": 133,
+    "title": "test(rocm): cover split and masked JIT paths [draft]",
+    "head_sha": "9ec8271ab0b8",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "reason": "Draft (ROCm): make the TVM-FFI index/store JIT kernels portable to HIP. ROCm cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ]
   }
 }
