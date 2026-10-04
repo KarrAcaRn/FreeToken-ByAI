@@ -156,12 +156,17 @@ class FlashAttentionBackend(BaseAttnBackend):
         super().reset_capture()
         self.dflash_target_verify_capture = {}
 
+    # one request per verify graph here (the triton backend captures batched verifies)
+    dflash_verify_max_bs = 1
+
     def init_dflash_target_verify_capture_graph(
         self,
         max_seq_len: int,
-        verify_lens: List[int],
+        shapes: List[tuple[int, int]],
     ) -> None:
         assert not self.dflash_target_verify_capture, "DFlash target verify capture already initialized."
+        assert all(bs == 1 for bs, _ in shapes), shapes
+        verify_lens = [n for _, n in shapes]
         self.dflash_target_verify_capture = {
             verify_len: FACaptureData.create(
                 1,

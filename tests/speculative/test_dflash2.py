@@ -100,3 +100,67 @@ def test_fp8_row_linear_tracks_bf16():
     out = lin.forward(x).float()
     assert lin.weight.dtype == torch.float8_e4m3fn and lin.weight_scale.shape == (256,)
     assert (out - ref).abs().max() / ref.abs().max() < 0.05
+
+
+def _random_draft(device):
+    from freetoken.speculative.dflash.model import DFlashDraftModel
+
+    cfg = DFlashConfig.from_hf_config({
+        **DFLASH2_CFG, "num_hidden_layers": 2, "num_attention_heads": 2, "num_key_value_heads": 1,
+        "head_dim": 64, "intermediate_size": 96, "layer_types": ["sliding_attention", "full_attention"],
+        "sliding_window": 6, "is_causal": False,
+    })
+    model = DFlashDraftModel(cfg)
+    torch.manual_seed(0)
+
+    def fill(obj, seen):
+        for name, value in list(vars(obj).items()):
+            if isinstance(value, torch.Tensor) and value.is_floating_point():
+                setattr(obj, name, (torch.randn_like(value, dtype=torch.float32) * 0.1).to(value.dtype))
+            elif hasattr(value, "__dict__") and id(value) not in seen:
+                seen.add(id(value))
+                fill(value, seen)
+            elif isinstance(value, list):
+                for item in value:
+                    if hasattr(item, "__dict__") and id(item) not in seen:
+                        seen.add(id(item))
+                        fill(item, seen)
+
+    fill(model, set())
+    return model.to(device), cfg
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_batched_blocks_match_single_blocks():
+    dev = torch.device("cuda")
+    model, cfg = _random_draft(dev)
+    bs, kvh, hd = cfg.block_size, cfg.num_key_value_heads, cfg.head_dim
+    torch.manual_seed(1)
+    ctx_lens = [9, 4]  # different context lengths; the sliding layer sees at most 6
+    contexts = [
+        [(torch.randn(n, kvh, hd, device=dev, dtype=torch.bfloat16),
+          torch.randn(n, kvh, hd, device=dev, dtype=torch.bfloat16)) for _ in range(2)]
+        for n in ctx_lens
+    ]
+    embeds = torch.randn(2 * bs, cfg.hidden_size, device=dev, dtype=torch.bfloat16)
+    positions = torch.cat([torch.arange(n, n + bs) for n in ctx_lens]).to(dev, torch.int32)
+    batched = model.forward(embeds, positions, contexts)
+    for b in range(2):
+        rows = slice(b * bs, (b + 1) * bs)
+        single = model.forward(embeds[rows], positions[rows], [contexts[b]])
+        torch.testing.assert_close(batched[rows], single, atol=2e-2, rtol=2e-2)
+
+
+def test_batched_selector_matches_single_blocks():
+    torch.manual_seed(0)
+    sel = _CandidateSelector(DFlashConfig.from_hf_config(DFLASH2_CFG))
+    sel.predecessor_codebook = torch.randn(50, 8)
+    sel.successor_codebook = torch.randn(50, 8)
+    sel.hidden_projection.weight = torch.randn(8, 64)
+    hidden, logits = torch.randn(3, 4, 64), torch.randn(3, 4, 50)
+    anchors = torch.tensor([3, 7, 11])
+    paths, probs = sel.select(hidden, logits, anchors, None)
+    assert probs is None and paths.shape == (3, 4)
+    for b in range(3):
+        single, _ = sel.select(hidden[b], logits[b], anchors[b : b + 1], None)
+        assert torch.equal(paths[b], single)

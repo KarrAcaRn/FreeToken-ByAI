@@ -10,18 +10,20 @@ from freetoken.layers.quantization import QuantConfig
 from .gdn_kernels import gdn_decode_fla, gdn_prefill_chunk_fla
 
 
-def _dflash_conv_state_steps(pre_state: torch.Tensor, conv_in: torch.Tensor) -> torch.Tensor:
-    """Rolling conv state after each token in a short DFlash verify block.
+def _dflash_conv_history(pre_state: torch.Tensor, conv_in: torch.Tensor) -> torch.Tensor:
+    """``pre_state`` [B, conv_dim, kernel - 1] and ``conv_in`` [B * T, conv_dim] (B verify
+    blocks of T tokens) -> each block's conv input stream [B, conv_dim, kernel - 1 + T]."""
+    blocks = conv_in.view(pre_state.shape[0], -1, conv_in.shape[-1]).transpose(1, 2)
+    return torch.cat([pre_state, blocks.to(pre_state.dtype)], dim=-1)
 
-    ``pre_state`` is ``[conv_dim, kernel - 1]`` and ``conv_in`` is
-    ``[verify_len, conv_dim]``. The result is ``[verify_len, conv_dim, kernel - 1]``.
-    """
-    history = torch.cat([pre_state, conv_in.transpose(0, 1).to(pre_state.dtype)], dim=-1)
-    width = pre_state.shape[-1]
-    return torch.stack(
-        [history[:, i + 1 : i + 1 + width] for i in range(conv_in.shape[0])],
-        dim=0,
-    )
+
+def _dflash_conv_state_steps(pre_state: torch.Tensor, conv_in: torch.Tensor) -> torch.Tensor:
+    """Rolling conv state after each token of B short DFlash verify blocks: ``[B * T, conv_dim,
+    kernel - 1]`` from ``pre_state`` [B, conv_dim, kernel - 1] and ``conv_in`` [B * T, conv_dim]."""
+    history = _dflash_conv_history(pre_state, conv_in)
+    width, length = pre_state.shape[-1], history.shape[-1] - pre_state.shape[-1]
+    steps = torch.stack([history[..., i + 1 : i + 1 + width] for i in range(length)], dim=1)
+    return steps.reshape(-1, *steps.shape[2:])
 
 
 def _dflash_conv_mixed_steps(
@@ -29,15 +31,13 @@ def _dflash_conv_mixed_steps(
     conv_in: torch.Tensor,
     weight: torch.Tensor,
 ) -> torch.Tensor:
-    """Depthwise causal-conv outputs for a DFlash verify block without state mutation."""
-    history = torch.cat([pre_state, conv_in.transpose(0, 1).to(pre_state.dtype)], dim=-1)
-    kernel = weight.shape[-1]
-    windows = torch.stack(
-        [history[:, i : i + kernel] for i in range(conv_in.shape[0])],
-        dim=0,
-    )
-    mixed = (windows * weight.to(windows.dtype).unsqueeze(0)).sum(dim=-1)
-    return F.silu(mixed).to(conv_in.dtype)
+    """Depthwise causal-conv outputs [B * T, conv_dim] of B DFlash verify blocks, without
+    state mutation."""
+    history = _dflash_conv_history(pre_state, conv_in)
+    kernel, length = weight.shape[-1], history.shape[-1] - pre_state.shape[-1]
+    windows = torch.stack([history[..., i : i + kernel] for i in range(length)], dim=1)
+    mixed = (windows * weight.to(windows.dtype)).sum(dim=-1)  # [B, T, conv_dim]
+    return F.silu(mixed).reshape(-1, mixed.shape[-1]).to(conv_in.dtype)
 
 
 class _DepthwiseConv1d(BaseOP):
@@ -188,8 +188,7 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             # per-request state read/write-by-index, all in one kernel (no gather/scatter,
             # no clone, no external l2norm). q/k stay at num_k_heads (kernel handles GQA).
             if dflash_conv_buffer is not None:
-                slot = fla.cache_indices[:1].to(torch.long)
-                pre_conv_state = pool.conv_states[li].index_select(0, slot)[0]
+                pre_conv_state = pool.conv_states[li].index_select(0, fla.cache_indices.to(torch.long))
                 dflash_conv_buffer[:, li].copy_(
                     _dflash_conv_state_steps(pre_conv_state, conv_in)
                 )

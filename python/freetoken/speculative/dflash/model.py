@@ -147,9 +147,11 @@ class _DFlashAttention(BaseOP):
         )
         return context_k_flat.view(-1, self.num_kv_heads, self.head_dim), context_v
 
-    def forward(self, hidden_states, positions, context_kv, attn_mask=None):
+    def forward(self, hidden_states, positions, context_kvs, attn_masks):
+        """``hidden_states`` holds B blocks of equal length; block ``b`` attends to its own
+        context ``context_kvs[b]`` (with ``attn_masks[b]``) and causally/bidirectionally to
+        its own rows."""
         q = self.q_proj.forward(hidden_states)
-        context_k, context_v = context_kv
         block_k = self.k_proj.forward(hidden_states)
         block_v = self.v_proj.forward(hidden_states)
 
@@ -175,30 +177,21 @@ class _DFlashAttention(BaseOP):
         block_k = block_k_flat.view(-1, self.num_kv_heads, self.head_dim)
 
         group_size = self.num_qo_heads // self.num_kv_heads
-        k_expanded = torch.cat([context_k, block_k], dim=0).repeat_interleave(group_size, dim=1)
-        v_expanded = torch.cat([context_v, block_v], dim=0).repeat_interleave(group_size, dim=1)
-
-        # SDPA expects [batch, num_heads, seq, head_dim]
-        q_t = q.transpose(0, 1).unsqueeze(0)  # [1, num_qo, block_size, head_dim]
-        k_t = k_expanded.transpose(0, 1).unsqueeze(0)  # [1, num_qo, ctx_len + block_size, head_dim]
-        v_t = v_expanded.transpose(0, 1).unsqueeze(0)
-        if attn_mask is None:
-            attn_mask = _dflash_context_block_mask(
-                context_len=context_k.shape[0],
-                block_len=hidden_states.shape[0],
-                device=hidden_states.device,
-                layer_type=self.layer_type,
-                is_causal=self.is_causal,
-                sliding_window=self.sliding_window,
-            )
-        if attn_mask is not None:
-            attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
-
+        block_len = hidden_states.shape[0] // len(context_kvs)
         scale = self.head_dim ** -0.5
-        attn = F.scaled_dot_product_attention(q_t, k_t, v_t, attn_mask=attn_mask, scale=scale)
-        attn = attn.squeeze(0).transpose(0, 1)
-
-        out = attn.reshape(-1, self.qo_attn_dim)
+        outs = []
+        for b, ((context_k, context_v), attn_mask) in enumerate(zip(context_kvs, attn_masks)):
+            rows = slice(b * block_len, (b + 1) * block_len)
+            k_expanded = torch.cat([context_k, block_k[rows]], dim=0).repeat_interleave(group_size, dim=1)
+            v_expanded = torch.cat([context_v, block_v[rows]], dim=0).repeat_interleave(group_size, dim=1)
+            # SDPA expects [batch, num_heads, seq, head_dim]
+            q_t = q[rows].transpose(0, 1).unsqueeze(0)  # [1, num_qo, block_len, head_dim]
+            k_t = k_expanded.transpose(0, 1).unsqueeze(0)  # [1, num_qo, ctx_len + block_len, head_dim]
+            v_t = v_expanded.transpose(0, 1).unsqueeze(0)
+            mask = attn_mask.unsqueeze(0).unsqueeze(0) if attn_mask is not None else None
+            attn = F.scaled_dot_product_attention(q_t, k_t, v_t, attn_mask=mask, scale=scale)
+            outs.append(attn.squeeze(0).transpose(0, 1))
+        out = torch.cat(outs, dim=0).reshape(-1, self.qo_attn_dim)
         return self.o_proj.forward(out)
 
 
@@ -220,19 +213,22 @@ class _Fp8RowLinear(BaseOP):
 
 
 def _grouped_dynamic_convolve(
-    hidden: torch.Tensor, dynamic: torch.Tensor, base: torch.Tensor, group_size: int
+    hidden: torch.Tensor, dynamic: torch.Tensor, base: torch.Tensor, group_size: int,
+    block_len: int | None = None,
 ) -> torch.Tensor:
-    """Causal conv over the block positions: ``hidden`` [T, H], ``dynamic`` [T, K, groups]
-    (per-position, per-group taps), ``base`` [K, H] (static per-channel taps)."""
-    length, hidden_size = hidden.shape
+    """Causal conv over the positions of each block: ``hidden`` [B * T, H] (B blocks of
+    ``block_len`` T, default one block), ``dynamic`` [B * T, K, groups] (per-position,
+    per-group taps), ``base`` [K, H] (static per-channel taps)."""
+    rows, hidden_size = hidden.shape
+    length = block_len or rows
     groups = hidden_size // group_size
-    blocks = hidden.view(length, groups, group_size)
-    dynamic = dynamic.reshape(length, base.shape[0], groups, 1)
+    blocks = hidden.view(rows // length, length, groups, group_size)
+    dynamic = dynamic.reshape(rows // length, length, base.shape[0], groups, 1)
     output = torch.zeros_like(blocks)
     for offset in range(base.shape[0]):
-        values = blocks if offset == 0 else F.pad(blocks[:-offset], (0, 0, 0, 0, offset, 0))
-        output = output + base[offset].view(1, groups, group_size).to(hidden.dtype) * values
-        output = torch.addcmul(output, dynamic[:, offset], values)
+        values = blocks if offset == 0 else F.pad(blocks[:, :-offset], (0, 0, 0, 0, offset, 0))
+        output = output + base[offset].view(1, 1, groups, group_size).to(hidden.dtype) * values
+        output = torch.addcmul(output, dynamic[:, :, offset], values)
     return output.view_as(hidden)
 
 
@@ -248,13 +244,13 @@ class _GroupedDynamicCausalConv(BaseOP):
         self.kernel_projection = LinearReplicated(hidden_size, 2 * kernel_size * self.groups, has_bias=False)
         self.kernel_projection.weight = self.kernel_projection.weight.to(torch.bfloat16)
 
-    def prepare(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def prepare(self, hidden: torch.Tensor, block_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         dynamic = self.kernel_projection.forward(hidden).view(-1, 2, self.kernel_size, self.groups)
-        out = _grouped_dynamic_convolve(hidden, dynamic[:, 0], self.base_kernel[0], self.group_size)
+        out = _grouped_dynamic_convolve(hidden, dynamic[:, 0], self.base_kernel[0], self.group_size, block_len)
         return out, dynamic[:, 1]
 
-    def finish(self, hidden: torch.Tensor, dynamic: torch.Tensor) -> torch.Tensor:
-        return _grouped_dynamic_convolve(hidden, dynamic, self.base_kernel[1], self.group_size)
+    def finish(self, hidden: torch.Tensor, dynamic: torch.Tensor, block_len: int) -> torch.Tensor:
+        return _grouped_dynamic_convolve(hidden, dynamic, self.base_kernel[1], self.group_size, block_len)
 
 
 class _CandidateSelector(BaseOP):
@@ -272,30 +268,41 @@ class _CandidateSelector(BaseOP):
 
     def select(
         self,
-        hidden: torch.Tensor,             # [P, hidden] draft hidden states of the candidate positions
-        logits: torch.Tensor,             # [P, vocab]
-        anchor_id: torch.Tensor,          # [1] the verified token before the block
-        temperature: torch.Tensor | None,  # scalar tensor; None = greedy
+        hidden: torch.Tensor,             # [B, P, hidden] draft hidden states of the candidate positions
+        logits: torch.Tensor,             # [B, P, vocab]
+        anchor_id: torch.Tensor,          # [B] the verified token before each block
+        temperature: torch.Tensor | None,  # [B]; None = greedy
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """(path [P], draft distribution [P, vocab] over the chosen candidates or None when greedy)."""
-        unary, candidates = torch.topk(logits, self.top_k, dim=-1, sorted=False)
+        """(paths [B, P], draft distributions [B, P, vocab] over the chosen candidates or None
+        when greedy). 2-D ``hidden``/``logits`` are one block."""
+        single = hidden.dim() == 2
+        if single:
+            hidden, logits = hidden.unsqueeze(0), logits.unsqueeze(0)
+        unary, candidates = torch.topk(logits, self.top_k, dim=-1, sorted=False)  # [B, P, k]
         hidden = self.hidden_projection.forward(hidden)
-        successors = F.embedding(candidates, self.successor_codebook)  # [P, k, rank]
-        predecessor = anchor_id[:1].to(candidates.dtype)
+        successors = F.embedding(candidates, self.successor_codebook)  # [B, P, k, rank]
+        predecessor = anchor_id[: hidden.shape[0]].to(candidates.dtype)  # [B]
+        temp = None if temperature is None else temperature.reshape(-1, 1)
         path, q_rows = [], []
-        for position in range(hidden.shape[0]):
-            pred = F.embedding(predecessor, self.predecessor_codebook)[0] * hidden[position]
-            scores = unary[position] + successors[position] @ pred.to(successors.dtype)
-            if temperature is None:
+        for position in range(hidden.shape[1]):
+            pred = F.embedding(predecessor, self.predecessor_codebook) * hidden[:, position]  # [B, rank]
+            scores = unary[:, position] + (
+                successors[:, position] @ pred.to(successors.dtype).unsqueeze(-1)).squeeze(-1)
+            if temp is None:
                 index = torch.argmax(scores, dim=-1, keepdim=True)
             else:
-                q = torch.softmax(scores.float() / temperature, dim=-1)
+                q = torch.softmax(scores.float() / temp, dim=-1)
                 index = torch.multinomial(q, 1)
-                q_rows.append(torch.zeros(logits.shape[-1], dtype=q.dtype, device=q.device).scatter_(
-                    0, candidates[position], q))
-            predecessor = candidates[position].gather(0, index)
+                q_rows.append(torch.zeros(
+                    (q.shape[0], logits.shape[-1]), dtype=q.dtype, device=q.device,
+                ).scatter_(1, candidates[:, position], q))
+            predecessor = candidates[:, position].gather(1, index)[:, 0]
             path.append(predecessor)
-        return torch.cat(path), (torch.stack(q_rows) if q_rows else None)
+        paths = torch.stack(path, dim=1)
+        probs = torch.stack(q_rows, dim=1) if q_rows else None
+        if single:
+            return paths[0], (probs[0] if probs is not None else None)
+        return paths, probs
 
 
 class _DFlashMLP(BaseOP):
@@ -352,29 +359,30 @@ class _DFlashDecoderLayer(BaseOP):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,                          # [B * block_len, hidden]
         positions: torch.Tensor,
-        context_kv: tuple[torch.Tensor, torch.Tensor],
-        attn_mask: torch.Tensor | None = None,
+        context_kvs: list[tuple[torch.Tensor, torch.Tensor]],  # per block
+        attn_masks: list[torch.Tensor | None],                 # per block
     ) -> torch.Tensor:
+        block_len = hidden_states.shape[0] // len(context_kvs)
         # Pre-norm cross-attention
         residual = hidden_states
         hidden_states = self.input_layernorm.forward(hidden_states)
         if self.attention_conv is not None:
-            hidden_states, taps = self.attention_conv.prepare(hidden_states)
-        hidden_states = self.self_attn.forward(hidden_states, positions, context_kv, attn_mask=attn_mask)
+            hidden_states, taps = self.attention_conv.prepare(hidden_states, block_len)
+        hidden_states = self.self_attn.forward(hidden_states, positions, context_kvs, attn_masks)
         if self.attention_conv is not None:
-            hidden_states = self.attention_conv.finish(hidden_states, taps)
+            hidden_states = self.attention_conv.finish(hidden_states, taps, block_len)
         hidden_states = residual + hidden_states
 
         # Pre-norm MLP
         residual = hidden_states
         hidden_states = self.post_attention_layernorm.forward(hidden_states)
         if self.mlp_conv is not None:
-            hidden_states, taps = self.mlp_conv.prepare(hidden_states)
+            hidden_states, taps = self.mlp_conv.prepare(hidden_states, block_len)
         hidden_states = self.mlp.forward(hidden_states)
         if self.mlp_conv is not None:
-            hidden_states = self.mlp_conv.finish(hidden_states, taps)
+            hidden_states = self.mlp_conv.finish(hidden_states, taps, block_len)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -445,31 +453,36 @@ class DFlashDraftModel(BaseOP):
 
     def forward(
         self,
-        mask_embeds: torch.Tensor,    # [block_size, hidden] — embedded anchor + mask tokens (target's embedding)
-        positions: torch.Tensor,      # [block_size] — positions for RoPE
-        context_kv_cache: list[tuple[torch.Tensor, torch.Tensor]],  # per layer: its context K, V
+        mask_embeds: torch.Tensor,    # [B * block_size, hidden] — embedded anchor + mask tokens per block
+        positions: torch.Tensor,      # [B * block_size] — positions for RoPE
+        context_kv_cache: list[list[tuple[torch.Tensor, torch.Tensor]]],  # per block, per layer: K, V
     ) -> torch.Tensor:
-        """Run draft model forward, return hidden states [block_size, hidden].
+        """Run draft model forward, return hidden states [B * block_size, hidden].
 
         The caller applies the target model's LM head to get logits.
         """
+        block_len = mask_embeds.shape[0] // len(context_kv_cache)
         # The attention mask depends only on (context_len, block_len, layer kind);
-        # build it once per kind instead of once per layer.
+        # build each once instead of once per layer and block.
         masks: dict[tuple, torch.Tensor | None] = {}
         h = mask_embeds
-        for layer, context_kv in zip(self.layers.op_list, context_kv_cache, strict=True):
+        for i, layer in enumerate(self.layers.op_list):
             attn = layer.self_attn
-            key = (context_kv[0].shape[0], attn.layer_type, attn.is_causal, attn.sliding_window)
-            if key not in masks:
-                masks[key] = _dflash_context_block_mask(
-                    key[0],
-                    mask_embeds.shape[0],
-                    mask_embeds.device,
-                    layer_type=attn.layer_type,
-                    is_causal=attn.is_causal,
-                    sliding_window=attn.sliding_window,
-                )
-            h = layer.forward(h, positions, context_kv, attn_mask=masks[key])
+            kvs = [cache[i] for cache in context_kv_cache]
+            layer_masks = []
+            for context_k, _ in kvs:
+                key = (context_k.shape[0], attn.layer_type, attn.is_causal, attn.sliding_window)
+                if key not in masks:
+                    masks[key] = _dflash_context_block_mask(
+                        key[0],
+                        block_len,
+                        mask_embeds.device,
+                        layer_type=attn.layer_type,
+                        is_causal=attn.is_causal,
+                        sliding_window=attn.sliding_window,
+                    )
+                layer_masks.append(masks[key])
+            h = layer.forward(h, positions, kvs, layer_masks)
 
         return self.norm.forward(h)
 

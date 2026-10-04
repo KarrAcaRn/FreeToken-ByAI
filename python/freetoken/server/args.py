@@ -339,8 +339,9 @@ def parse_args(
         "--max-running-requests",
         type=int,
         dest="max_running_req",
-        default=ServerArgs.max_running_req,
-        help="The maximum number of running requests.",
+        default=None,
+        help=f"The maximum number of running requests (default {ServerArgs.max_running_req}; 1 with "
+             "--speculative-algorithm, where a larger value batches several requests' verifies).",
     )
 
     parser.add_argument(
@@ -1088,6 +1089,9 @@ def parse_args(
         )
 
     # resolve some arguments
+    if kwargs["max_running_req"] is None:
+        # speculation is fastest, and keeps the most context, for one request at a time
+        kwargs["max_running_req"] = 1 if kwargs.get("speculative_algorithm") else ServerArgs.max_running_req
     run_shell |= kwargs.pop("shell_mode")
     kwargs["shell_mode"] = run_shell
     if bool(kwargs["ssl_certfile"]) != bool(kwargs["ssl_keyfile"]):

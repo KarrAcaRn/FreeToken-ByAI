@@ -27,6 +27,7 @@ class DFlashWorker:
         draft_quant: str = "none",
         linear_state_bytes_per_token: int = 0,
         max_context_len: int = 32768,
+        num_context_slots: int = 1,
     ):
         from freetoken.utils import cached_load_hf_config
 
@@ -66,53 +67,69 @@ class DFlashWorker:
             self.config.head_dim,
             torch.bfloat16,
             device,
+            num_slots=num_context_slots,
         )
-        self._uid: int | None = None
-        self._last_tokens: torch.Tensor | None = None  # the finished request's ids, for carry-over
+        # one context slot per running request; a finished request's slot stays parked (with
+        # the token ids behind it) until a new request continues it or needs the room
+        self._slot_of: dict[int, int] = {}
+        self._parked: list[tuple[int, torch.Tensor]] = []  # oldest first
+        self._free_slots = list(range(num_context_slots))
         self._mask_embeds: torch.Tensor | None = None
         self._draft_input_storage: torch.Tensor | None = None
-        self.last_draft_probs: torch.Tensor | None = None
         self._position_offsets = torch.arange(self.block_size, dtype=torch.int32, device=device)
         # Hybrid GDN targets: the verify graphs keep, per verified token, the conv state and the
         # recurrence inputs the commit replays. Hold that memory now, before the KV pool is
         # sized; the graph capture takes it over.
         self._verify_reserve: torch.Tensor | None = None
         if linear_state_bytes_per_token and self.block_size > 1:
+            # the largest verify graph: every context slot's request at the full block
             self._verify_reserve = torch.empty(
-                self.block_size * linear_state_bytes_per_token, dtype=torch.uint8, device=device)
+                num_context_slots * self.block_size * linear_state_bytes_per_token,
+                dtype=torch.uint8, device=device)
 
     def release_verify_reserve(self) -> None:
         self._verify_reserve = None
 
     def begin_request(self, uid: int, token_ids: torch.Tensor, cached_len: int) -> None:
-        """Called on each prefill chunk: a new request keeps the previous request's context
-        through its cached prefix when that request's tokens match it (a multi-turn chat
-        continues the last conversation), and starts empty otherwise."""
-        if uid == self._uid:
+        """Called on each prefill chunk. A new request continues a parked context whose tokens
+        match its cached prefix (the next turn of a chat continues the last one), else takes a
+        free slot, else the oldest parked one, and starts empty."""
+        if uid in self._slot_of:
             return
-        self._uid = uid
-        prev = self._last_tokens
-        self._last_tokens = None
-        if (
-            cached_len > 0
-            and prev is not None
-            and self.context.end_pos >= cached_len
-            and prev.numel() >= cached_len
-            and torch.equal(prev[:cached_len], token_ids[:cached_len].to(prev.dtype))
-        ):
-            self.context.truncate(cached_len)
-        else:
-            self.context.clear()
+        slot = None
+        if cached_len > 0:
+            for i in range(len(self._parked) - 1, -1, -1):
+                s, prev = self._parked[i]
+                if (
+                    self.context.end_pos[s] >= cached_len
+                    and prev.numel() >= cached_len
+                    and torch.equal(prev[:cached_len], token_ids[:cached_len].to(prev.dtype))
+                ):
+                    slot = s
+                    del self._parked[i]
+                    self.context.truncate(slot, cached_len)
+                    break
+        if slot is None:
+            if self._free_slots:
+                slot = self._free_slots.pop()
+            else:
+                slot = self._parked.pop(0)[0]
+            self.context.clear(slot)
+        self._slot_of[uid] = slot
 
-    def finish_request(self, token_ids: torch.Tensor) -> None:
-        """Remember the finished request's tokens behind the stored context (host ids)."""
-        self._uid = None
-        self._last_tokens = token_ids[: self.context.end_pos].clone()
-        self.last_draft_probs = None
+    def slot_of(self, uid: int) -> int | None:
+        return self._slot_of.get(uid)
 
-    def store_hidden_states(self, hidden_states: list[torch.Tensor], start_position: int) -> None:
+    def finish_request(self, uid: int, token_ids: torch.Tensor) -> None:
+        """Park the finished request's context with its tokens (host ids) for a continuation."""
+        slot = self._slot_of.pop(uid, None)
+        if slot is None:
+            return
+        self._parked.append((slot, token_ids[: self.context.end_pos[slot]].clone()))
+
+    def store_hidden_states(self, slot: int, hidden_states: list[torch.Tensor], start_position: int) -> None:
         """Project target-layer hidden states ([tokens, hidden] each, positions from
-        ``start_position``) into every draft layer's context K/V."""
+        ``start_position``) into every draft layer's context K/V of ``slot``."""
         rows = hidden_states[0].shape[0]
         if rows == 0:
             return
@@ -127,7 +144,7 @@ class DFlashWorker:
             layer.self_attn.project_context_kv(context, positions)
             for layer in self.draft_model.layers.op_list
         ]
-        self.context.append(layer_kv, start_position, rows)
+        self.context.append(slot, layer_kv, start_position, rows)
 
     def target_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Project target hidden states without LMHead's prefill last-token slicing."""
@@ -142,91 +159,78 @@ class DFlashWorker:
             logits = torch.tanh(logits / float(softcap)) * float(softcap)
         return logits
 
-    @property
-    def context_length(self) -> int:
-        return self.context.end_pos
-
-    def _draft_input_embeds(self, base_token_id: torch.Tensor) -> torch.Tensor:
-        if self.block_size == 1:
-            return self.target_embed.forward(base_token_id[:1])
-
-        config = getattr(self, "config", None)
-        scale = float(getattr(config, "input_embedding_scale", 1.0))
-        base_embed = self.target_embed.forward(base_token_id[:1]) * scale
-        mask_embeds = getattr(self, "_mask_embeds", None)
-        if mask_embeds is None:
+    def _draft_input_embeds(self, base_tokens: torch.Tensor) -> torch.Tensor:
+        """[B * block_size, hidden]: each block is its anchor's embedding, then mask tokens."""
+        scale = float(getattr(self.config, "input_embedding_scale", 1.0))
+        if self._mask_embeds is None:
             mask_ids = torch.full(
-                (self.block_size - 1,),
-                self.mask_token_id,
-                dtype=torch.int32,
-                device=self.device,
+                (self.block_size - 1,), self.mask_token_id, dtype=torch.int32, device=self.device
             )
-            mask_embeds = (self.target_embed.forward(mask_ids) * scale).detach()
-            self._mask_embeds = mask_embeds
-        storage = getattr(self, "_draft_input_storage", None)
-        if (
-            storage is None
-            or storage.shape != (self.block_size, base_embed.shape[1])
-            or storage.dtype != base_embed.dtype
-            or storage.device != base_embed.device
-        ):
+            self._mask_embeds = (self.target_embed.forward(mask_ids) * scale).detach()
+        n = base_tokens.numel()
+        storage = self._draft_input_storage
+        if storage is None or storage.shape[0] < n * self.block_size:
+            hidden = self._mask_embeds.shape[1]
             storage = torch.empty(
-                (self.block_size, base_embed.shape[1]),
-                dtype=base_embed.dtype,
-                device=base_embed.device,
+                (n * self.block_size, hidden), dtype=self._mask_embeds.dtype, device=self.device
             )
-            storage[1:].copy_(mask_embeds)
+            storage.view(n, self.block_size, hidden)[:, 1:].copy_(self._mask_embeds)
             self._draft_input_storage = storage
-        storage[:1].copy_(base_embed)
-        return storage
-
-    def _draft_positions(self, position: int) -> torch.Tensor:
-        offsets = getattr(self, "_position_offsets", None)
-        if offsets is None or offsets.numel() != self.block_size or offsets.device != self.device:
-            offsets = torch.arange(self.block_size, dtype=torch.int32, device=self.device)
-            self._position_offsets = offsets
-        return offsets + position
+        embeds = storage[: n * self.block_size]
+        embeds.view(n, self.block_size, -1)[:, 0].copy_(self.target_embed.forward(base_tokens) * scale)
+        return embeds
 
     def draft(
         self,
-        base_token_id: torch.Tensor,       # [1] — the anchor: the last emitted token
-        position: int,                      # position of the anchor
+        slots: list[int],                   # each request's context slot
+        base_tokens: torch.Tensor,          # [B] int32 — each request's anchor: its last emitted token
+        positions: list[int],               # each anchor's position
         sampling_args=None,                 # BatchSamplingArgs; None / greedy -> argmax drafts
-    ) -> torch.Tensor:
-        """Generate block_size draft tokens in parallel over the stored context.
+    ) -> tuple[torch.Tensor, list[torch.Tensor | None]]:
+        """Draft a block per request, all blocks in one forward over their own contexts.
 
-        Returns: draft_tokens [block_size]
-        """
-        bs = self.block_size
-        mask_embeds = self._draft_input_embeds(base_token_id)
-        positions = self._draft_positions(position)
-        draft_hidden = self.draft_model.forward(mask_embeds, positions, self.context.all_layer_kv())
+        Returns (tokens [B, block_size] with the anchors first, each request's draft
+        distribution [block_size - 1, vocab] for rejection-sampling verify, or None when
+        it drafted greedily)."""
+        from freetoken.speculative.utils import request_sampling_args, sampling_probs
 
-        # Only positions 1..bs-1 are candidate draft tokens. Position 0 is the
-        # sampled target base token and is not consumed by the engine.
-        if bs == 1:
-            return base_token_id[:1]
-        logits = self.draft_logits(draft_hidden[1:])  # [bs - 1, vocab]
+        n, bs = len(slots), self.block_size
+        embeds = self._draft_input_embeds(base_tokens)
+        pos = (self._position_offsets[None, :] + torch.tensor(
+            positions, dtype=torch.int32, device=self.device)[:, None]).reshape(-1)
+        hidden = self.draft_model.forward(embeds, pos, [self.context.all_layer_kv(s) for s in slots])
+        # position 0 of each block is the anchor; 1..bs-1 are the candidates
+        hidden = hidden.view(n, bs, -1)[:, 1:]
+        logits = self.draft_logits(hidden.reshape(n * (bs - 1), -1)).view(n, bs - 1, -1)
+        rows = [request_sampling_args(sampling_args, b) for b in range(n)]
+        sampled = [r is not None and r.temperatures is not None for r in rows]
         selector = self.draft_model.candidate_selector
-        if selector is not None:
-            temperature = None
-            if sampling_args is not None and sampling_args.temperatures is not None:
-                temperature = sampling_args.temperatures[:1]
-            candidate_tokens, self.last_draft_probs = selector.select(
-                draft_hidden[1:], logits, base_token_id, temperature)
-            return torch.cat([base_token_id[:1].to(candidate_tokens.dtype), candidate_tokens])
-        if sampling_args is not None and sampling_args.temperatures is not None:
-            # Non-greedy: sample candidates (upstream DFlash samples drafts too) and
-            # stash the filtered draft distribution for rejection-sampling verify.
-            from freetoken.speculative.utils import sampling_probs
-
-            draft_probs = sampling_probs(logits, sampling_args)
-            candidate_tokens = torch.multinomial(draft_probs, 1)[:, 0]
-            self.last_draft_probs = draft_probs
+        if selector is not None and (all(sampled) or not any(sampled)):
+            temperature = (
+                torch.cat([r.temperatures for r in rows]) if all(sampled) else None
+            )
+            candidates, probs = selector.select(hidden, logits, base_tokens, temperature)
+            draft_probs = list(probs) if probs is not None else [None] * n
         else:
-            candidate_tokens = torch.argmax(logits, dim=-1)
-            self.last_draft_probs = None
-        return torch.cat([base_token_id[:1].to(candidate_tokens.dtype), candidate_tokens])
+            picks, draft_probs = [], []
+            for b in range(n):
+                if selector is not None:
+                    path, q = selector.select(
+                        hidden[b], logits[b], base_tokens[b : b + 1],
+                        rows[b].temperatures if sampled[b] else None,
+                    )
+                elif sampled[b]:
+                    # sample candidates (upstream DFlash samples drafts too) and keep the
+                    # filtered draft distribution for rejection-sampling verify
+                    q = sampling_probs(logits[b], rows[b])
+                    path = torch.multinomial(q, 1)[:, 0]
+                else:
+                    path, q = torch.argmax(logits[b], dim=-1), None
+                picks.append(path)
+                draft_probs.append(q)
+            candidates = torch.stack(picks)
+        tokens = torch.cat([base_tokens.view(n, 1).to(candidates.dtype), candidates], dim=1)
+        return tokens, draft_probs
 
 
 __all__ = ["DFlashWorker"]

@@ -48,3 +48,23 @@ def test_replayed_state_matches_the_kernels_intermediate_state(commit_len):
     )
     torch.testing.assert_close(pool[slot], ref_states[0, c - 1], rtol=0, atol=0)
     assert torch.equal(pool[0], state0[0]) and torch.equal(pool[2], state0[2])
+
+
+def test_verify_conv_steps_batch_like_single_blocks():
+    from freetoken.models.qwen3_5_moe.gdn import _dflash_conv_mixed_steps, _dflash_conv_state_steps
+
+    torch.manual_seed(0)
+    b, t, dim, km1 = 3, 5, 16, 3
+    pre = torch.randn(b, dim, km1)
+    conv_in = torch.randn(b * t, dim)
+    weight = torch.randn(dim, km1 + 1)
+    steps = _dflash_conv_state_steps(pre, conv_in)
+    mixed = _dflash_conv_mixed_steps(pre, conv_in, weight)
+    assert steps.shape == (b * t, dim, km1) and mixed.shape == (b * t, dim)
+    for i in range(b):
+        rows = slice(i * t, (i + 1) * t)
+        torch.testing.assert_close(steps[rows], _dflash_conv_state_steps(pre[i : i + 1], conv_in[rows]))
+        torch.testing.assert_close(mixed[rows], _dflash_conv_mixed_steps(pre[i : i + 1], conv_in[rows], weight))
+    # one block: the state after token j is the last kernel-1 inputs up to j
+    history = torch.cat([pre[0], conv_in[:t].T], dim=-1)
+    torch.testing.assert_close(steps[t - 1], history[:, -km1:])

@@ -88,8 +88,14 @@ def _multi_token_next_input_pos(device_len: int, num_tokens: int) -> int:
     return device_len + num_tokens - 2
 
 
-def _multi_token_last_token_index(req_index: int, num_tokens: int) -> int:
-    return (req_index + 1) * num_tokens - 1
+def _multi_token_last_token_index(req_index: int, stride: int, count: int) -> int:
+    return req_index * stride + count - 1
+
+
+def _req_token_count(output, req_index: int) -> int:
+    """Tokens request ``req_index`` emitted in a multi-token step (rows are ``num_tokens`` apart)."""
+    counts = getattr(output, "token_counts", None)
+    return counts[req_index] if counts is not None else output.num_tokens
 
 
 def _multi_token_emit_count(input_len: int, max_device_len: int, num_tokens: int) -> int:
@@ -544,7 +550,7 @@ class Scheduler(SchedulerIOMixin):
 
     def _drain_multi_token(self, req, outputs, i, num_tokens, reply, new_finished_reqs, batch):
         first = i * num_tokens
-        tokens = outputs.next_tokens_cpu[first:first + num_tokens]
+        tokens = outputs.next_tokens_cpu[first:first + _req_token_count(outputs, i)]
         emit_count = _multi_token_emit_count(req.input_ids.numel(), req.max_device_len, tokens.numel())
         appended = 0
         finished = emit_count == 0
@@ -1088,11 +1094,12 @@ class Scheduler(SchedulerIOMixin):
             self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         else:
             for i, req in enumerate(batch.reqs):
-                last_token_idx = _multi_token_last_token_index(i, forward_output.num_tokens)
+                count = _req_token_count(forward_output, i)
+                last_token_idx = _multi_token_last_token_index(i, forward_output.num_tokens, count)
                 last_token = forward_output.next_tokens_gpu[last_token_idx : last_token_idx + 1]
                 self.token_pool[
                     req.table_idx,
-                    _multi_token_next_input_pos(req.device_len, forward_output.num_tokens),
+                    _multi_token_next_input_pos(req.device_len, count),
                 ] = last_token
 
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
