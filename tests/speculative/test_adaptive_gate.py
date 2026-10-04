@@ -97,3 +97,16 @@ def test_probing_thins_out_once_the_baseline_has_samples():
         gate.finish_request()
     assert probed[:4] == [True] * 4
     assert sum(probed[4:]) == 2  # every 4th request after that
+
+
+def test_window_throughput_not_the_median_cycle_decides():
+    # most cycles keep 1 token (36 ms), every third keeps 7: 108 ms for 9 tokens = 12 ms/token,
+    # faster than a 20 ms plain step, though the median cycle (36 ms/token) is slower
+    gate = AdaptiveGate(min_cycles=6, eval_interval=6, warmup_cycles=0, margin=1.15, probe_steps=1,
+                        probe_after=0)
+    assert gate.should_run(1) is False
+    gate.record_plain_events(_Event(0.0), _Event(20.0))
+    gate.should_run(1)
+    for i in range(12):
+        _cycle(gate, cycle_ms=36.0, verify_ms=26.0, tokens=7 if i % 3 == 2 else 1, scale=1.0)
+    assert gate.enabled

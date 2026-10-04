@@ -440,10 +440,12 @@ class AdaptiveGate:
         if not self._window:
             return
         self._evaluated = True
-        per_token = sorted(c / t for c, _, t in self._window if t > 0)
-        if not per_token:
+        tokens = sum(t for _, _, t in self._window)
+        if not tokens:
             return
-        cycle_ms_per_token = statistics.median_low(per_token)
+        # throughput over the window: a median of per-cycle ratios overstates the cost when
+        # acceptance swings (many 1-token cycles, a few long ones)
+        cycle_ms_per_token = sum(c for c, _, _ in self._window) / tokens
         baseline_ms = self._baseline_ms([t for _, t, _ in self._window])
         if cycle_ms_per_token > baseline_ms * self.margin:
             self.enabled = False
