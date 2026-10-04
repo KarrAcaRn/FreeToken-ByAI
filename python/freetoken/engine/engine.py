@@ -109,6 +109,13 @@ def _dflash_graph_runner_dflash_kwargs(
     }
 
 
+def _dflash_verify_batch_limit(config: EngineConfig) -> int:
+    """How many requests one verify graph batches. An offloaded MoE verifies one: each extra
+    drafted token streams experts over PCIe, so a batched verify costs more than the plain
+    batched decode it would replace (and its larger graphs do not fit next to the slot cache)."""
+    return 1 if is_offload_moe_strategy(getattr(config, "moe_strategy", "auto")) else config.max_running_req
+
+
 def _dflash_target_verify_graph_enabled_for_config(config: EngineConfig) -> bool:
     model_config = getattr(config, "model_config", None)
     moe_strategy = getattr(config, "moe_strategy", "auto")
@@ -696,10 +703,13 @@ class Engine:
                 device=self.device,
                 block_size=config.speculative_dflash_block_size,
                 draft_quant=config.speculative_draft_quant,
-                linear_state_bytes_per_token=(
+                verify_row_bytes=(
                     dflash_verify_bytes_per_token(config)
+                    + config.model_config.vocab_size * 4  # fp32 logits
                     if _dflash_target_verify_graph_enabled_for_config(config) else 0
                 ),
+                verify_batch=_dflash_verify_batch_limit(config),
+                target_hidden_size=config.model_config.hidden_size,
                 max_context_len=config.max_seq_len,
                 num_context_slots=config.max_running_req,
             )
@@ -869,7 +879,7 @@ class Engine:
             **_dflash_graph_runner_dflash_kwargs(
                 self.dflash_worker,
                 target_verify_graph_enabled=_dflash_target_verify_graph_enabled_for_config(config),
-                max_running_req=config.max_running_req,
+                max_running_req=_dflash_verify_batch_limit(config),
             ),
         )
         if config.prefill_warmup:
@@ -1495,7 +1505,7 @@ class Engine:
             **_dflash_graph_runner_dflash_kwargs(
                 self.dflash_worker,
                 target_verify_graph_enabled=_dflash_target_verify_graph_enabled_for_config(config),
-                max_running_req=config.max_running_req,
+                max_running_req=_dflash_verify_batch_limit(config),
             ),
         )
 
