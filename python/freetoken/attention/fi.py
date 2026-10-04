@@ -141,6 +141,8 @@ class FlashInferBackend(BaseAttnBackend):
         self.max_graph_bs = 0
         self.graph_wrappers: Dict[int, CUDAGraphBatchDecodeWithPagedKVCacheWrapper] = {}
         self.capture: FICaptureData | None = None
+        # DFlash target-verify graphs: per (bs, verify len), a CUDA-graph prefill wrapper
+        self.dflash_verify_wrappers: Dict[tuple[int, int], BatchPrefillWithPagedKVCacheWrapper] = {}
         self.last_event = torch.cuda.Event()
         self.last_event.record()
 
@@ -265,6 +267,7 @@ class FlashInferBackend(BaseAttnBackend):
         # long-lived workspace buffers. Lets init_capture_graph re-run after a cache rebuild.
         super().reset_capture()
         self.graph_wrappers = {}
+        self.dflash_verify_wrappers = {}
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
         assert self.capture is None, "Capture already initialized."
@@ -310,4 +313,72 @@ class FlashInferBackend(BaseAttnBackend):
         assert isinstance(metadata, FIMetadata) and not metadata.initialized
         assert self.capture is not None and bs in self.capture_bs
         metadata.wrapper = self.graph_wrappers[bs]
+        self._initialize_metadata_once(metadata)
+
+    # ----------------------------------------------------------------------------------
+    # DFlash target verify: ``bs`` requests with ``verify_len`` query tokens each on top of
+    # their cached prefixes. One CUDA-graph prefill wrapper per captured shape; like the
+    # decode graphs, it is planned on the host before every replay (the plan writes the
+    # wrapper's fixed device buffers and the work split the captured kernels read).
+    # ----------------------------------------------------------------------------------
+
+    dflash_verify_max_bs = 64
+
+    def init_dflash_target_verify_capture_graph(
+        self, max_seq_len: int, shapes: List[tuple[int, int]]
+    ) -> None:
+        """``shapes``: the (bs, verify_len) pairs to capture."""
+        from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+
+        assert not self.dflash_verify_wrappers, "DFlash target verify capture already initialized."
+        dev = self.device
+        max_bs = max(bs for bs, _ in shapes)
+        # the page indices are shared: the graphs never run at once
+        indices = torch.zeros(max_bs * max_seq_len, dtype=torch.int32, device=dev)
+        last_page_len = torch.ones(max_bs, dtype=torch.int32, device=dev)
+        for bs, verify_len in sorted(shapes):
+            wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self.float_workspace_buffer,
+                kv_layout="NHD",
+                use_cuda_graph=True,
+                qo_indptr_buf=torch.arange(
+                    0, (bs + 1) * verify_len, verify_len, dtype=torch.int32, device=dev),
+                paged_kv_indptr_buf=torch.zeros(bs + 1, dtype=torch.int32, device=dev),
+                paged_kv_indices_buf=indices,
+                paged_kv_last_page_len_buf=last_page_len[:bs],
+                backend="fa2",
+            )
+            # plans run one at a time (last_event): share the int workspace and its host copy
+            wrapper._int_workspace_buffer = self.int_workspace_buffer
+            wrapper._pin_memory_int_workspace_buffer = self.prefill_wrapper._pin_memory_int_workspace_buffer
+            self.dflash_verify_wrappers[bs, verify_len] = wrapper
+
+    def prepare_for_dflash_target_verify_capture(self, batch: Batch, verify_len: int) -> None:
+        bs = batch.size
+        assert (bs, verify_len) in self.dflash_verify_wrappers
+        CPU_KWARGS = {"device": "cpu", "dtype": torch.int32, "pin_memory": True}
+        # each dummy request attends to just its own verify tokens
+        cu_seqlens = torch.arange(0, (bs + 1) * verify_len, verify_len, **CPU_KWARGS)
+        batch.attn_metadata = FIMetadata(
+            cu_seqlens_q_cpu=cu_seqlens,
+            cu_seqlens_k_cpu=cu_seqlens,
+            cu_seqlens_q_gpu=cu_seqlens.to(self.device, non_blocking=True),
+            indices=torch.zeros(bs * verify_len, dtype=torch.int32, device=self.device),
+            last_page_len_cpu=self._get_ones_cpu(bs),
+            num_qo_heads=self.qo_head_local,
+            num_kv_heads=self.kv_head_local,
+            head_dim=self.config.head_dim,
+            page_size=1,
+            pos_encoding_mode="NONE",
+            seq_lens_cpu=torch.full((bs,), verify_len, **CPU_KWARGS),
+            dtype=self.kvcache.dtype,
+            wrapper=self.dflash_verify_wrappers[bs, verify_len],
+        )
+        self._initialize_metadata_once(batch.attn_metadata)
+
+    def prepare_for_dflash_target_verify_replay(self, batch: Batch, verify_len: int) -> None:
+        metadata = batch.attn_metadata
+        assert isinstance(metadata, FIMetadata) and not metadata.initialized
+        assert metadata.wrapper is self.prefill_wrapper, "the verify metadata is the extend path's"
+        metadata.wrapper = self.dflash_verify_wrappers[batch.size, verify_len]
         self._initialize_metadata_once(metadata)
