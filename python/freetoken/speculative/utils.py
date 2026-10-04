@@ -9,7 +9,7 @@ from typing import Any, NamedTuple, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from freetoken.core import Batch, Req
+    from freetoken.core import Batch
     from freetoken.engine.sample import BatchSamplingArgs
 
 
@@ -152,8 +152,20 @@ def rejection_sample_chain(
     ]), accepted
 
 
-def use_sampling_verify(args: BatchSamplingArgs, worker) -> bool:
-    return args.temperatures is not None and getattr(worker, "last_draft_probs", None) is not None
+def use_sampling_verify(args: BatchSamplingArgs, draft_probs: torch.Tensor | None) -> bool:
+    return args.temperatures is not None and draft_probs is not None
+
+
+def request_sampling_args(args: BatchSamplingArgs | None, row: int) -> BatchSamplingArgs | None:
+    """One request's sampling args out of a batch's (temperatures None: it decodes greedily)."""
+    if args is None:
+        return None
+    from freetoken.engine.sample import BatchSamplingArgs
+    greedy_mask = getattr(args, "greedy_mask", None)
+    if args.temperatures is None or (greedy_mask is not None and bool(greedy_mask[row])):
+        return BatchSamplingArgs(temperatures=None)
+    pick = lambda t: t[row : row + 1] if isinstance(t, torch.Tensor) else t  # noqa: E731
+    return BatchSamplingArgs(temperatures=pick(args.temperatures), top_k=pick(args.top_k), top_p=pick(args.top_p))
 
 
 def repeat_sampling_args(args: BatchSamplingArgs, repeat: int) -> BatchSamplingArgs:
@@ -240,12 +252,11 @@ class VerifyState(NamedTuple):
     batch_out_loc: torch.Tensor | None
     batch_padded_reqs: list
     batch_fla_metadata: Any
-    req_input_len: int
-    req_cached_len: int
-    req_device_len: int
+    batch_linear_table_idx: torch.Tensor | None
+    reqs: tuple[tuple[int, int, int], ...]  # per request: (input_len, cached_len, device_len)
 
 
-def snapshot_verify_state(batch: Batch, req: Req) -> VerifyState:
+def snapshot_verify_state(batch: Batch) -> VerifyState:
     return VerifyState(
         batch_phase=batch.phase,
         batch_input_ids=batch.input_ids,
@@ -253,22 +264,23 @@ def snapshot_verify_state(batch: Batch, req: Req) -> VerifyState:
         batch_out_loc=batch.out_loc,
         batch_padded_reqs=batch.padded_reqs,
         batch_fla_metadata=batch.fla_metadata,
-        req_input_len=req.input_ids.numel(),
-        req_cached_len=req.cached_len,
-        req_device_len=req.device_len,
+        batch_linear_table_idx=batch.linear_table_idx,
+        reqs=tuple((r.input_ids.numel(), r.cached_len, r.device_len) for r in batch.reqs),
     )
 
 
-def restore_verify_state(batch: Batch, req: Req, state: VerifyState) -> None:
-    req.input_ids = req._ids_buf[: state.req_input_len]
-    req.cached_len = state.req_cached_len
-    req.device_len = state.req_device_len
+def restore_verify_state(batch: Batch, state: VerifyState) -> None:
+    for req, (input_len, cached_len, device_len) in zip(batch.reqs, state.reqs, strict=True):
+        req.input_ids = req._ids_buf[:input_len]
+        req.cached_len = cached_len
+        req.device_len = device_len
     batch.phase = state.batch_phase
     batch.input_ids = state.batch_input_ids
     batch.positions = state.batch_positions
     batch.out_loc = state.batch_out_loc
     batch.padded_reqs = state.batch_padded_reqs
     batch.fla_metadata = state.batch_fla_metadata
+    batch.linear_table_idx = state.batch_linear_table_idx
 
 
 def clone_hidden_outputs(hidden_states: list[torch.Tensor]) -> list[torch.Tensor]:

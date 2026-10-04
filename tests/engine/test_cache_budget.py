@@ -230,7 +230,7 @@ def test_adjust_config_resolves_num_tokens_generic():
     assert cfg.num_page_override == 5000
 
 
-def test_adjust_config_forces_dflash_single_request_runtime():
+def test_adjust_config_keeps_the_dflash_request_count():
     from types import SimpleNamespace
 
     from freetoken.engine.engine import _adjust_config
@@ -265,9 +265,9 @@ def test_adjust_config_forces_dflash_single_request_runtime():
     cfg = Cfg()
     _adjust_config(cfg)
 
-    assert cfg.max_running_req == 1
-    assert cfg.cuda_graph_bs == [1]
-    assert cfg.cuda_graph_max_bs == 1
+    # DFlash batches several requests' verifies; the server defaults it to one request
+    assert cfg.max_running_req == 4
+    assert cfg.cuda_graph_bs == [1, 2, 4]
 
 
 

@@ -96,7 +96,8 @@ def test_multi_token_drain_marks_a_state_past_the_stop(eos_at, ahead):
         _free_req_resources=lambda r: freed.append((r.cached_len, r.linear_state_ahead)),
     )
     finished = set()
-    Scheduler._drain_multi_token(sched, req, tokens, 0, 4, [], finished, None)
+    outputs = SimpleNamespace(next_tokens_cpu=tokens, num_tokens=4)
+    Scheduler._drain_multi_token(sched, req, outputs, 0, 4, [], finished, None)
     kept = 4 if eos_at is None else eos_at + 1
     # every kept token but the last has its KV written
     assert req.cached_len == 9 + kept
@@ -105,3 +106,24 @@ def test_multi_token_drain_marks_a_state_past_the_stop(eos_at, ahead):
         assert not finished and not freed
     else:
         assert freed == [(9 + kept, ahead)]
+
+
+def test_multi_token_drain_reads_each_requests_own_count():
+    from freetoken.scheduler.scheduler import Scheduler
+
+    # two requests, rows 4 apart: the first kept 2 tokens, the second 4
+    flat = torch.tensor([5, 6, -1, -1, 7, 8, 9, 10], dtype=torch.int32)
+    outputs = SimpleNamespace(next_tokens_cpu=flat, num_tokens=4, token_counts=(2, 4))
+    sched = SimpleNamespace(eos_token_ids=set(), finished_reqs=set(), _match_stop_str=lambda r: None,
+                            decode_manager=None, _free_req_resources=None)
+    reqs = []
+    for uid in range(2):
+        req = Req(input_ids=torch.arange(1, 11, dtype=torch.int32), table_idx=uid, cached_len=9,
+                  output_len=50, uid=uid, sampling_params=SamplingParams(), cache_handle=None)
+        req.cached_len, req.device_len = 10, 11
+        reqs.append(req)
+    reply = []
+    for i, req in enumerate(reqs):
+        Scheduler._drain_multi_token(sched, req, outputs, i, 4, reply, set(), None)
+    assert [m.next_token for m in reply] == [5, 6, 7, 8, 9, 10]
+    assert [r.cached_len for r in reqs] == [11, 13]

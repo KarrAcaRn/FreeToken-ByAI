@@ -93,8 +93,10 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 
 ### Speculative decoding (DFlash)
 
-One request decodes at a time with a draft model; the target verifies every drafted token, so
-greedy output matches plain decoding up to bf16 ties. Prefix reuse (`--cache-type radix`) stays on.
+A draft model proposes a block of tokens per request and the target verifies them, so greedy
+output matches plain decoding up to bf16 ties. Prefix reuse (`--cache-type radix`) stays on. With
+a draft, `--max-running-requests` defaults to 1 (the fastest single request and the most
+context); a larger value verifies the decoding requests' blocks together in one batched forward.
 
 | Flag | Default | Meaning |
 |---|---|---|
