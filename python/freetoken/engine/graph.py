@@ -326,6 +326,9 @@ class GraphRunner:
         self.hidden_size = hidden_size
         self.hidden_dtype = hidden_dtype
         self.dflash_target_verify_lens = sorted(set(dflash_target_verify_lens or []))
+        # verify len -> plain decode time / verify time, for the adaptive gate's baseline
+        self.dflash_plain_over_verify: Dict[int, float] = {}
+        self._plain_decode_ms: float | None = None
         self._capture_graphs(max_seq_len, vocab_size, model)
 
     def _reset_moe_offload_cache(self) -> None:
@@ -403,6 +406,9 @@ class GraphRunner:
         self._reset_moe_offload_cache()
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
+        if self.dflash_target_verify_lens and 1 in self.graph_map:
+            # timed now, while the decode buffers still hold the bs=1 capture inputs
+            self._plain_decode_ms = self._time_replay(self.graph_map[1])
         self._capture_dflash_target_verify_graphs(max_seq_len, vocab_size, model, pool)
 
     def _capture_dflash_target_verify_graphs(
@@ -481,10 +487,34 @@ class GraphRunner:
                 self._reset_moe_offload_cache()
             self.dflash_target_verify_graph_map[verify_len] = graph
             self.dflash_target_verify_buffers[verify_len] = buffer
+            if self._plain_decode_ms is not None:
+                verify_ms = self._time_replay(graph)
+                if verify_ms > 0:
+                    self.dflash_plain_over_verify[verify_len] = self._plain_decode_ms / verify_ms
 
         logger.info_rank0(
             f"DFlash target verify graphs captured for lens {self.dflash_target_verify_lens}"
         )
+        if self.dflash_plain_over_verify:
+            ratios = ", ".join(f"{n}: {r:.2f}" for n, r in self.dflash_plain_over_verify.items())
+            logger.info_rank0(
+                f"DFlash plain decode {self._plain_decode_ms:.2f} ms; plain/verify ratio by len {{{ratios}}}"
+            )
+
+    def _time_replay(self, graph: torch.cuda.CUDAGraph, iters: int = 10) -> float:
+        """Median ms of a captured graph replayed on its own (dummy) capture inputs."""
+        graph.replay()  # warm
+        times = []
+        for _ in range(iters):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record(self.stream)
+            graph.replay()
+            end.record(self.stream)
+            end.synchronize()
+            times.append(start.elapsed_time(end))
+        self._reset_moe_offload_cache()
+        return sorted(times)[len(times) // 2]
     def _run_model_into_buffer(
         self,
         model: BaseLLMModel,

@@ -277,7 +277,11 @@ def clone_hidden_outputs(hidden_states: list[torch.Tensor]) -> list[torch.Tensor
 
 class AdaptiveGate:
     """Per-request measured fallback: disables spec decode when it measures
-    slower than the plain target-forward baseline proxy by more than ``margin``."""
+    slower than the plain target-forward baseline proxy by more than ``margin``.
+
+    The proxy is the cycle's own target (verify) forward times ``baseline_scale``: the
+    caller passes the calibrated plain-decode / verify-forward ratio for that verify
+    length, so a verify of n tokens is not mistaken for one plain decode step."""
 
     def __init__(
         self,
@@ -359,10 +363,10 @@ class AdaptiveGate:
         if n >= self.min_cycles and n % self.eval_interval == 0:
             self._evaluate()
 
-    def record_events(self, *, cycle, target, out_tokens: int) -> None:
+    def record_events(self, *, cycle, target, out_tokens: int, baseline_scale: float = 1.0) -> None:
         if not self.enabled or out_tokens <= 0:
             return
-        self._pending_events.append((cycle, target, out_tokens))
+        self._pending_events.append((cycle, target, out_tokens, baseline_scale))
         n = self._records + len(self._pending_events) - self.warmup_cycles
         if n < self.min_cycles or n % self.eval_interval:
             return
@@ -374,10 +378,10 @@ class AdaptiveGate:
             return
         self._pending_events[-1][0][1].synchronize()
         pending, self._pending_events = self._pending_events, []
-        for (cycle_start, cycle_end), (target_start, target_end), tokens in pending:
+        for (cycle_start, cycle_end), (target_start, target_end), tokens, scale in pending:
             self._record_ms(
                 cycle_start.elapsed_time(cycle_end),
-                target_start.elapsed_time(target_end),
+                target_start.elapsed_time(target_end) * scale,
                 tokens,
             )
 
@@ -399,7 +403,7 @@ class AdaptiveGate:
                 f"[SPEC_ADAPTIVE] disabling spec decode for this request: "
                 f"cycle {cycle_ms_per_token:.3f} ms/token > "
                 f"baseline proxy {baseline_ms * self.margin:.3f} ms/token "
-                f"(target forward {baseline_ms:.3f} ms, margin {self.margin})"
+                f"(plain decode estimate {baseline_ms:.3f} ms, margin {self.margin})"
             )
 
     @classmethod

@@ -1795,6 +1795,11 @@ class Engine:
                 cycle=(gate_cycle_start, gate_cycle_end),
                 target=(gate_target_start, gate_target_end),
                 out_tokens=output_tokens.numel(),
+                baseline_scale=(
+                    self.graph_runner.dflash_plain_over_verify.get(verify_len, 1.0)
+                    if verified_with_target_graph
+                    else 1.0
+                ),
             )
         timing_end = _dflash_timing_now(self.device)
         _debug_dflash_timing(_dflash_timing_log_message(
