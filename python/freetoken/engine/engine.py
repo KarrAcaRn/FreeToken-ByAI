@@ -719,6 +719,8 @@ class Engine:
                 f"num_pages={pages} (prefill_overlap={overlap})"
             )
         _require_offload_cache_size(config.moe_cache_size, config.model_config.num_experts)
+        if decode_target == "hybrid" and getattr(config, "_moe_hybrid_from_profile", False):
+            decode_target = _profile_hybrid_target(config)
         layout = max_slots = None
         if method is not None:
             if banks.kind is not None and (banks.kind, banks.kernel) != (method.kind, method.kernel.name):
@@ -1293,6 +1295,40 @@ def _resolve_cpu_layers(config: EngineConfig, num_moe_layers: int, *, reserved: 
     return _parse_cpu_layers_spec(spec, num_moe_layers)
 
 
+# A profile-picked hybrid decodes on the GPU instead when the slot cache holds at least this
+# share of the experts. `ft bench bw` rates the CPU against PCIe per expert, but hybrid also
+# pays a GPU<->CPU round trip (~0.1 ms) per MoE layer on every decode step, and with skewed
+# routing an LRU cache misses far less than its share suggests, so only a small cache leaves
+# enough misses to win that back. RTX 4090 + 8-core host, Qwen3.6-35B-A3B NVFP4 (profile:
+# CPU 3.1x PCIe), decode tok/s offload vs hybrid by resident share: 5% 50/61, 10% 59/64,
+# 20% 75/64, 50% 113/87, 92% 140/103.
+_PROFILE_HYBRID_MAX_RESIDENT = 0.15
+
+
+def _resident_expert_share(config: EngineConfig) -> float:
+    """Share of all routed experts the GPU slot cache can hold (prefill double buffer excluded)."""
+    num_experts = config.model_config.num_experts
+    total = config.model_config.num_moe_layers * num_experts
+    slots = config.moe_cache_size - (2 * num_experts if config.moe_prefill_overlap else 0)
+    return min(max(slots, 0), total) / total
+
+
+def _profile_hybrid_target(config: EngineConfig) -> str:
+    """Decode target for a hybrid that the `ft bench bw` profile picked: hybrid while the slot
+    cache leaves enough misses for the CPU, else plain GPU offload (both share banks and cache)."""
+    share = _resident_expert_share(config)
+    if share < _PROFILE_HYBRID_MAX_RESIDENT:
+        return "hybrid"
+    object.__setattr__(config, "moe_strategy", "offload")
+    object.__setattr__(config.model_config, "decode_target", "gpu")
+    logger.info_rank0(
+        f"MoE slot cache holds {share:.0%} of the experts; decoding on the GPU (offload) "
+        "instead of the profile's hybrid pick, which only pays off when many experts miss "
+        "(--moe-strategy hybrid forces it)"
+    )
+    return "gpu"
+
+
 def _decode_target(config: EngineConfig) -> str:
     """Where routed experts decode, from the flags alone: hybrid co-compute, the CPU executor for some or all layers, or the GPU slot cache."""
     if config.moe_strategy == "hybrid":
@@ -1686,6 +1722,9 @@ def _adjust_config(config: EngineConfig):
                 )
             else:
                 default_backend = "hybrid"
+                # provisional: the profile compares bandwidths only, so the cache init
+                # falls back to offload once the slot cache turns out to hold most experts
+                override("_moe_hybrid_from_profile", True)
                 logger.info_rank0(
                     f"benchbw profile recommends hybrid for {bench_fmt!r} experts on this GPU"
                 )

@@ -51,7 +51,8 @@ class EngineConfig:
     moe_prefill_hit_d2d: bool = False
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
     # CPU MoE backend (--moe-strategy cpu): number of CPU worker threads computing
-    # the decode experts. 0 = auto (physical cores). Ignored by other backends.
+    # the decode experts. 0 = auto (physical cores minus the engine thread's and the
+    # handshake coordinator's). Ignored by other backends.
     moe_cpu_threads: int = 0
     # Hybrid CPU/GPU decode (--moe-strategy offload only): which MoE layers decode on
     # the CPU executor instead of the GPU offload/PCIe path. Spec is an explicit id

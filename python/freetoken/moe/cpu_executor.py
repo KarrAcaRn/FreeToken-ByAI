@@ -141,6 +141,21 @@ def resolve_threads_and_affinity(requested: int) -> tuple[int, list[int]]:
     return len(reps), list(reps)
 
 
+def auto_pool_cores(core_ids: list[int], flag_sync: bool) -> tuple[list[int], int]:
+    """Split the auto-sized pool's cores into (worker cores, coordinator core or -1).
+
+    The engine's main thread keeps the last core: it launches every decode step, and with
+    all cores pinned to spinning workers it waits for a time slice per MoE layer (8-core VM,
+    Qwen3.6-35B-A3B hybrid: 20 tok/s instead of ~100). The flag coordinator takes the next
+    one instead of time-slicing against the GEMV workers, which measurably destabilizes
+    throughput on fully-subscribed boxes."""
+    if len(core_ids) > 3:
+        core_ids = core_ids[:-1]
+    if flag_sync and len(core_ids) > 2:
+        return core_ids[:-1], core_ids[-1]
+    return core_ids, -1
+
+
 class CpuMoeExecutor:
     """Decode-time CPU expert compute over an ``OffloadMoeCache``'s host banks
     (bf16, nvfp4, mxfp4_triton, ds_fp4 or q4_0 — see ``_WFMT_IDS`` / ``_resolve_banks``)."""
@@ -220,12 +235,9 @@ class CpuMoeExecutor:
 
         nthreads, core_ids = resolve_threads_and_affinity(num_threads)
         coord_core = -1
-        if self._flag_sync and num_threads == 0 and nthreads > 2:
-            # Auto sizing: give the coordinator the last physical core instead of
-            # oversubscribing (workers drop from N to N-1).
-            coord_core = core_ids[-1]
-            nthreads -= 1
-            core_ids = core_ids[:-1]
+        if num_threads == 0:
+            core_ids, coord_core = auto_pool_cores(core_ids, self._flag_sync)
+            nthreads = len(core_ids)
         self._coord_core = coord_core
         self._ext = _cpu_moe.CpuMoeExecutor(
             num_threads=nthreads,

@@ -700,8 +700,9 @@ def parse_args(
         type=int,
         default=ServerArgs.moe_cpu_threads,
         help=(
-            "Number of CPU worker threads for --moe-strategy cpu decode experts. "
-            "0 = auto (physical cores)."
+            "Number of CPU worker threads for --moe-strategy cpu/hybrid decode experts. "
+            "0 = auto (physical cores minus one for the engine thread and one for the "
+            "GPU handshake coordinator)."
         ),
     )
 
