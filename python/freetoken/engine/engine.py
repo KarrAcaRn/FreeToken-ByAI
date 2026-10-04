@@ -1648,7 +1648,7 @@ def _adjust_config(config: EngineConfig):
             # the cache sizing flags get their own warning in the 'fused' block below
             inert = [flag for flag, on in (
                 (f"--moe-cpu-layers={config.moe_cpu_layers}", config.moe_cpu_layers),
-                ("--moe-prefill-hit-d2d", config.moe_prefill_hit_d2d),
+                ("--disable-moe-prefill-hit-d2d", not config.moe_prefill_hit_d2d),
                 ("--disable-moe-prefill-overlap", not config.moe_prefill_overlap),
             ) if on]
             if inert:
