@@ -164,3 +164,32 @@ def test_batched_selector_matches_single_blocks():
     for b in range(3):
         single, _ = sel.select(hidden[b], logits[b], anchors[b : b + 1], None)
         assert torch.equal(paths[b], single)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_batched_context_store_matches_one_request_at_a_time():
+    from freetoken.speculative.dflash.context import DraftContextCache
+    from freetoken.speculative.dflash.worker import DFlashWorker
+
+    dev = torch.device("cuda")
+    model, cfg = _random_draft(dev)
+
+    def worker():
+        w = DFlashWorker.__new__(DFlashWorker)
+        w.draft_model = model
+        w.context = DraftContextCache(cfg.layer_windows, 64, cfg.num_key_value_heads, cfg.head_dim,
+                                      torch.bfloat16, dev, num_slots=3)
+        return w
+
+    torch.manual_seed(2)
+    hidden = [torch.randn(13, cfg.context_dim, device=dev, dtype=torch.bfloat16)]
+    spans = [(0, 0, 5, 0), (2, 5, 1, 30), (1, 6, 7, 3)]  # (slot, first row, rows, start)
+    batched, single = worker(), worker()
+    batched.store_hidden_states_batch(spans, hidden)
+    for slot, first, rows, start in spans:
+        single.store_hidden_states(slot, [h[first : first + rows] for h in hidden], start)
+    for slot in range(3):
+        assert batched.context.end_pos[slot] == single.context.end_pos[slot]
+        for (bk, bv), (sk, sv) in zip(batched.context.all_layer_kv(slot), single.context.all_layer_kv(slot)):
+            torch.testing.assert_close(bk, sk, atol=2e-2, rtol=2e-2)
+            torch.testing.assert_close(bv, sv, atol=2e-2, rtol=2e-2)
