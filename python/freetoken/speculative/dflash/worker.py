@@ -313,7 +313,7 @@ class DFlashWorker:
 
     def draft(
         self,
-        hidden_states: list[torch.Tensor],  # hidden states from target layers (current pos)
+        hidden_states: list[torch.Tensor] | None,  # target-layer hidden states to append first, if any
         base_token_id: torch.Tensor,       # [1] — last verified token
         position: int,                      # position of base token
         sampling_args=None,                 # BatchSamplingArgs; None / greedy -> argmax drafts
@@ -324,8 +324,9 @@ class DFlashWorker:
         """
         bs = self.block_size
 
-        # 1. Store current hidden states and get full context
-        self.store_hidden_states(hidden_states)
+        # 1. Store current hidden states (None: the last verify stored them) and get full context
+        if hidden_states is not None:
+            self.store_hidden_states(hidden_states)
         context_features = self.get_context()  # [seq_len, context_dim]
 
         mask_embeds = self._draft_input_embeds(base_token_id)
