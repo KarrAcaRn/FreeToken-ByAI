@@ -257,12 +257,19 @@ class CacheManager:
         if self.swa_pool is not None and len(indices) > 0:
             self.swa_pool.free_swa(indices)
 
-    def allocate_paged(self, reqs: List[Req]) -> None:
+    def allocate_paged(self, reqs: List[Req], *, ahead: int = 0) -> None:
+        """Allocate KV pages through each request's device_len, or ``ahead`` tokens past it
+        (DFlash verify blocks). Allocating ahead records ``req.paged_len``, so the next call
+        starts after pages already held and a finish frees them (``_padded_tail``)."""
         needed_pages = 0
         allocation_info: List[Tuple[int, int, int]] = []
         for req in reqs:
-            first_page = div_ceil(req.cached_len, self.page_size)
-            last_page = div_ceil(req.device_len, self.page_size)
+            start = max(req.cached_len, req.paged_len) if ahead else req.cached_len
+            end = req.device_len + ahead
+            if ahead:
+                req.paged_len = max(req.paged_len, end)
+            first_page = div_ceil(start, self.page_size)
+            last_page = div_ceil(end, self.page_size)
             if last_page > first_page:
                 needed_pages += last_page - first_page
                 allocation_info.append((req.table_idx, first_page, last_page))
@@ -493,7 +500,7 @@ class CacheManager:
         swa_paged, charges swa for) whole pages, so the padding [cached_len, page_ceil) belongs
         to the finishing request. ``start`` is page-aligned (a match/insert boundary), so the
         full-pool page bases derived via ``[::page_size]`` are identical to the unpadded slice."""
-        end = div_ceil(req.cached_len, self.page_size) * self.page_size
+        end = div_ceil(max(req.cached_len, req.paged_len), self.page_size) * self.page_size
         return self.page_table[req.table_idx, start:end]
 
     def _free_req_slots(self, req: Req, keep_live: bool = False) -> None:

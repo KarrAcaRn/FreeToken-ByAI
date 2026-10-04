@@ -176,11 +176,7 @@ class Scheduler(SchedulerIOMixin):
     def run_when_idle(self) -> None:
         """Called when the scheduler is idle to perform background tasks."""
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
-        # Skip integrity check for DFlash — overlap scheduling causes a known
-        # 2-page leak per request (1 extra page per decode iteration not freed
-        # before the integrity check runs).
-        if self.engine.dflash_worker is None:
-            self.cache_manager.check_integrity()
+        self.cache_manager.check_integrity()
 
     @torch.inference_mode()
     def rebuild_cache(
@@ -882,16 +878,11 @@ class Scheduler(SchedulerIOMixin):
             self.cache_manager.free_swa_out_of_window_extend(batch.reqs)
         # Polymorphic page allocation: DSV4 allocates window pages + cmp/idx blocks into its
         # slot maps; the generic manager allocates KV pages into the page table.
-        # DFlash: pre-allocate block_size extra pages for verify prefill
-        dflash_verify = 0
+        # DFlash: a decode step may verify a whole block, so hold its pages ahead of device_len
+        ahead = 0
         if batch.is_decode and self.engine.dflash_worker is not None:
-            dflash_verify = self.engine.dflash_worker.block_size
-            for req in batch.reqs:
-                req.device_len += dflash_verify
-        self.cache_manager.allocate_paged(batch.reqs)
-        if dflash_verify:
-            for req in batch.reqs:
-                req.device_len -= dflash_verify
+            ahead = self.engine.dflash_worker.block_size
+        self.cache_manager.allocate_paged(batch.reqs, ahead=ahead)
         if batch.is_prefill:
             self._gather_multimodal(batch)
         batch.positions = _make_positions(batch, self.device)
