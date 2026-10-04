@@ -48,10 +48,13 @@ def testselect_streaming_output_tokens_waits_until_bonus_after_all_accept():
     assert torch.equal(out, torch.tensor([10, 20, 30, 41], dtype=torch.int32))
 
 
-def test_dflash_target_verify_graph_disabled_for_offload_moe_backend():
-    config = SimpleNamespace(moe_strategy="offload")
-
-    assert _dflash_target_verify_graph_enabled_for_config(config) is False
+def test_dflash_target_verify_graph_follows_the_moe_strategy():
+    moe = SimpleNamespace(is_moe=True)
+    for strategy, enabled in [("offload", True), ("fused", True), ("cpu", False), ("hybrid", False)]:
+        config = SimpleNamespace(moe_strategy=strategy, model_config=moe)
+        assert _dflash_target_verify_graph_enabled_for_config(config) is enabled, strategy
+    assert _dflash_target_verify_graph_enabled_for_config(
+        SimpleNamespace(moe_strategy="auto", model_config=SimpleNamespace(is_moe=False)))
 
 
 def test_dflash_target_verify_graph_allows_explicit_fused_moe_with_capture_safe_topk():
@@ -76,7 +79,7 @@ def test_dflash_adaptive_gate_disables_when_slower_than_baseline():
 def test_dflash_adaptive_gate_stays_enabled_when_faster_than_baseline():
     from freetoken.speculative.utils import AdaptiveGate
 
-    gate = AdaptiveGate(min_cycles=4, eval_interval=2, margin=1.05, warmup_cycles=0)
+    gate = AdaptiveGate(min_cycles=4, eval_interval=2, margin=1.05, warmup_cycles=0, probe_steps=0)
     for _ in range(10):
         gate.record(cycle_ms=22.0, target_ms=6.0, out_tokens=4)
     assert gate.should_run(uid=1) is True
@@ -85,7 +88,7 @@ def test_dflash_adaptive_gate_stays_enabled_when_faster_than_baseline():
 def test_dflash_adaptive_gate_resets_on_new_request():
     from freetoken.speculative.utils import AdaptiveGate
 
-    gate = AdaptiveGate(min_cycles=4, eval_interval=4, margin=1.05, warmup_cycles=0)
+    gate = AdaptiveGate(min_cycles=4, eval_interval=4, margin=1.05, warmup_cycles=0, probe_steps=0)
     assert gate.should_run(uid=1)
     for _ in range(4):
         gate.record(cycle_ms=29.6, target_ms=6.0, out_tokens=4)

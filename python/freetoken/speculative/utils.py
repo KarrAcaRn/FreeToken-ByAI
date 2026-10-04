@@ -281,11 +281,16 @@ def clone_hidden_outputs(hidden_states: list[torch.Tensor]) -> list[torch.Tensor
 
 class AdaptiveGate:
     """Per-request measured fallback: disables spec decode when it measures
-    slower than the plain target-forward baseline proxy by more than ``margin``.
+    slower than plain decode by more than ``margin``.
 
-    The proxy is the cycle's own target (verify) forward times ``baseline_scale``: the
-    caller passes the calibrated plain-decode / verify-forward ratio for that verify
-    length, so a verify of n tokens is not mistaken for one plain decode step."""
+    The baseline is measured: ``probe_steps`` decode steps of a request, after its first
+    ``probe_after``, run without speculation (``probing``) and the caller times them
+    (``record_plain_events``); the recent ones form the baseline. Requests probe until
+    there are a few samples, then every ``probe_every``-th one. (The very first steps
+    after a prefill are skipped: an offloaded MoE runs them on a prefill-churned cache.) Until there is one, the cycle's own verify forward
+    times ``baseline_scale`` (the caller's calibrated plain/verify ratio) stands in. A
+    measured step matters where the calibration cannot see the cost: an offloaded MoE
+    verify streams the experts of every drafted token."""
 
     def __init__(
         self,
@@ -297,6 +302,9 @@ class AdaptiveGate:
         window: int = 32,
         auto_disable_after: int = 3,
         reprobe_every: int = 8,
+        probe_steps: int = 2,
+        probe_after: int = 4,
+        probe_every: int = 4,
     ):
         self.min_cycles = min_cycles
         self.eval_interval = eval_interval
@@ -315,6 +323,22 @@ class AdaptiveGate:
         self._req_cycle_ms = 0.0
         self._req_tokens = 0
         self._req_target_ms: list[float] = []
+        self.probe_steps = probe_steps
+        self.probe_after = probe_after
+        self._req_steps = 0
+        self.probe_every = probe_every
+        self._requests = 0
+        self._probe_request = True
+        self.probing = False
+        self._plain_ms: deque[float] = deque(maxlen=16)
+        self._pending_plain: list = []
+
+    def finish_request(self) -> None:
+        """The current request finished: settle its verdict and start the next one fresh
+        (request ids can repeat, e.g. across offline generate() calls)."""
+        if self._uid is not None:
+            self._finish_request()
+            self.reset(None)
 
     def should_run(self, uid: int) -> bool:
         if self._uid is None:
@@ -322,14 +346,32 @@ class AdaptiveGate:
         elif uid != self._uid:
             self._finish_request()
             self.reset(uid)
-        return self.enabled
+        step = self._req_steps
+        self._req_steps += 1
+        self.probing = (
+            self.enabled and self._probe_request
+            and self.probe_after <= step < self.probe_after + self.probe_steps
+        )
+        return self.enabled and not self.probing
+
+    def record_plain_events(self, start, end) -> None:
+        """Time one plain decode step taken while ``probing`` (CUDA events, read lazily)."""
+        self._pending_plain.append((start, end))
+
+    def _baseline_ms(self, proxy_ms: list[float]) -> float:
+        if self._pending_plain:
+            self._pending_plain[-1][1].synchronize()
+            self._plain_ms.extend(s.elapsed_time(e) for s, e in self._pending_plain)
+            self._pending_plain = []
+        samples = self._plain_ms or proxy_ms
+        return statistics.median_low(sorted(samples))
 
     def _finish_request(self) -> None:
         self._drain_pending()
         if len(self._req_target_ms) < self.min_cycles:
             return
         overall = self._req_cycle_ms / max(self._req_tokens, 1)
-        baseline = statistics.median_low(sorted(self._req_target_ms))
+        baseline = self._baseline_ms(self._req_target_ms)
         if overall > baseline * self.margin:
             self._consecutive_disables += 1
         else:
@@ -344,6 +386,11 @@ class AdaptiveGate:
         self._req_cycle_ms = 0.0
         self._req_tokens = 0
         self._req_target_ms = []
+        self._req_steps = 0
+        self._requests += 1
+        self._probe_request = (
+            len(self._plain_ms) + len(self._pending_plain) < 4 or self._requests % self.probe_every == 0
+        )
         self.enabled = True
         if self._consecutive_disables >= self.auto_disable_after:
             self._off_requests += 1
@@ -394,11 +441,10 @@ class AdaptiveGate:
             return
         self._evaluated = True
         per_token = sorted(c / t for c, _, t in self._window if t > 0)
-        baseline = sorted(t for _, t, _ in self._window)
-        if not per_token or not baseline:
+        if not per_token:
             return
         cycle_ms_per_token = statistics.median_low(per_token)
-        baseline_ms = statistics.median_low(baseline)
+        baseline_ms = self._baseline_ms([t for _, t, _ in self._window])
         if cycle_ms_per_token > baseline_ms * self.margin:
             self.enabled = False
             from freetoken.utils import init_logger

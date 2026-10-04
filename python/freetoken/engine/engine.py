@@ -97,10 +97,9 @@ def _dflash_graph_runner_dflash_kwargs(
 def _dflash_target_verify_graph_enabled_for_config(config: EngineConfig) -> bool:
     model_config = getattr(config, "model_config", None)
     moe_strategy = getattr(config, "moe_strategy", "auto")
-    return (
-        not is_offload_moe_strategy(moe_strategy)
-        and (not getattr(model_config, "is_moe", False) or moe_strategy == "fused")
-    )
+    # offload: the slot cache sizes its per-step buffers by experts, not tokens, so a verify
+    # block resolves its experts like a decode batch; cpu/hybrid decode on the CPU executor
+    return not getattr(model_config, "is_moe", False) or moe_strategy in ("fused", "offload")
 
 
 @dataclass
@@ -1263,6 +1262,11 @@ class Engine:
             if self._dflash_gate is None or self._dflash_gate.should_run(batch.reqs[0].uid):
                 return self._forward_batch_dflash(batch, args)
 
+        # the gate's baseline: a plain decode step it asked for, timed
+        probe = self._dflash_gate is not None and self._dflash_gate.probing and batch.is_decode
+        if probe:
+            probe_start = torch.cuda.Event(enable_timing=True)
+            probe_start.record(self.stream)
         use_graph = self.graph_runner.can_use_cuda_graph(batch)
         # DFlash runs one request at a time; every target forward of it (prefill chunks, and
         # the plain decode steps when the gate is off) feeds the draft's context
@@ -1293,6 +1297,11 @@ class Engine:
 
         batch_logits = logits[: batch.size]
         next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
+        if probe:
+            probe_end = torch.cuda.Event(enable_timing=True)
+            probe_end.record(self.stream)
+            self._dflash_gate.record_plain_events(probe_start, probe_end)
+            self._dflash_gate.probing = False
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)
@@ -1416,6 +1425,12 @@ class Engine:
             num_tokens=output_tokens.numel(),
             force_drain=True,
         )
+
+    def dflash_finish_request(self, req: Req) -> None:
+        """A request finished: its draft context may carry over, and the gate settles it."""
+        self.dflash_worker.finish_request(req.input_ids)
+        if self._dflash_gate is not None:
+            self._dflash_gate.finish_request()
 
     def _dflash_slot_tensor(self, slot: int) -> torch.Tensor:
         t = self._dflash_slot_buf
