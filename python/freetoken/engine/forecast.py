@@ -576,11 +576,11 @@ def _tips_dflash_block(inp: ForecastInputs) -> Iterable[Change]:
 
     block = config.speculative_dflash_block_size or DFlashConfig.from_hf_config(
         cached_load_hf_config(config.speculative_draft_model_path)).block_size
-    per_state = states // (block * config.max_running_req)
+    per_position = states // block  # the verify buffers scale with the block
     for n, cost in ((6, 1), (4, 2)):
         if 1 < n < block:
             yield Change(f"--speculative-dflash-block-size {n}", "dflash_block", cost,
-                         _set(speculative_dflash_block_size=n), weight_delta=(n - block) * per_state,
+                         _set(speculative_dflash_block_size=n), weight_delta=(n - block) * per_position,
                          note="fewer drafted tokens per verify, lower speedup")
 
 
@@ -831,9 +831,13 @@ def _speculative_bytes(config) -> tuple[int, int]:
     if _dflash_target_verify_graph_enabled_for_config(config):
         block = config.speculative_dflash_block_size or draft_cfg.block_size
         if block > 1:
-            # per verified token: the GDN conv state and recurrence inputs the commit replays,
-            # for the largest verify graph (every running request at the full block)
-            states = config.max_running_req * block * dflash_verify_bytes_per_token(config)
+            # per verified token: its logits, the hidden states the draft reads and the GDN
+            # conv state and recurrence inputs the commit replays, for the largest verify graph
+            from freetoken.engine.engine import _dflash_verify_batch_limit
+
+            row = (dflash_verify_bytes_per_token(config) + config.model_config.vocab_size * 4
+                   + draft_cfg.num_target_layers * config.model_config.hidden_size * 2)
+            states = _dflash_verify_batch_limit(config) * block * row
     return draft, states
 
 
