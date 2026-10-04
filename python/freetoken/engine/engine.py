@@ -886,6 +886,17 @@ class Engine:
             self._warmup_prefill()
         if config.vram_reserve_mb:
             self._fit_prefill_peak(config.vram_reserve_mb << 20)
+        self._fill_moe_slot_cache()
+
+    def _fill_moe_slot_cache(self) -> None:
+        """Start the expert slot cache full instead of empty (graph capture and the
+        prefill warmup reset it): a prefill then streams only the non-resident experts."""
+        if self.moe_offload_cache is None:
+            return
+        filled = self.moe_offload_cache.fill_slots()
+        if filled:
+            total = self.moe_offload_cache.num_layers * self.moe_offload_cache.num_experts
+            logger.info_rank0(f"MoE slot cache preloaded with {filled} of {total} experts")
 
     def _make_distributed_store(self, config: EngineConfig) -> torch.distributed.Store:
         """The rendezvous store's C10d server ignores the host it's given and always listens
@@ -1508,6 +1519,7 @@ class Engine:
                 max_running_req=_dflash_verify_batch_limit(config),
             ),
         )
+        self._fill_moe_slot_cache()
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
@@ -2419,7 +2431,7 @@ _DENSE_MOE_SETTINGS = {
     "moe_cpu_threads": 0,
     "moe_hybrid_max_fetch": -1,
     "moe_prefill_overlap": True,
-    "moe_prefill_hit_d2d": False,
+    "moe_prefill_hit_d2d": True,
     "expert_load": "auto",
 }
 
