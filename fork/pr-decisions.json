@@ -1707,14 +1707,15 @@
       "dbd8d0e",
       "57efe5c",
       "bbccd0c",
-      "a876274"
+      "a876274",
+      "592a471"
     ],
     "gpu_untested": false,
     "authors": [
       "Lancer <maruixiang6688@gmail.com>"
     ],
     "summary": "Speculative decoding with DFlash drafts; with our DFlash2 support and fixes the 27B decodes 2.5-4.4x faster (and batches concurrent requests), the offloaded Qwen3.6 MoE ~2x on code and math",
-    "fixup": "DFlash2 drafts and an fp8 draft option; triton verify graphs; the per-request KV page leak fixed and the integrity check back on; one target forward per cycle instead of two; prefix reuse with a windowed draft context; the GDN commit replays the recurrence (no per-token verify states); verify graphs for an offloaded MoE; a gate that measures plain decode; logprobs on multi-token steps; ft info prices draft, context and verify buffers; batched speculation for several decoding requests"
+    "fixup": "DFlash2 drafts and an fp8 draft option; triton and FlashInfer verify graphs (fp8 and bf16 KV); the per-request KV page leak fixed and the integrity check back on; one target forward per cycle instead of two; prefix reuse with a windowed draft context; the GDN commit replays the recurrence (no per-token verify states); verify graphs for an offloaded MoE; a gate that measures plain decode; logprobs on multi-token steps; ft info prices draft, context and verify buffers; batched speculation for several decoding requests"
   },
   "254": {
     "number": 254,
