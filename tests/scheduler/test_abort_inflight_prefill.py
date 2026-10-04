@@ -61,6 +61,7 @@ def _setup():
         eos_token_ids=set(),
         toolcall_anchor_id=None,
         config=SimpleNamespace(page_size=1),
+        engine=SimpleNamespace(dflash_worker=None),
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
         send_result=sent.extend,
         _kv_usage_pages=cm.page_usage,
@@ -72,6 +73,8 @@ def _setup():
         _last_data=None,
     )
     stub._free_req_resources = lambda req: Scheduler._free_req_resources(stub, req)
+    stub._drain_single_token = lambda *a: Scheduler._drain_single_token(stub, *a)
+    stub._drain_multi_token = lambda *a: Scheduler._drain_multi_token(stub, *a)
     return pool, cm, tm, dm, pm, sent, stub
 
 
@@ -94,10 +97,12 @@ def _launch_req(pool, cm, tm, prompt, *, cls=Req, track_seqlen=None):
 
 
 def _as_last_data(batch):
+    from freetoken.engine.engine import ForwardOutput
+
     return (
         SimpleNamespace(batch=batch),
-        (None, torch.tensor([42], dtype=torch.int32),
-         SimpleNamespace(synchronize=lambda: None)),
+        ForwardOutput(None, torch.tensor([42], dtype=torch.int32),
+                      SimpleNamespace(synchronize=lambda: None)),
     )
 
 

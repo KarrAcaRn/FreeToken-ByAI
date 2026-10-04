@@ -113,11 +113,11 @@ def _dflash_graph_runner_dflash_kwargs(
 
 def _dflash_target_verify_graph_enabled_for_config(config: EngineConfig) -> bool:
     model_config = getattr(config, "model_config", None)
-    moe_backend = getattr(config, "moe_backend", "auto")
+    moe_strategy = getattr(config, "moe_strategy", "auto")
     return (
         _DFLASH_TARGET_VERIFY_GRAPH
-        and not is_offload_moe_backend(moe_backend)
-        and (not getattr(model_config, "is_moe", False) or moe_backend == "fused")
+        and not is_offload_moe_strategy(moe_strategy)
+        and (not getattr(model_config, "is_moe", False) or moe_strategy == "fused")
     )
 
 

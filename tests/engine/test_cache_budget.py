@@ -247,7 +247,7 @@ def test_adjust_config_forces_dflash_single_request_runtime():
         moe_cache_auto = False
         moe_cache_size = 0
         moe_cache_rate = None
-        moe_backend = "auto"
+        moe_strategy = "auto"
         max_running_req = 4
         cuda_graph_max_bs = 4
         cuda_graph_bs = [1, 2, 4]

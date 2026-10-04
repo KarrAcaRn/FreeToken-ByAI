@@ -55,7 +55,7 @@ def test_dflash_target_verify_graph_disabled_for_offload_moe_backend(monkeypatch
     import freetoken.engine.engine as engine
 
     monkeypatch.setattr(engine, "_DFLASH_TARGET_VERIFY_GRAPH", True)
-    config = SimpleNamespace(moe_backend="offload")
+    config = SimpleNamespace(moe_strategy="offload")
 
     assert _dflash_target_verify_graph_enabled_for_config(config) is False
 
@@ -65,7 +65,7 @@ def test_dflash_target_verify_graph_allows_explicit_fused_moe_with_capture_safe_
 
     monkeypatch.setattr(engine, "_DFLASH_TARGET_VERIFY_GRAPH", True)
     config = SimpleNamespace(
-        moe_backend="fused",
+        moe_strategy="fused",
         model_config=SimpleNamespace(is_moe=True),
     )
 
