@@ -128,7 +128,7 @@ request, and whether we offered it back upstream.
 | [#338](https://github.com/FlashML-org/FreeToken/pull/338) | perf(ple): fuse the n-gram row-id hash into one Triton kernel | Adopted | Fuses Flash-Next's PLE n-gram row-id hash (39 launches per layer) into one capture-safe Triton kernel |  |
 | [#337](https://github.com/FlashML-org/FreeToken/pull/337) | feat(moe): NVMe disk tier for MoE expert banks | Adopted + fixup | Adds opt-in NVMe disk tier (--moe-disk-tier) so expert banks larger than host RAM can run | Windows mmap flags, empty-bank pin_prefix, and a stale family test fixed ([4d2fa42](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4d2fa42)) |
 | [#305](https://github.com/FlashML-org/FreeToken/pull/305) | feat(server): add --api-key bearer authentication | Adopted | Adds --api-key bearer authentication (tests, docs, CORS preflight, shell client sends the key) |  |
-| [#258](https://github.com/FlashML-org/FreeToken/pull/258) | feat(dflash): support dflash | Adopted + fixup | Speculative decoding with DFlash drafts; with our DFlash2 support and fixes the 27B decodes 3-4.6x faster on an RTX 4090 | DFlash2 drafts and an fp8 draft option; triton verify graphs; GDN verify-state memory and the draft reserved before the KV pool; the per-request KV page leak fixed and the integrity check back on; ft info prices draft and verify states; one target forward per cycle instead of two ([99a2093](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/99a2093), [d16bc96](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/d16bc96), [9a3714d](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/9a3714d), [4c03cb7](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4c03cb7), [7c19c2e](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/7c19c2e), [4b05651](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4b05651), [e214732](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/e214732), [4364741](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4364741), [b498b6d](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/b498b6d)) |
+| [#258](https://github.com/FlashML-org/FreeToken/pull/258) | feat(dflash): support dflash | Adopted + fixup | Speculative decoding with DFlash drafts; with our DFlash2 support and fixes the 27B decodes 2.5-4.4x faster and the offloaded Qwen3.6 MoE ~2x on code and math | DFlash2 drafts and an fp8 draft option; triton verify graphs; the per-request KV page leak fixed and the integrity check back on; one target forward per cycle instead of two; prefix reuse with a windowed draft context; the GDN commit replays the recurrence (no per-token verify states); verify graphs for an offloaded MoE; a gate that measures plain decode; logprobs on multi-token steps; ft info prices draft, context and verify buffers ([99a2093](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/99a2093), [d16bc96](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/d16bc96), [9a3714d](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/9a3714d), [4c03cb7](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4c03cb7), [7c19c2e](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/7c19c2e), [4b05651](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4b05651), [e214732](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/e214732), [4364741](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4364741), [b498b6d](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/b498b6d), [f86a265](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/f86a265), [c1acd76](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/c1acd76), [8a31b70](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/8a31b70), [1459aa8](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/1459aa8), [aff024c](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/aff024c), [0a56c36](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/0a56c36), [ff4d485](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/ff4d485), [24d779b](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/24d779b)) |
 | [#254](https://github.com/FlashML-org/FreeToken/pull/254) | feat(bench): pass ft serve options through '--' in bench_decode_moe | Adopted | bench_decode_moe now passes ft serve options through '--' instead of mirroring server flags |  |
 | [#231](https://github.com/FlashML-org/FreeToken/pull/231) | feat(moe): --moe-collect-stats, so expert-cache behaviour is measurable | Adopted | Adds --moe-collect-stats: logs expert-cache miss rate, worst layers and a routing oracle bound |  |
 | [#230](https://github.com/FlashML-org/FreeToken/pull/230) | feat(server): add TLS certificate support | Adopted | Adds --ssl-certfile/--ssl-keyfile for serving over HTTPS via uvicorn |  |
@@ -249,13 +249,19 @@ request, and whether we offered it back upstream.
   [#258](https://github.com/FlashML-org/FreeToken/pull/258)): `--speculative-algorithm dflash
   --speculative-draft-model-path z-lab/Qwen3.8-27B-DFlash2 --speculative-draft-quant fp8`. We
   added DFlash2 drafts (the only ones published for Qwen3.8-27B), an fp8 draft, verify graphs
-  for the triton backend, the memory handling a hybrid GDN target needs, fixed a KV page
-  leak per request, and cut the loop to one target forward per cycle (the PR ran two).
-  Qwen3.8-27B decodes 190–207 tok/s instead of 45 on code and math, 125 on prose (4.3 tokens
-  per target forward); the context drops from 100k to 27k tokens (36k with
-  `--speculative-dflash-block-size 6`), which `ft info` shows. For comparison, the
-  checkpoint's own MTP head (simulated offline on the same prompts) accepts about as many
-  tokens per cycle as DFlash2 at MTP=7 (4.7 vs 4.3–4.5), but drafting 7 tokens takes 7
+  for the triton backend, fixed a KV page leak per request, and cut the loop to one target
+  forward per cycle (the PR ran two). Prefix reuse stays on: the draft's context is a
+  windowed, preallocated cache that carries over to the next turn of the same chat, so a
+  follow-up turn starts in 0.1–0.2 s instead of re-prefilling the conversation. On the hybrid
+  GDN target the commit replays the recurrence over the accepted tokens instead of storing a
+  147 MiB state per drafted token, which keeps 64k tokens of context (32k with the radix
+  cache's GDN snapshots) instead of 27k. Qwen3.8-27B decodes 190–200 tok/s instead of 45 on
+  code and math and ~115 on prose; on Qwen3.6-35B-A3B with expert offload, code and math go
+  from 140–150 to 290–300 tok/s. The adaptive gate times real plain decode steps and turns
+  speculation off for a request where the draft loses (German prose on the MoE);
+  `--disable-speculative-adaptive` keeps it on. Logprobs are reported per emitted token. For
+  comparison, the 27B's own MTP head (simulated offline on the same prompts) accepts about as
+  many tokens per cycle as DFlash2 at MTP=7 (4.7 vs 4.3–4.5), but drafting 7 tokens takes 7
   sequential steps (13 ms) instead of one 7 ms pass: ~150 instead of ~200 tok/s on code.
 - **Fixes found while reviewing, offered back upstream:**
   - dense Gemma-4 GGUF checkpoints load end to end (on top of
@@ -268,9 +274,8 @@ request, and whether we offered it back upstream.
 
 ### Planned next
 
-- **DFlash beyond one request:** speculation runs at batch size 1 and without prefix reuse
-  (the PR forces the naive cache); the adaptive gate also compares against the verify forward
-  instead of a plain decode step.
+- **DFlash beyond one request:** speculation still runs one request at a time (the engine
+  caps `max_running_req` at 1 with a draft); concurrent requests queue.
 - **Time-to-first-token floor on MoE offload:** Qwen3.6-35B-A3B pays ~0.8 s before the first
   token on every request, independent of prompt length; expert misses, kernel warmup and PCIe
   streaming are already ruled out.
