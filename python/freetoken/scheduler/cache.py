@@ -374,7 +374,9 @@ class CacheManager:
             # remain as reuse points).
             insert_len = align_down(req.cached_len, self.page_size)
             keep_live = False
-            if insert_len == req.cached_len and insert_len > 0:
+            # DFlash verify pages held past cached_len belong to the request alone
+            self._free(self._ahead_tail(req))
+            if insert_len == req.cached_len and insert_len > 0 and not req.linear_state_ahead:
                 prefix_len, mamba_exist = self.prefix_cache.insert(
                     req.input_ids[:insert_len], page_indices[:insert_len], req.linear_slot_idx)
                 self.unlock(old_handle)
@@ -502,6 +504,12 @@ class CacheManager:
         full-pool page bases derived via ``[::page_size]`` are identical to the unpadded slice."""
         end = div_ceil(max(req.cached_len, req.paged_len), self.page_size) * self.page_size
         return self.page_table[req.table_idx, start:end]
+
+    def _ahead_tail(self, req: Req) -> torch.Tensor:
+        """The pages a DFlash request allocated past page_ceil(cached_len) for its verify blocks."""
+        start = div_ceil(req.cached_len, self.page_size) * self.page_size
+        end = div_ceil(max(req.cached_len, req.paged_len), self.page_size) * self.page_size
+        return self.page_table[req.table_idx, start:max(start, end)]
 
     def _free_req_slots(self, req: Req, keep_live: bool = False) -> None:
         """Return a finished request's GDN pool slots: both ping-pong slots, plus the live slot

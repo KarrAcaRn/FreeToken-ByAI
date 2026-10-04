@@ -67,6 +67,8 @@ class Req:
     # DFlash: KV pages are allocated through this length, ahead of device_len, for the verify
     # block (allocate_paged(ahead=...)); 0 when nothing allocates ahead.
     paged_len: int = 0
+    # DFlash: a request that finished inside a verify block has its GDN state past cached_len
+    linear_state_ahead: bool = False
 
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
