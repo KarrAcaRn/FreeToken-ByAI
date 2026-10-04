@@ -151,3 +151,38 @@ def test_prefill_hit_d2d_noop_without_spare_slots():
     torch.cuda.synchronize()
     for view, (name, per_layer) in zip(views, sources.items()):
         assert torch.equal(view.cpu(), per_layer[0]), name
+
+
+@CUDA
+def test_fill_slots_preloads_the_hit_region():
+    cache, sources = _make_cache()
+    cache.cpu_layer_ids = frozenset({1})  # decodes on the CPU: gets no slots
+    assert cache.fill_slots() == CACHE_SIZE - 2 * E
+    assert (cache.slot_for_id[1] == -1).all()
+    assert (cache.id_of_slot[: 2 * E] == -1).all()  # the double buffer's slots stay free
+    counts = {}
+    for slot in range(2 * E, CACHE_SIZE):
+        flat = int(cache.id_of_slot[slot].item())
+        layer_id, expert_id = divmod(flat, E)
+        counts[layer_id] = counts.get(layer_id, 0) + 1
+        assert int(cache.slot_for_id[layer_id, expert_id].item()) == slot
+        for name, per_layer in sources.items():
+            assert torch.equal(cache.bank_caches[name][slot].cpu(), per_layer[layer_id][expert_id])
+    assert counts == {0: 4, 2: 4}
+
+
+@CUDA
+@JIT
+@BATCH_API
+def test_prefill_after_fill_slots_serves_the_hits():
+    cache, sources = _make_cache()
+    filled = cache.fill_slots()
+    cache.begin_prefill()
+    for layer_id in range(NUM_LAYERS):
+        cache.prefetch_prefill_layer(layer_id)
+        views = cache.wait_prefill_layer(layer_id)
+        torch.cuda.synchronize()
+        for view, (name, per_layer) in zip(views, sources.items()):
+            assert torch.equal(view.cpu(), per_layer[layer_id]), (layer_id, name)
+        cache.release_prefill_layer(layer_id)
+    assert cache.prefill_hit_rows == filled

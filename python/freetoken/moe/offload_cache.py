@@ -703,7 +703,7 @@ class OffloadMoeCache:
     def _hit_d2d_usable(self) -> bool:
         """Whether the hit-D2D split can serve this prefill; logs the first fallback.
 
-        The flag is an auto-fallback optional: any unusable condition must degrade
+        On by default with an auto-fallback: any unusable condition must degrade
         to the legacy full-layer copy AND say so once in the server log, so a
         configuration that silently runs the legacy path is visible.
         """
@@ -726,7 +726,7 @@ class OffloadMoeCache:
             return True
         if not self._hit_d2d_fallback_logged:
             logger.warning(
-                f"MoE prefill hit-D2D requested but unavailable ({reason}); "
+                f"MoE prefill hit-D2D unavailable ({reason}); "
                 "falling back to full-layer copies"
             )
             self._hit_d2d_fallback_logged = True
@@ -900,6 +900,40 @@ class OffloadMoeCache:
         self.stat_active_layer.zero_()
         self.stat_fetched_layer.zero_()
         self.stat_steps_layer.zero_()
+
+    def fill_slots(self) -> int:
+        """Load experts into the free slots of a just-reset cache; returns how many.
+
+        The slot cache otherwise fills only on decode misses, so after startup it is nearly
+        empty and every prefill streams whole layers over PCIe: hit-D2D finds no resident
+        experts to gather. Spread the free slots evenly over the GPU-decoded layers (which
+        experts is arbitrary: decode's LRU adapts them to the routing). The prefill double
+        buffer's slots (< 2 * num_experts) stay free."""
+        if not self.banks or self.decode_target == "cpu":
+            return 0
+        layers = [
+            l for l in range(self.num_layers)
+            if not self.is_cpu_layer(l) and not self.is_unpinned_layer(l)
+        ]
+        start = 2 * self.num_experts if self.prefill_overlap else 0
+        free = self.cache_size - start
+        if not layers or free <= 0:
+            return 0
+        assert not bool((self.id_of_slot[start:] >= 0).any()), "fill_slots needs a reset cache"
+        per_layer, extra = divmod(free, len(layers))
+        slot = start
+        for i, layer_id in enumerate(layers):
+            n = min(self.num_experts, per_layer + (1 if i < extra else 0))
+            if n == 0:
+                break
+            experts = torch.arange(n, dtype=torch.int32, device=self.device)
+            self.slot_for_id[layer_id, :n] = experts + slot
+            self.id_of_slot[slot : slot + n] = experts + layer_id * self.num_experts
+            for sources, cache in self.banks:
+                cache[slot : slot + n].copy_(sources[layer_id][:n], non_blocking=True)
+            slot += n
+        torch.cuda.synchronize(self.device)
+        return slot - start
 
     def record_decode_stats(self, layer_id: int) -> None:
         """No-op: ``ensure_experts`` accumulates into ``lru_stats`` inside its own launch.

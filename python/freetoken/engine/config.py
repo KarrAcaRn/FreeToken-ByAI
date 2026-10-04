@@ -47,8 +47,10 @@ class EngineConfig:
     moe_prefill_overlap: bool = True
     # Prefill hit/miss split: serve cache-resident experts D2D during prefill
     # prefetch instead of re-streaming the full layer over PCIe. Needs CUDA >= 12.8
-    # (cudaMemcpyBatchAsync); no-op unless moe_cache_size > 2 * num_experts.
-    moe_prefill_hit_d2d: bool = False
+    # (cudaMemcpyBatchAsync), else falls back to full-layer copies; no-op unless
+    # moe_cache_size > 2 * num_experts. The slot cache starts preloaded, so without it
+    # every prefill streams all experts (~0.8 s on Qwen3.6-35B-A3B over PCIe 4.0).
+    moe_prefill_hit_d2d: bool = True
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
     # CPU MoE backend (--moe-strategy cpu): number of CPU worker threads computing
     # the decode experts. 0 = auto (physical cores). Ignored by other backends.
