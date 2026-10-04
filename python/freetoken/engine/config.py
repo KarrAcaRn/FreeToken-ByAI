@@ -97,7 +97,9 @@ class EngineConfig:
     # DFlash speculative decoding
     speculative_algorithm: str | None = None  # "dflash" or None
     speculative_draft_model_path: str | None = None
-    speculative_dflash_block_size: int = 2
+    speculative_dflash_block_size: int | None = None  # None: the draft checkpoint's block_size
+    # --speculative-draft-quant: "fp8" stores the draft's projections as e4m3 + per-row scales
+    speculative_draft_quant: str = "none"
 
     def __post_init__(self):
         if self.moe_backend is None:

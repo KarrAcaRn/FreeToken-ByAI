@@ -763,7 +763,15 @@ def parse_args(
         "--speculative-dflash-block-size",
         type=int,
         default=ServerArgs.speculative_dflash_block_size,
-        help="Block size for DFlash (default 2).",
+        help="Block size for DFlash: the base token plus block_size - 1 drafted tokens per "
+             "verification (default: the draft checkpoint's block_size).",
+    )
+    parser.add_argument(
+        "--speculative-draft-quant",
+        choices=["none", "fp8"],
+        default=ServerArgs.speculative_draft_quant,
+        help="Store the draft's projections as fp8 (e4m3, one scale per output row): half the "
+             "VRAM of a bf16 draft. Verification stays exact; only the acceptance rate can move.",
     )
 
     parser.add_argument(

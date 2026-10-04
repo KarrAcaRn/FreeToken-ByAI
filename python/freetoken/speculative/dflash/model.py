@@ -208,6 +208,102 @@ class _DFlashAttention(BaseOP):
         return self.o_proj.forward(out)
 
 
+class _Fp8RowLinear(BaseOP):
+    """W8A16 replacement for a draft ``LinearReplicated``: e4m3 weight with one fp32 scale per
+    output row (``--speculative-draft-quant fp8``). Halves the draft's VRAM and read traffic;
+    the target verifies every token, so this can only move the acceptance rate."""
+
+    def __init__(self, weight: torch.Tensor):
+        w = weight.float()
+        scale = w.abs().amax(dim=1).clamp(min=1e-12) / torch.finfo(torch.float8_e4m3fn).max
+        self.weight = (w / scale[:, None]).to(torch.float8_e4m3fn)
+        self.weight_scale = scale.contiguous()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from freetoken.kernel.triton.fp8_pertensor_linear import fp8_pertensor_linear
+
+        return fp8_pertensor_linear(x, self.weight, self.weight_scale)
+
+
+def _grouped_dynamic_convolve(
+    hidden: torch.Tensor, dynamic: torch.Tensor, base: torch.Tensor, group_size: int
+) -> torch.Tensor:
+    """Causal conv over the block positions: ``hidden`` [T, H], ``dynamic`` [T, K, groups]
+    (per-position, per-group taps), ``base`` [K, H] (static per-channel taps)."""
+    length, hidden_size = hidden.shape
+    groups = hidden_size // group_size
+    blocks = hidden.view(length, groups, group_size)
+    dynamic = dynamic.reshape(length, base.shape[0], groups, 1)
+    output = torch.zeros_like(blocks)
+    for offset in range(base.shape[0]):
+        values = blocks if offset == 0 else F.pad(blocks[:-offset], (0, 0, 0, 0, offset, 0))
+        output = output + base[offset].view(1, groups, group_size).to(hidden.dtype) * values
+        output = torch.addcmul(output, dynamic[:, offset], values)
+    return output.view_as(hidden)
+
+
+class _GroupedDynamicCausalConv(BaseOP):
+    """DFlash2's two-tap dynamic convolution: ``prepare`` convolves the normed input and returns
+    the taps for ``finish``, which convolves the sublayer output."""
+
+    def __init__(self, hidden_size: int, kernel_size: int, group_size: int):
+        self.kernel_size = kernel_size
+        self.group_size = group_size
+        self.groups = hidden_size // group_size
+        self.base_kernel = torch.empty(2, kernel_size, hidden_size, dtype=torch.bfloat16)
+        self.kernel_projection = LinearReplicated(hidden_size, 2 * kernel_size * self.groups, has_bias=False)
+        self.kernel_projection.weight = self.kernel_projection.weight.to(torch.bfloat16)
+
+    def prepare(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        dynamic = self.kernel_projection.forward(hidden).view(-1, 2, self.kernel_size, self.groups)
+        out = _grouped_dynamic_convolve(hidden, dynamic[:, 0], self.base_kernel[0], self.group_size)
+        return out, dynamic[:, 1]
+
+    def finish(self, hidden: torch.Tensor, dynamic: torch.Tensor) -> torch.Tensor:
+        return _grouped_dynamic_convolve(hidden, dynamic, self.base_kernel[1], self.group_size)
+
+
+class _CandidateSelector(BaseOP):
+    """DFlash2's path selector: each draft position keeps its top-k tokens; a low-rank
+    predecessor x successor score, conditioned on the draft hidden state, picks one coherent
+    path through them, starting from the verified anchor token."""
+
+    def __init__(self, config: DFlashConfig):
+        self.top_k = int(config.selector_top_k)
+        rank = int(config.selector_rank)
+        self.predecessor_codebook = torch.empty(config.vocab_size, rank, dtype=torch.bfloat16)
+        self.successor_codebook = torch.empty(config.vocab_size, rank, dtype=torch.bfloat16)
+        self.hidden_projection = LinearReplicated(config.hidden_size, rank, has_bias=False)
+        self.hidden_projection.weight = self.hidden_projection.weight.to(torch.bfloat16)
+
+    def select(
+        self,
+        hidden: torch.Tensor,             # [P, hidden] draft hidden states of the candidate positions
+        logits: torch.Tensor,             # [P, vocab]
+        anchor_id: torch.Tensor,          # [1] the verified token before the block
+        temperature: torch.Tensor | None,  # scalar tensor; None = greedy
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """(path [P], draft distribution [P, vocab] over the chosen candidates or None when greedy)."""
+        unary, candidates = torch.topk(logits, self.top_k, dim=-1, sorted=False)
+        hidden = self.hidden_projection.forward(hidden)
+        successors = F.embedding(candidates, self.successor_codebook)  # [P, k, rank]
+        predecessor = anchor_id[:1].to(candidates.dtype)
+        path, q_rows = [], []
+        for position in range(hidden.shape[0]):
+            pred = F.embedding(predecessor, self.predecessor_codebook)[0] * hidden[position]
+            scores = unary[position] + successors[position] @ pred.to(successors.dtype)
+            if temperature is None:
+                index = torch.argmax(scores, dim=-1, keepdim=True)
+            else:
+                q = torch.softmax(scores.float() / temperature, dim=-1)
+                index = torch.multinomial(q, 1)
+                q_rows.append(torch.zeros(logits.shape[-1], dtype=q.dtype, device=q.device).scatter_(
+                    0, candidates[position], q))
+            predecessor = candidates[position].gather(0, index)
+            path.append(predecessor)
+        return torch.cat(path), (torch.stack(q_rows) if q_rows else None)
+
+
 class _DFlashMLP(BaseOP):
     """Standard SwiGLU MLP for draft model."""
 
@@ -243,6 +339,13 @@ class _DFlashDecoderLayer(BaseOP):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.input_layernorm.weight = self.input_layernorm.weight.to(torch.bfloat16)
         self.post_attention_layernorm.weight = self.post_attention_layernorm.weight.to(torch.bfloat16)
+        self.attention_conv: _GroupedDynamicCausalConv | None = None
+        self.mlp_conv: _GroupedDynamicCausalConv | None = None
+        if config.is_dflash2:
+            self.attention_conv = _GroupedDynamicCausalConv(
+                config.hidden_size, config.conv_kernel_size, config.conv_group_size)
+            self.mlp_conv = _GroupedDynamicCausalConv(
+                config.hidden_size, config.conv_kernel_size, config.conv_group_size)
 
     def to(self, device):
         """Move all weights and buffers to device."""
@@ -264,15 +367,23 @@ class _DFlashDecoderLayer(BaseOP):
         # Pre-norm cross-attention
         residual = hidden_states
         hidden_states = self.input_layernorm.forward(hidden_states)
+        if self.attention_conv is not None:
+            hidden_states, taps = self.attention_conv.prepare(hidden_states)
         hidden_states = self.self_attn.forward(
             hidden_states, context, positions, context_kv=context_kv, attn_mask=attn_mask
         )
+        if self.attention_conv is not None:
+            hidden_states = self.attention_conv.finish(hidden_states, taps)
         hidden_states = residual + hidden_states
 
         # Pre-norm MLP
         residual = hidden_states
         hidden_states = self.post_attention_layernorm.forward(hidden_states)
+        if self.mlp_conv is not None:
+            hidden_states, taps = self.mlp_conv.prepare(hidden_states)
         hidden_states = self.mlp.forward(hidden_states)
+        if self.mlp_conv is not None:
+            hidden_states = self.mlp_conv.finish(hidden_states, taps)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -300,6 +411,23 @@ class DFlashDraftModel(BaseOP):
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.norm.weight = self.norm.weight.to(dtype)
+        self.candidate_selector = _CandidateSelector(config) if config.is_dflash2 else None
+
+    def quantize_fp8(self, device: torch.device) -> None:
+        """Swap every large projection for an ``_Fp8RowLinear`` built on ``device``, one weight at a time."""
+        def swap(owner: BaseOP, name: str) -> None:
+            linear = getattr(owner, name)
+            setattr(owner, name, _Fp8RowLinear(linear.weight.to(device)))
+
+        swap(self, "fc")
+        for layer in self.layers.op_list:
+            for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                swap(layer.self_attn, name)
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                swap(layer.mlp, name)
+            for conv in (layer.attention_conv, layer.mlp_conv):
+                if conv is not None:
+                    swap(conv, "kernel_projection")
 
     def to(self, device):
         """Move all weights and buffers (including rotary cos_sin_cache) to device."""

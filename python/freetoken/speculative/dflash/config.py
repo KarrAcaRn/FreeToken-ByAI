@@ -38,6 +38,16 @@ class DFlashConfig:
     input_embedding_scale: float = 1.0
     output_multiplier: float = 1.0
     final_logit_softcapping: float | None = None
+    # DFlash2: two-tap dynamic convolutions around each layer's attention and MLP, and a
+    # candidate selector that traces one path through the top-k tokens of every position.
+    conv_kernel_size: int | None = None
+    conv_group_size: int | None = None
+    selector_rank: int | None = None
+    selector_top_k: int | None = None
+
+    @property
+    def is_dflash2(self) -> bool:
+        return self.selector_rank is not None
 
     @property
     def num_target_layers(self) -> int:
@@ -84,4 +94,8 @@ class DFlashConfig:
                 "final_logit_softcapping",
                 cfg.get("final_logit_softcapping", None),
             ),
+            conv_kernel_size=dflash_cfg.get("conv_kernel_size"),
+            conv_group_size=dflash_cfg.get("conv_group_size"),
+            selector_rank=dflash_cfg.get("selector_rank"),
+            selector_top_k=dflash_cfg.get("selector_top_k"),
         )

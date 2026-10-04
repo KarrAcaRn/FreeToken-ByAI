@@ -39,6 +39,7 @@ class DFlashWorker:
         engine: Engine,
         device: torch.device,
         block_size: int | None = None,
+        draft_quant: str = "none",
     ):
         from freetoken.utils import cached_load_hf_config
 
@@ -56,10 +57,14 @@ class DFlashWorker:
 
         # Create and load draft model
         self.draft_model = DFlashDraftModel(self.config)
+        # fp8: read to host and quantize one weight at a time, so the bf16 copy never sits in VRAM
+        load_device = torch.device("cpu") if draft_quant == "fp8" else device
         state_dict = {}
-        for name, t in iter_dflash_weights(draft_model_path, device):
+        for name, t in iter_dflash_weights(draft_model_path, load_device):
             state_dict[name] = t
         self.draft_model.load_state_dict(state_dict)
+        if draft_quant == "fp8":
+            self.draft_model.quantize_fp8(device)
         self.draft_model.to(device)
 
         # Borrow target model's embedding and LM head
@@ -314,6 +319,14 @@ class DFlashWorker:
         if bs == 1:
             return base_token_id[:1]
         logits = self.draft_logits(draft_hidden[1:])  # [bs - 1, vocab]
+        selector = self.draft_model.candidate_selector
+        if selector is not None:
+            temperature = None
+            if sampling_args is not None and sampling_args.temperatures is not None:
+                temperature = sampling_args.temperatures[:1]
+            candidate_tokens, self.last_draft_probs = selector.select(
+                draft_hidden[1:], logits, base_token_id, temperature)
+            return torch.cat([base_token_id[:1].to(candidate_tokens.dtype), candidate_tokens])
         if sampling_args is not None and sampling_args.temperatures is not None:
             # Non-greedy: sample candidates (upstream DFlash samples drafts too) and
             # stash the filtered draft distribution for rejection-sampling verify.

@@ -646,6 +646,23 @@ class Engine:
                 )
             # before the residency snapshot, so streamed blocks are not charged as resident weights
             self.model.place_encoder_weights(config.mm.encoder_weights)
+        # The draft loads with the weights, before the residency snapshot, so the KV budget sees it.
+        self.dflash_worker = None
+        if config.speculative_algorithm == "dflash" and config.speculative_draft_model_path:
+            from freetoken.speculative.dflash.worker import DFlashWorker
+            self.dflash_worker = DFlashWorker(
+                draft_model_path=config.speculative_draft_model_path,
+                target_model=self.model,
+                engine=self,
+                device=self.device,
+                block_size=config.speculative_dflash_block_size,
+                draft_quant=config.speculative_draft_quant,
+            )
+            logger.info_rank0(
+                f"DFlash enabled: block_size={self.dflash_worker.block_size}, "
+                f"target_layers={sorted(self.dflash_worker.target_layer_ids)}"
+            )
+
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
         # Pool-budget baseline for the desktop cache sliders: free VRAM after the weights are
@@ -740,8 +757,7 @@ class Engine:
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
 
-        # DFlash speculative decoding
-        self.dflash_worker = None
+        # DFlash speculative decoding (the worker itself is built with the weights above)
         self.dflash_metrics = DFlashMetrics()
         self._dflash_gate = (
             AdaptiveGate(
@@ -753,20 +769,6 @@ class Engine:
             if _DFLASH_ADAPTIVE
             else None
         )
-        if config.speculative_algorithm == "dflash" and config.speculative_draft_model_path:
-            from freetoken.speculative.dflash.worker import DFlashWorker
-            self.dflash_worker = DFlashWorker(
-                draft_model_path=config.speculative_draft_model_path,
-                target_model=self.model,
-                engine=self,
-                device=self.device,
-                block_size=config.speculative_dflash_block_size,
-            )
-            logger.info_rank0(
-                f"DFlash enabled: block_size={self.dflash_worker.block_size}, "
-                f"target_layers={sorted(self.dflash_worker.target_layer_ids)}"
-            )
-
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
 
