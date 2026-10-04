@@ -61,6 +61,7 @@ def _setup():
         eos_token_ids=set(),
         toolcall_anchor_id=None,
         config=SimpleNamespace(page_size=1),
+        engine=SimpleNamespace(dflash_worker=None),
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
         send_result=sent.extend,
         _kv_usage_pages=cm.page_usage,
@@ -73,6 +74,8 @@ def _setup():
         _prefill_start={},
     )
     stub._free_req_resources = lambda req: Scheduler._free_req_resources(stub, req)
+    stub._drain_single_token = lambda *a: Scheduler._drain_single_token(stub, *a)
+    stub._drain_multi_token = lambda *a: Scheduler._drain_multi_token(stub, *a)
     return pool, cm, tm, dm, pm, sent, stub
 
 
@@ -106,6 +109,8 @@ def _as_last_data(batch):
         chosen_logprobs_cpu=None,
         top_ids_cpu=None,
         top_logprobs_cpu=None,
+        num_tokens=1,
+        force_drain=False,
     )
     return (SimpleNamespace(batch=batch), outputs)
 

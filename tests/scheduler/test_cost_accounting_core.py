@@ -141,6 +141,7 @@ def test_freeing_a_request_that_never_sampled_closes_its_prefill_span():
     scheduler._prefill_start = {7: 100.0, 9: 200.0}
     scheduler.cache_manager = SimpleNamespace(cache_req=lambda req, finished: None)
     scheduler.table_manager = SimpleNamespace(free=lambda table_idx: None)
+    scheduler.engine = SimpleNamespace(dflash_worker=None)
 
     Scheduler._free_req_resources(scheduler, SimpleNamespace(uid=7, table_idx=3))
 

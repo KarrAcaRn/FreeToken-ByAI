@@ -85,6 +85,8 @@ class TritonAttentionBackend(BaseAttnBackend):
         self.kvcache = get_global_ctx().kv_cache
         self.device = self.kvcache.device
         self.capture: TritonCaptureData | None = None
+        # DFlash target-verify graphs: per verify len, the fixed-address extend metadata
+        self.dflash_verify_capture: dict[int, TritonMetadata] = {}
         self.capture_bs: List[int] = []
         self.max_graph_bs = 0
         self.max_kv_splits = 8
@@ -377,3 +379,51 @@ class TritonAttentionBackend(BaseAttnBackend):
         assert isinstance(metadata, TritonMetadata)
         assert self.capture is not None and bs in self.capture_bs
         self._point_to_capture(metadata, bs)
+
+    # ----------------------------------------------------------------------------------
+    # DFlash target verify: one request, ``verify_len`` query tokens on top of its cached
+    # prefix -- the extend path with a fixed q length, so it can be graph-captured per len.
+    # ----------------------------------------------------------------------------------
+
+    def reset_capture(self) -> None:
+        super().reset_capture()
+        self.dflash_verify_capture = {}
+
+    def init_dflash_target_verify_capture_graph(self, max_seq_len: int, verify_lens: List[int]) -> None:
+        assert not self.dflash_verify_capture, "DFlash target verify capture already initialized."
+        dev = self.device
+        # one page-table row is shared: the graphs never run at once
+        indices = torch.zeros(max_seq_len, dtype=torch.int32, device=dev)
+        swa_indices = (
+            torch.zeros(max_seq_len, dtype=torch.int32, device=dev) if self._swa_capture_enabled() else None
+        )
+        for verify_len in sorted(verify_lens):
+            self.dflash_verify_capture[verify_len] = TritonMetadata(
+                cu_seqlens_q_gpu=torch.tensor([0, verify_len], dtype=torch.int32, device=dev),
+                indptr=torch.tensor([0, verify_len], dtype=torch.int32, device=dev),
+                indices=indices,
+                q_to_req=torch.zeros(verify_len, dtype=torch.int32, device=dev),
+                q_positions=torch.arange(verify_len, dtype=torch.int32, device=dev),
+                is_decode=False,
+                prefix_lens=torch.zeros(1, dtype=torch.int32, device=dev),
+                max_q_len=verify_len,
+                swa_indices=swa_indices,
+            )
+
+    def prepare_for_dflash_target_verify_capture(self, batch: Batch, verify_len: int) -> None:
+        assert batch.size == 1 and verify_len in self.dflash_verify_capture
+        batch.attn_metadata = self.dflash_verify_capture[verify_len]
+
+    def prepare_for_dflash_target_verify_replay(self, batch: Batch, verify_len: int) -> None:
+        metadata = batch.attn_metadata
+        assert isinstance(metadata, TritonMetadata) and not metadata.is_decode
+        assert metadata.max_q_len == verify_len, (metadata.max_q_len, verify_len)
+        capture = self.dflash_verify_capture[verify_len]
+        total = metadata.indices.numel()
+        capture.indptr.copy_(metadata.indptr)
+        capture.indices[:total].copy_(metadata.indices)
+        capture.prefix_lens.copy_(metadata.prefix_lens)
+        capture.q_positions.copy_(metadata.q_positions[:verify_len])
+        if capture.swa_indices is not None and metadata.swa_indices is not None:
+            capture.swa_indices[:total].copy_(metadata.swa_indices)
+        batch.attn_metadata = capture
