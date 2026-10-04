@@ -576,7 +576,7 @@ def _tips_dflash_block(inp: ForecastInputs) -> Iterable[Change]:
 
     block = config.speculative_dflash_block_size or DFlashConfig.from_hf_config(
         cached_load_hf_config(config.speculative_draft_model_path)).block_size
-    per_state = states // (block + 1)
+    per_state = states // block
     for n, cost in ((6, 1), (4, 2)):
         if 1 < n < block:
             yield Change(f"--speculative-dflash-block-size {n}", "dflash_block", cost,
@@ -809,24 +809,29 @@ def _safetensors_header(file: str) -> dict[str, tuple[str, list[int]]]:
 
 
 def _speculative_bytes(config) -> tuple[int, int]:
-    """(draft weights, verify GDN states) a ``--speculative-algorithm dflash`` start keeps on the GPU."""
+    """(draft weights + context, verify GDN commit buffers) a ``--speculative-algorithm dflash``
+    start keeps on the GPU."""
     if getattr(config, "speculative_algorithm", None) != "dflash" or not config.speculative_draft_model_path:
         return 0, 0
     from freetoken.engine.engine import _dflash_target_verify_graph_enabled_for_config
-    from freetoken.kvcache.linear_state_pool import state_pool_bytes
+    from freetoken.kvcache.linear_state_pool import dflash_verify_bytes_per_token
     from freetoken.speculative.dflash.config import DFlashConfig
+    from freetoken.speculative.dflash.context import DraftContextCache
     from freetoken.utils import cached_load_hf_config
 
     draft_cfg = DFlashConfig.from_hf_config(cached_load_hf_config(config.speculative_draft_model_path))
     draft = draft_resident_bytes(config.speculative_draft_model_path, config.speculative_draft_quant)
     # the draft attention's fp32 rope table, built for its full position range
     draft += draft_cfg.max_position_embeddings * draft_cfg.head_dim * 4
+    # the draft's context K/V (bf16), preallocated per layer window
+    draft += DraftContextCache.nbytes_for(
+        draft_cfg.layer_windows, config.max_seq_len, draft_cfg.num_key_value_heads, draft_cfg.head_dim, 2)
     states = 0
     if _dflash_target_verify_graph_enabled_for_config(config):
         block = config.speculative_dflash_block_size or draft_cfg.block_size
         if block > 1:
-            # one state per verified token for the verify graphs, plus the pre-verify copy
-            states = (block + 1) * state_pool_bytes(config, num_slots=1)
+            # per verified token: the GDN conv state and recurrence inputs the commit replays
+            states = block * dflash_verify_bytes_per_token(config)
     return draft, states
 
 
