@@ -160,6 +160,29 @@ def test_tight_headroom_suggests_a_lower_memory_ratio(tiny_qwen3):
     assert not any(t.flags[0] == "--memory-ratio 0.99" for t in r.tips)
 
 
+
+def test_embed_device_cpu_moves_the_table_to_host(tiny_qwen3):
+    table = 256 * 128 * 2  # untied bf16 embed_tokens; lm_head stays
+    base = _analyze(tiny_qwen3, "--memory-ratio", "0.8", free_gib=32)
+    assert base.forecast.verdict == "fits"
+    assert base.inputs.weights.embed_host_movable == table
+    tip = next(t for t in base.tips if t.flags == ["--embed-device cpu"])
+    assert tip.forecast.weights_bytes == base.forecast.weights_bytes - table
+    assert tip.forecast.kv_tokens > base.forecast.kv_tokens
+    r = _analyze(tiny_qwen3, "--memory-ratio", "0.8", "--embed-device", "cpu", free_gib=32)
+    assert r.inputs.weights.host["embeddings"] == table
+    assert r.forecast.weights_bytes == tip.forecast.weights_bytes
+    assert not any(t.flags == ["--embed-device cpu"] for t in r.tips)
+
+
+def test_tied_embedding_is_not_offered(tmp_path):
+    tied = write_checkpoint(tmp_path / "tied", {**TINY_QWEN3, "tie_word_embeddings": True},
+                            {k: v for k, v in tiny_qwen3_tensors().items() if k != "lm_head.weight"})
+    r = _analyze(tied, "--memory-ratio", "0.8", free_gib=32)
+    assert r.inputs.weights.embed_host_movable == 0
+    assert not any(t.flags == ["--embed-device cpu"] for t in r.tips)
+
+
 # ---------------------------------------------------------------------------------------------
 # Preflight (Engine.__init__ calls run_preflight between the meta build and the weight load)
 # ---------------------------------------------------------------------------------------------

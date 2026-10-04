@@ -159,6 +159,8 @@ class WeightReport:
     notes: list[str] = field(default_factory=list)
     # device bytes of the vision tower under --mm-encoder-weights host (None: nothing streams)
     vision_gpu_if_host: int | None = None
+    # input-embedding bytes --embed-device cpu moves to pinned host RAM (0: tied or none)
+    embed_host_movable: int = 0
 
     @property
     def gpu_total(self) -> int:
@@ -175,6 +177,12 @@ def resident_weights(model, config) -> WeightReport:
     for name, t in state.items():
         gpu[tensor_category(name)] += _nbytes(t)
     report = WeightReport(gpu=dict(gpu))
+    from freetoken.layers.embedding import host_movable_embeddings
+
+    report.embed_host_movable = sum(_nbytes(op.weight) for _, op in host_movable_embeddings(model))
+    if report.embed_host_movable and getattr(config, "embed_device", "gpu") == "cpu":
+        report.gpu["embeddings"] -= report.embed_host_movable
+        report.host["embeddings"] = report.embed_host_movable
     rope = _eager_tensor_bytes(model)
     if rope:
         report.gpu["rope"] = rope
@@ -548,6 +556,13 @@ def _tips_encoders(inp: ForecastInputs) -> Iterable[Change]:
                          note="vision blocks stream from pinned host RAM")
 
 
+def _tips_embed_device(inp: ForecastInputs) -> Iterable[Change]:
+    movable = inp.weights.embed_host_movable
+    if movable and getattr(inp.config, "embed_device", "gpu") == "gpu":
+        yield Change("--embed-device cpu", "embed_device", 1, _set(embed_device="cpu"), weight_delta=-movable,
+                     note="input-embedding rows read from pinned host RAM; decode speed unchanged")
+
+
 def _tips_moe(inp: ForecastInputs) -> Iterable[Change]:
     config = inp.config
     mc = config.model_config
@@ -618,7 +633,7 @@ def _tips_kv_dtype(inp: ForecastInputs) -> Iterable[Change]:
 # reaches the forecast through the pool family's kv_cost, so nothing else changes.
 TIP_CANDIDATES: list[Callable[[ForecastInputs], Iterable[Change]]] = [
     _tips_concurrency, _tips_memory_ratio, _tips_prefill, _tips_cache_type, _tips_encoders, _tips_moe,
-    _tips_kv_dtype,
+    _tips_kv_dtype, _tips_embed_device,
 ]
 
 
