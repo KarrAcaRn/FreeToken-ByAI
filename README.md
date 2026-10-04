@@ -239,6 +239,12 @@ request, and whether we offered it back upstream.
   fits, without loading a weight; `ft serve` refuses a configuration that cannot fit before
   spending minutes on the load. Within ~2% of the real allocation. Opened upstream as
   [#595](https://github.com/FlashML-org/FreeToken/pull/595).
+- **CPU-resident input embeddings** (`--embed-device cpu`): the input-embedding table moves to
+  pinned host RAM and the GPU reads the looked-up rows over PCIe, inside the CUDA graphs. On
+  Qwen3.8-27B with the fp8 KV cache the context grows from 25k to 100k tokens, with the same
+  prefill and decode speed and token-identical greedy output. `ft info` prices the flag and
+  suggests it. The idea comes from [#456](https://github.com/FlashML-org/FreeToken/pull/456); to
+  be offered upstream as its own pull request.
 - **Fixes found while reviewing, offered back upstream:**
   - dense Gemma-4 GGUF checkpoints load end to end (on top of
     [#359](https://github.com/FlashML-org/FreeToken/pull/359));
@@ -256,8 +262,6 @@ request, and whether we offered it back upstream.
 - **Time-to-first-token floor on MoE offload:** Qwen3.6-35B-A3B pays ~0.8 s before the first
   token on every request, independent of prompt length; expert misses, kernel warmup and PCIe
   streaming are already ruled out.
-- **CPU-resident input embeddings** (`--embed-device cpu`): about 76k more tokens of context for
-  the 27B on a 24 GB card.
 - **Hot-expert pinning**, our own version of
   [#563](https://github.com/FlashML-org/FreeToken/pull/563).
 - **A residency-aware offload-vs-hybrid pick:** `ft bench bw` recommends `hybrid` for
