@@ -3,10 +3,13 @@ slot per request.
 
 Preallocated when the draft loads (before the KV pool is sized), so the draft never grows
 VRAM behind the budget's back. A sliding-window layer only ever reads its last ``window``
-positions, so it keeps a ``2 * window`` buffer per slot and compacts the tail to the front
-when it fills; a full-attention layer keeps every position up to ``max_len``. Positions are
-absolute (RoPE is applied when an entry is stored) and contiguous: an append that does not
-continue the slot's stored run restarts its context at the append's start.
+positions, so it keeps ``window + COMPACT_SLACK`` rows per slot and compacts the tail to the
+front when they fill. A full-attention layer keeps its last ``FULL_ATTENTION_CAP`` positions:
+preallocating a model's whole position range (262k on Qwen3.6) per request would take the
+VRAM an offloaded MoE needs for its experts, and the target verifies every drafted token, so
+the cap can only move the acceptance rate of very long conversations. Positions are absolute
+(RoPE is applied when an entry is stored) and contiguous: an append that does not continue
+the slot's stored run restarts its context at the append's start.
 """
 
 from __future__ import annotations
@@ -14,8 +17,21 @@ from __future__ import annotations
 import torch
 
 
+COMPACT_SLACK = 1024
+FULL_ATTENTION_CAP = 16384
+
+
+def _windows(windows: list[int | None], max_len: int) -> list[int | None]:
+    """The rows each layer reads: its window, a full layer's cap, or None (all of max_len)."""
+    out = []
+    for w in windows:
+        w = FULL_ATTENTION_CAP if w is None else min(w, FULL_ATTENTION_CAP)
+        out.append(w if w < max_len else None)
+    return out
+
+
 def _caps(windows: list[int | None], max_len: int) -> list[int]:
-    return [min(2 * w, max_len) if w is not None and w < max_len else max_len for w in windows]
+    return [min(w + COMPACT_SLACK, max_len) if w is not None else max_len for w in _windows(windows, max_len)]
 
 
 class DraftContextCache:
@@ -29,7 +45,7 @@ class DraftContextCache:
         device: torch.device,
         num_slots: int = 1,
     ):
-        self.windows = [w if w is not None and w < max_len else None for w in windows]
+        self.windows = _windows(windows, max_len)
         self.max_len = max_len
         self.num_slots = num_slots
         shape = (num_kv_heads, head_dim)

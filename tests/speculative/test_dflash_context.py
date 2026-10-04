@@ -24,14 +24,17 @@ def _positions(cache, i, slot=0):
     return k.flatten().int().tolist()
 
 
-def test_sliding_layer_keeps_its_window_across_compactions():
+def test_sliding_layer_keeps_its_window_across_compactions(monkeypatch):
+    import freetoken.speculative.dflash.context as ctx
+
+    monkeypatch.setattr(ctx, "COMPACT_SLACK", 4)
     cache = _cache([4, None])
     for start in range(0, 20, 3):
         cache.append(0, _kv(start, 3, 2), start, 3)
     assert cache.end_pos[0] == 21
     assert _positions(cache, 0) == [17, 18, 19, 20]
     assert _positions(cache, 1) == list(range(21))
-    assert cache.k[0].shape[1] == 8  # 2 x window, preallocated
+    assert cache.k[0].shape[1] == 8  # window + slack, preallocated
 
 
 def test_long_append_keeps_only_the_window_tail():
@@ -131,3 +134,15 @@ def test_concurrent_requests_hold_their_own_slots_and_continue_the_matching_one(
     # a new conversation takes the remaining parked slot
     worker.begin_request(4, torch.arange(90, 99), 0)
     assert worker.slot_of(4) == slot_b and worker.context.end_pos[slot_b] == 0
+
+
+def test_a_full_attention_layer_keeps_the_last_cap_positions(monkeypatch):
+    import freetoken.speculative.dflash.context as ctx
+
+    monkeypatch.setattr(ctx, "FULL_ATTENTION_CAP", 6)
+    monkeypatch.setattr(ctx, "COMPACT_SLACK", 2)
+    cache = _cache([None], max_len=64)
+    assert cache.k[0].shape[1] == 8
+    for start in range(0, 20, 5):
+        cache.append(0, _kv(start, 5, 1), start, 5)
+    assert _positions(cache, 0) == [14, 15, 16, 17, 18, 19]
