@@ -10,6 +10,7 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | bench_serving: --api-key and the zero-hit cache report | b36d49d, 23d92b6 (on top of #341) | Candidate, see below |
 | Pure ASGI middlewares, so #222's non-streaming abort works | f8de64f (on top of #222) | Candidate, see below |
 | MoE offload: preload the expert slot cache, prefill hit-D2D by default | 2012f9e (branch `fix/moe-ttft`, from main) | Candidate, ready as a branch; see below |
+| Profile-picked hybrid falls back to offload for large expert caches; CPU pool leaves the engine a core | 74e0ece (branch `fix/moe-hybrid-pick`, from main) | Candidate, ready as a branch; see below |
 
 ## Load dense Gemma-4 GGUFs end to end
 
@@ -97,3 +98,24 @@ fallback that gathers misses with the fused index-copy kernel would cover that.
 If upstream merges #601 first, its unified-memory inert-flag warning lists
 `--moe-prefill-hit-d2d` as set; with the new default it must name `--disable-moe-prefill-hit-d2d`
 instead (as next's 1b43e59 does).
+
+## Profile-picked hybrid only for small expert caches
+
+Branch `fix/moe-hybrid-pick` (from main, commit 74e0ece). `ft bench bw` rates the CPU MoE
+kernel 3.1x the PCIe gather for RedHatAI/Qwen3.6-35B-A3B-NVFP4 on an RTX 4090 with an 8-core
+host, so `auto` picked hybrid, which then decoded at 20 tok/s instead of offload's 140.
+
+- The auto-sized CPU pool pinned 7 workers plus the flag coordinator to the 8 cores, so the
+  engine's main thread waited for a time slice per MoE layer. Auto sizing now leaves it a core
+  (`auto_pool_cores`): 20 -> 103 tok/s.
+- Hybrid pays a GPU<->CPU round trip (~0.1 ms) per layer per decode step, and an LRU cache under
+  skewed routing misses far less than its size suggests. Decode tok/s offload vs hybrid by the
+  share of experts in the slot cache: 5% 50/61, 10% 59/64, 20% 75/64, 50% 113/87, 92% 140/103.
+  A profile-picked hybrid now decodes on offload when the cache holds >= 15% of the experts
+  (`_profile_hybrid_target`, after the cache is sized); explicit `--moe-strategy hybrid` is
+  unchanged. The threshold comes from this one box; a profile could carry it per machine later.
+
+Tested on plain main + branch: auto with the profile falls back to offload at 152 tok/s with
+greedy output identical to explicit offload; with a 10% cache it stays hybrid; tests/moe and
+tests/engine pass (new tests/engine/test_profile_hybrid_pick.py).
+

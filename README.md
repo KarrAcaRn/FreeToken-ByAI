@@ -278,6 +278,14 @@ request, and whether we offered it back upstream.
   ~170 ms instead of 790 ms, a 6k-token prompt prefills in 1.15 s instead of 1.6 s, with
   unchanged decode speed and output. `--disable-moe-prefill-hit-d2d` restores the old copy. On
   branch `fix/moe-ttft`, meant for an upstream pull request.
+- **Offload instead of a misleading hybrid pick:** `ft bench bw` recommended `hybrid` for
+  Qwen3.6-35B-A3B here, which then decoded at 20 tok/s instead of 140 with `offload`. Two
+  causes: hybrid's CPU workers took every core, so the engine thread waited for each layer
+  (fixed: 20 -> 103 tok/s), and hybrid pays a GPU-CPU round trip on every layer, which only
+  pays off when the GPU expert cache misses often. Measured, hybrid wins only when the cache
+  holds under ~15% of the experts (5%: 61 vs 50 tok/s; 20%: 64 vs 75; 92%: 103 vs 140), so a
+  profile-picked hybrid now falls back to offload above that. On branch `fix/moe-hybrid-pick`,
+  meant for an upstream pull request.
 - **Fixes found while reviewing, offered back upstream:**
   - dense Gemma-4 GGUF checkpoints load end to end (on top of
     [#359](https://github.com/FlashML-org/FreeToken/pull/359));
@@ -291,9 +299,6 @@ request, and whether we offered it back upstream.
 
 - **Hot-expert pinning**, our own version of
   [#563](https://github.com/FlashML-org/FreeToken/pull/563).
-- **A residency-aware offload-vs-hybrid pick:** `ft bench bw` recommends `hybrid` for
-  Qwen3.6-35B-A3B here, but it decodes 6.6x slower than `offload`, because the bench ignores how
-  many experts already sit on the GPU.
 - **Model support:** Qwen3.5/3.6-MoE GGUF
   ([#131](https://github.com/FlashML-org/FreeToken/pull/131)), Gemma-4 E2B/E4B
   ([#59](https://github.com/FlashML-org/FreeToken/pull/59)), more llm-compressor NVFP4 export
