@@ -12,7 +12,9 @@
     "gpu_untested": false,
     "authors": [
       "rb <986796+rbrisita@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Converting from an HF repo id failed; ids are now resolved before conversion",
+    "fixup": "Resolves inside convert_checkpoint, also fetches tokenizer/metadata files, with tests"
   },
   "591": {
     "number": 591,
@@ -27,7 +29,9 @@
     "gpu_untested": true,
     "authors": [
       "Eva (port) <eva@local>"
-    ]
+    ],
+    "summary": "Folds the shared-expert gate epilogue into hc_combine_norm (stacked on #590)",
+    "fixup": "Passes shared/gate explicitly and links each layer to its consumer norm"
   },
   "590": {
     "number": 590,
@@ -42,7 +46,9 @@
     "gpu_untested": true,
     "authors": [
       "Eva (port) <eva@local>"
-    ]
+    ],
+    "summary": "Fuses the hc combine with the next block's RMSNorm, one launch fewer per block",
+    "fixup": "Both kernels share one _gemma_rmsnorm helper so they match by construction; added tests"
   },
   "587": {
     "number": 587,
@@ -58,7 +64,9 @@
     "authors": [
       "Zhang Jason <ning.zhang2@amd.com>",
       "zhangnju <zhangnju@126.com>"
-    ]
+    ],
+    "summary": "Adds ROCm support for RDNA3/RDNA4 with torch 2.14/2.15 and ROCm 7.14/10",
+    "fixup": "CUDA pins untouched, C++20 only for ROCm torch>=2.14, functional memop check with fallback"
   },
   "585": {
     "number": 585,
@@ -73,7 +81,9 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "Runs a single-row bf16 projection as one GEMV, a decode bs=1 bandwidth win",
+    "fixup": "NVIDIA-only, >=512 out features, opt-out via linear.none=torch, covers the tied LM head"
   },
   "578": {
     "number": 578,
@@ -88,7 +98,8 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "NVFP4 MoE prefill experts dequantized by bit placement, ~6x faster GEMM with bit-identical output"
   },
   "575": {
     "number": 575,
@@ -103,7 +114,8 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "Builds the extensions and JIT kernels with MSVC on Windows; Linux device code unchanged"
   },
   "574": {
     "number": 574,
@@ -118,7 +130,8 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "Adds opt-in --vram-reserve-mb: measures the real prefill peak and shrinks the expert cache to keep VRAM free"
   },
   "572": {
     "number": 572,
@@ -133,7 +146,8 @@
     "gpu_untested": false,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "SSE keep-alive comments during long silent prefills, plus disconnect detection during the silence"
   },
   "577": {
     "number": 577,
@@ -148,7 +162,8 @@
     "gpu_untested": true,
     "authors": [
       "skavans <skavans@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Hybrid GDN prompts diverging before the last chunk re-prefilled from token 0; opt-in pinned bank keeps per-chunk checkpoints"
   },
   "505": {
     "number": 505,
@@ -162,7 +177,8 @@
     "gpu_untested": false,
     "authors": [
       "Ran Bao <worksev@gmail.com>"
-    ]
+    ],
+    "summary": "Already covered by #577, which contains this fix verbatim"
   },
   "334": {
     "number": 334,
@@ -177,7 +193,9 @@
     "gpu_untested": false,
     "authors": [
       "Léon Avic Simmons <Avicennasis@gmail.com>"
-    ]
+    ],
+    "summary": "Loader sized expert banks against host MemAvailable, so containers were OOM-killed; cgroup limits now honored",
+    "fixup": "~90-line version: clamps to the tightest cgroup v2/v1 limit and counts inactive_file as free"
   },
   "233": {
     "number": 233,
@@ -192,7 +210,9 @@
     "gpu_untested": true,
     "authors": [
       "kitty <2165990891@qq.com>"
-    ]
+    ],
+    "summary": "WSL refuses pinning well below the 40%-of-RAM guess, so loads died; the pin budget is now probed",
+    "fixup": "Probes up to the old estimate via the pinned extension, returns 0 when nothing pins, cached"
   },
   "144": {
     "number": 144,
@@ -207,7 +227,8 @@
     "gpu_untested": true,
     "authors": [
       "Ruslan Rakhimov <risonyo@gmail.com>"
-    ]
+    ],
+    "summary": "A refused pin left the CUDA error latched, breaking the next unrelated CUDA call; the error is now cleared before raising"
   },
   "56": {
     "number": 56,
@@ -222,7 +243,9 @@
     "gpu_untested": false,
     "authors": [
       "Glucksberg <markuscontasul@gmail.com>"
-    ]
+    ],
+    "summary": "Empty expert banks failed to allocate; now an empty bank gets one block, an empty tensor and device_ptr()=0",
+    "fixup": "Own fix at the mmap level (0-byte mmap fails before host_register); RLIMIT_MEMLOCK hint dropped"
   },
   "337": {
     "number": 337,
@@ -238,7 +261,9 @@
     "gpu_untested": true,
     "authors": [
       "pi agent <pi@local>"
-    ]
+    ],
+    "summary": "Adds opt-in NVMe disk tier (--moe-disk-tier) so expert banks larger than host RAM can run",
+    "fixup": "Windows mmap flags, empty-bank pin_prefix, and a stale family test fixed"
   },
   "563": {
     "number": 563,
@@ -252,7 +277,8 @@
     "gpu_untested": true,
     "authors": [
       "mmletgo <zhengrongh@126.com>"
-    ]
+    ],
+    "summary": "User's call: own project later (9.4k lines, not opt-in, conflicts with #337); ideally with GPU test setup"
   },
   "564": {
     "number": 564,
@@ -267,7 +293,8 @@
     "gpu_untested": false,
     "authors": [
       "Sanjay Sundaram <ssundaram@berkeley.edu>"
-    ]
+    ],
+    "summary": "--reasoning-parser auto no longer picks qwen3 for Instruct-2507 checkpoints (empty content)"
   },
   "562": {
     "number": 562,
@@ -283,7 +310,9 @@
     "gpu_untested": true,
     "authors": [
       "Cyber-Marty <15370813896@163.com>"
-    ]
+    ],
+    "summary": "--moe-cache-auto now charges the attention backend's workspace, avoiding startup OOM at tight --memory-ratio",
+    "fixup": "Runtime rebuild fit check (validate_rebuild) charges the workspace too"
   },
   "559": {
     "number": 559,
@@ -299,7 +328,9 @@
     "gpu_untested": false,
     "authors": [
       "taking-lying-flat <1615405@qq.com>"
-    ]
+    ],
+    "summary": "Radix keys were views into whole request buffers, keeping large buffers alive; keys are now cloned",
+    "fixup": "Adds the regression test across plain/SWA/hybrid caches"
   },
   "305": {
     "number": 305,
@@ -314,7 +345,8 @@
     "gpu_untested": false,
     "authors": [
       "Ben Wilson <soft@mainlight.com>"
-    ]
+    ],
+    "summary": "Adds --api-key bearer authentication (tests, docs, CORS preflight, shell client sends the key)"
   },
   "558": {
     "number": 558,
@@ -328,7 +360,8 @@
     "gpu_untested": false,
     "authors": [
       "santanu20 <santanu20@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Already covered by #305 (more complete --api-key)"
   },
   "565": {
     "number": 565,
@@ -343,7 +376,9 @@
     "gpu_untested": false,
     "authors": [
       "Léon Avic Simmons <Avicennasis@gmail.com>"
-    ]
+    ],
+    "summary": "PLE shard schema/geometry checks shared by both backends; pinned admission against host RAM with rollback",
+    "fixup": "Builds on #334's memory helper; leaves out nofollow discovery and digest re-validation"
   },
   "593": {
     "number": 593,
@@ -359,7 +394,9 @@
     "gpu_untested": false,
     "authors": [
       "Léon Avic Simmons <Avicennasis@gmail.com>"
-    ]
+    ],
+    "summary": "Converting into a directory that already holds an FTW overwrote shards under a stale index; now refused",
+    "fixup": "Check runs before resolving the source, so an HF repo is not downloaded first"
   },
   "592": {
     "number": 592,
@@ -374,7 +411,8 @@
     "gpu_untested": false,
     "authors": [
       "Léon Avic Simmons <Avicennasis@gmail.com>"
-    ]
+    ],
+    "summary": "Image fetch redirects now re-check --allowed-media-domains; 400 bodies no longer leak local paths or errno text"
   },
   "553": {
     "number": 553,
@@ -389,7 +427,8 @@
     "gpu_untested": false,
     "authors": [
       "mgeldi <muhammed_ali96@web.de>"
-    ]
+    ],
+    "summary": "Publishes cumulative prefill/decode timing on /v1/stats so pollers can compute tok/s"
   },
   "551": {
     "number": 551,
@@ -405,7 +444,9 @@
     "gpu_untested": false,
     "authors": [
       "John Li <jli@moresecure.ca>"
-    ]
+    ],
+    "summary": "Raises uv HTTP timeout and retries to fix installer timeouts on slow links",
+    "fixup": "Values are defaults, so a user-set UV_HTTP_TIMEOUT still wins"
   },
   "535": {
     "number": 535,
@@ -420,7 +461,8 @@
       "LZ-QWQ <lz1830837889@163.com>"
     ],
     "revisit_with": 217,
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs upstream's self-hosted ROCm runner and unadopted ROCm PRs; revisit with #217"
   },
   "531": {
     "number": 531,
@@ -436,7 +478,9 @@
     "gpu_untested": false,
     "authors": [
       "Oscar Rojas <116426609+oscar-investmatic@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "/v1/models advertised the model ceiling instead of the allocated KV pool; context_length now clamped",
+    "fixup": "Uses only the engine-reported page_size, with a test"
   },
   "527": {
     "number": 527,
@@ -451,7 +495,9 @@
     "gpu_untested": false,
     "authors": [
       "taking-lying-flat <1615405@qq.com>"
-    ]
+    ],
+    "summary": "API accepted presence/frequency penalties but ignored them; they are now applied",
+    "fixup": "Counts rebuilt each step from generated tokens (overlap-safe), [-2, 2] enforced with 400, tests"
   },
   "525": {
     "number": 525,
@@ -467,7 +513,8 @@
       "alvarorsouza-arch <alvaro.r.souza@gmail.com>"
     ],
     "revisit_with": 499,
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Stacked on #499"
   },
   "507": {
     "number": 507,
@@ -483,7 +530,9 @@
     "gpu_untested": true,
     "authors": [
       "Carlos Alvarado <carlos-alvarado@outlook.com>"
-    ]
+    ],
+    "summary": "Adds tensor parallelism for glm5_next (GLM-5.3-Flash); TP=1 paths unchanged",
+    "fixup": "TP test fixture given num_key_value_heads for transformers 5.16"
   },
   "504": {
     "number": 504,
@@ -499,7 +548,9 @@
     "gpu_untested": false,
     "authors": [
       "yajun <leamon@stu.xidian.edu.cn>"
-    ]
+    ],
+    "summary": "Adds opt-in per-request TTFT/prefill/decode metrics (--enable-metrics-report) on chat, messages and responses",
+    "fixup": "Abort test stub given the new _prefill_start map"
   },
   "354": {
     "number": 354,
@@ -519,7 +570,9 @@
       "ArqAlice <y.tomi0131@gmail.com>",
       "Matsumoto Takaya (松本 貴也) <matsumoto.t@zigexn.co.jp>",
       "Vincent Labreche <vincent.dev@gmail.com>"
-    ]
+    ],
+    "summary": "Adds fp8 e4m3 KV cache (--kv-cache-dtype fp8) with per-token/head scales; roughly doubles KV capacity on the 27B",
+    "fixup": "Test doubles for newer attributes, a one-ulp tolerance on sm_89, docs say MLA/DSA is covered"
   },
   "408": {
     "number": 408,
@@ -535,7 +588,9 @@
     "gpu_untested": false,
     "authors": [
       "ArqAlice <y.tomi0131@gmail.com>"
-    ]
+    ],
+    "summary": "Adds nvfp4 KV cache on top of #354: 3.46x the bf16 KV tokens, opt-in (~15% slower decode at 8k)",
+    "fixup": "kv_row_bytes sizes the packed row instead of raising 'unknown kv_quant'"
   },
   "309": {
     "number": 309,
@@ -550,7 +605,8 @@
       "Yuzuka Dev <onenew553@gmail.com>",
       "fangyuan-3149 <314945674@qq.com>"
     ],
-    "superseded_by": 354
+    "superseded_by": 354,
+    "summary": "Already covered by #354 + #408; this one crashed fp8 at graph capture and degraded q4_0"
   },
   "268": {
     "number": 268,
@@ -564,7 +620,8 @@
     "authors": [
       "fangyuan-3149 <314945674@qq.com>"
     ],
-    "superseded_by": 354
+    "superseded_by": 354,
+    "summary": "Already covered by #354 + #408 (earlier version of #309's sub-byte KV work)"
   },
   "126": {
     "number": 126,
@@ -577,7 +634,8 @@
     "gpu_untested": false,
     "authors": [
       "mkornreich <52514824+mkornreich@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Fixed fp8 scale 1.0 ignores checkpoint scales and yields NaN (garbage on Qwen3-0.6B); MHA + fi only, no tests"
   },
   "398": {
     "number": 398,
@@ -591,7 +649,8 @@
     "authors": [
       "Asmanov Lev <81736315+AsmanovLev@users.noreply.github.com>",
       "Lev Asmanov <asmanovlev@gmail.com>"
-    ]
+    ],
+    "summary": "ISO3/ISO4 KV produce garbage on Qwen3-0.6B, ~7x slower 8k decode, full attention only, ~1k lines of custom CUDA"
   },
   "498": {
     "number": 498,
@@ -604,7 +663,8 @@
     "gpu_untested": false,
     "authors": [
       "AlReis <258541404+alvarorsouza-arch@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Special-case loaders for one non-standard checkpoint dialect; conflicts with #594's PLE/dense rework"
   },
   "500": {
     "number": 500,
@@ -620,7 +680,9 @@
     "gpu_untested": false,
     "authors": [
       "chrisqian <chrisqian@example.com>"
-    ]
+    ],
+    "summary": "Prefill buffer invalidation is now a single launch without a hidden host sync",
+    "fixup": "Trimmed comments to the repo's style"
   },
   "594": {
     "number": 594,
@@ -636,7 +698,9 @@
     "gpu_untested": false,
     "authors": [
       "Eva (port) <eva@local>"
-    ]
+    ],
+    "summary": "Loads qwen4_exp ModelOpt QAD checkpoints: NVFP4-packed PLE tables and MXFP8 dense scales",
+    "fixup": "Scan checks row count against the n-gram config; cuda gather oob test indexes per row"
   },
   "495": {
     "number": 495,
@@ -651,7 +715,8 @@
     "gpu_untested": false,
     "authors": [
       "Cyber-Marty <15370813896@163.com>"
-    ]
+    ],
+    "summary": "ZMQ slow-joiner race could drop a broadcast and hang TP ranks; rank 0 now waits for subscribers"
   },
   "499": {
     "number": 499,
@@ -665,7 +730,8 @@
     "gpu_untested": true,
     "authors": [
       "alvarorsouza-arch <alvaro.r.souza@gmail.com>"
-    ]
+    ],
+    "summary": "fp8 parts already on main via #354; host-RAM KV tier serves only Flash-Next, untested, cannot run here"
   },
   "502": {
     "number": 502,
@@ -679,7 +745,8 @@
     "authors": [
       "Mukkesh Ganesh <mukmckenzie@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "DeepSeek-V4 too large for this machine; reworks shared mm code, needs careful review"
   },
   "494": {
     "number": 494,
@@ -694,7 +761,8 @@
     "gpu_untested": false,
     "authors": [
       "Poyo-Yon <Poyo-Yon@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Mixed-quant Gemma-4 GGUFs failed to load; odd tensors are dequantized/repacked and per-expert strides passed"
   },
   "493": {
     "number": 493,
@@ -710,7 +778,9 @@
     "gpu_untested": false,
     "authors": [
       "Poyo-Yon <Poyo-Yon@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Gemma-4 compressed-tensors checkpoints mixing nvfp4 and unquantized tensors failed to load",
+    "fixup": "Disk-tier family test excludes gemma4 from the static-spec check"
   },
   "488": {
     "number": 488,
@@ -726,7 +796,9 @@
     "gpu_untested": false,
     "authors": [
       "cue <gxf.alpha@gmail.com>"
-    ]
+    ],
+    "summary": "With SWA the radix cache dropped a shared prompt head's windowed KV, so fan-out re-prefilled it",
+    "fixup": "Stress test no longer hides the GPU from the whole pytest session"
   },
   "487": {
     "number": 487,
@@ -741,7 +813,9 @@
     "gpu_untested": false,
     "authors": [
       "Rafael Rincon <rafaeldrincon@gmail.com>"
-    ]
+    ],
+    "summary": "Qwen3.6+ templates raise on a later system message; system messages are now merged to the front",
+    "fixup": "Renders as sent and only retries with system messages hoisted on a TemplateError"
   },
   "484": {
     "number": 484,
@@ -756,7 +830,8 @@
     "gpu_untested": false,
     "authors": [
       "cue <gxf.alpha@gmail.com>"
-    ]
+    ],
+    "summary": "Adds opt-in --decode-interleave-every N so long chunked prefills no longer stall in-flight decodes"
   },
   "477": {
     "number": 477,
@@ -772,7 +847,9 @@
     "gpu_untested": false,
     "authors": [
       "Rafael Rincon <rafaeldrincon@gmail.com>"
-    ]
+    ],
+    "summary": "Adds POST /v1/tokenize for client-side token counting",
+    "fixup": "Messages path converted via chat_request_to_genspec so counts match usage; invalid body is 400"
   },
   "476": {
     "number": 476,
@@ -788,7 +865,9 @@
     "gpu_untested": false,
     "authors": [
       "Rafael Rincon <rafaeldrincon@gmail.com>"
-    ]
+    ],
+    "summary": "Adds --default-thinking-mode for a server-wide thinking default when clients send none",
+    "fixup": "Default applies last, so per-request reasoning_effort/thinking settings still win"
   },
   "475": {
     "number": 475,
@@ -803,7 +882,8 @@
     "gpu_untested": false,
     "authors": [
       "Rafael Rincon <rafaeldrincon@gmail.com>"
-    ]
+    ],
+    "summary": "Offering tools forced thinking on, overriding an explicit enable_thinking=false; now respected"
   },
   "468": {
     "number": 468,
@@ -816,7 +896,8 @@
     "gpu_untested": false,
     "authors": [
       "Sanjay Sundaram <ssundaram@berkeley.edu>"
-    ]
+    ],
+    "summary": "Refuted: fa backend works on sm_89 (RTX 4090); the gate would block a working backend on Ada"
   },
   "466": {
     "number": 466,
@@ -829,7 +910,8 @@
     "gpu_untested": true,
     "authors": [
       "Cyber-Marty <15370813896@163.com>"
-    ]
+    ],
+    "summary": "Masks a likely sender-side race instead of fixing it; partial frames still crash; Windows-only, not reproducible"
   },
   "464": {
     "number": 464,
@@ -845,7 +927,9 @@
     "gpu_untested": false,
     "authors": [
       "taking-lying-flat <1615405@qq.com>"
-    ]
+    ],
+    "summary": "Stop strings spanning multi-token characters were missed; scheduler now matches the detokenizer's text",
+    "fixup": "Adds five tests (four fail before)"
   },
   "461": {
     "number": 461,
@@ -861,7 +945,9 @@
     "gpu_untested": false,
     "authors": [
       "Shikha Kathrani <99456505+shikhakath@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "TP rendezvous store listened on all interfaces without auth; now bound to loopback, plus --dist-port",
+    "fixup": "Windows keeps the previous store with a warning"
   },
   "460": {
     "number": 460,
@@ -875,7 +961,8 @@
     "authors": [
       "ArqAlice <y.tomi0131@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "DeepSeek-V4.1 too large for this machine"
   },
   "459": {
     "number": 459,
@@ -891,7 +978,9 @@
     "gpu_untested": false,
     "authors": [
       "Léon Avic Simmons <Avicennasis@gmail.com>"
-    ]
+    ],
+    "summary": "FTW indexes are validated eagerly at open, raising FTWFormatError instead of failing deep in mmap/O_DIRECT",
+    "fixup": "Gaps inside shards accepted (ftw_hotfix.py leaves them); overlaps still rejected"
   },
   "456": {
     "number": 456,
@@ -904,7 +993,8 @@
     "gpu_untested": true,
     "authors": [
       "BenMohStem <BenMohStem@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Built on an old main, would revert much current code, adds debug prints and AI logs; CPU embedding planned as our own"
   },
   "451": {
     "number": 451,
@@ -917,7 +1007,8 @@
     "gpu_untested": true,
     "authors": [
       "kuangrenaigc-stack <286874960+kuangrenaigc-stack@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Documents a shared-bank experiment relying on an external shim not in the repo; FreeToken does not contain it"
   },
   "447": {
     "number": 447,
@@ -931,7 +1022,8 @@
     "authors": [
       "zhanglei <lei.zhang@long-horn.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs multi-GPU and Flash-Next weights, neither available here"
   },
   "440": {
     "number": 440,
@@ -946,7 +1038,8 @@
     "gpu_untested": false,
     "authors": [
       "gberasmus87 <gberasmus87@gmail.com>"
-    ]
+    ],
+    "summary": "gemma4, qwen3_5_moe and muse_glimmer o_proj now row-parallel; replicated o_proj was wrong under TP>1"
   },
   "439": {
     "number": 439,
@@ -961,7 +1054,8 @@
     "gpu_untested": true,
     "authors": [
       "gberasmus87 <gberasmus87@gmail.com>"
-    ]
+    ],
+    "summary": "Prefill chunk cap was a construction-time snapshot, so cache rebuilds never refreshed it; now re-read from the pool"
   },
   "435": {
     "number": 435,
@@ -977,7 +1071,9 @@
     "gpu_untested": false,
     "authors": [
       "Retloldin <retloldin@icloud.com>"
-    ]
+    ],
+    "summary": "Resolves JSON Schema $ref, type unions and anyOf/oneOf when typing tool-call arguments",
+    "fixup": "Keeps the string default for untyped tool params; only unions and unresolved refs parse loosely"
   },
   "430": {
     "number": 430,
@@ -993,7 +1089,9 @@
     "gpu_untested": true,
     "authors": [
       "gberasmus87 <gberasmus87@gmail.com>"
-    ]
+    ],
+    "summary": "glm4_moe expert reader only knew modelopt names, so compressed-tensors NVFP4 banks loaded scales without weights",
+    "fixup": "Adds dialect tests and moves glm4_moe out of the static-spec test"
   },
   "429": {
     "number": 429,
@@ -1008,7 +1106,8 @@
     "gpu_untested": true,
     "authors": [
       "gberasmus87 <gberasmus87@gmail.com>"
-    ]
+    ],
+    "summary": "qwen4_exp o_proj is now row-parallel; replicated o_proj would skip the all-reduce under TP>1"
   },
   "414": {
     "number": 414,
@@ -1023,7 +1122,8 @@
     "gpu_untested": false,
     "authors": [
       "tspeaks <speaks_tyler@yahoo.com>"
-    ]
+    ],
+    "summary": "Batch-memcpy probe raced its zero-fill against the copy, silently disabling --moe-prefill-hit-d2d; now stream-ordered"
   },
   "413": {
     "number": 413,
@@ -1037,7 +1137,8 @@
     "authors": [
       "Stephen J. Thompson <stephen@digitalgraveyard.info>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs reimplementation on the QuantConfig layers (#418/#438, conflicts in all files); needs a real export to test"
   },
   "412": {
     "number": 412,
@@ -1052,7 +1153,8 @@
     "gpu_untested": false,
     "authors": [
       "Earl Co <info@earlco.in>"
-    ]
+    ],
+    "summary": "ft bench bw -o now prints the FREETOKEN_BENCHBW_PATH export needed for serving to read the custom profile"
   },
   "406": {
     "number": 406,
@@ -1066,7 +1168,8 @@
     "authors": [
       "Earl Co <info@earlco.in>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "GLM-5.3 too large for this machine"
   },
   "405": {
     "number": 405,
@@ -1080,7 +1183,8 @@
     "authors": [
       "Ahmed Hassanin <eng.ahmd@ymail.com>"
     ],
-    "superseded_by": "3d919e9 (#420)"
+    "superseded_by": "3d919e9 (#420)",
+    "summary": "Already covered by #420 (converter writes the PLE table; ftw_hotfix.py adds it to older FTWs)"
   },
   "399": {
     "number": 399,
@@ -1095,7 +1199,8 @@
     "gpu_untested": false,
     "authors": [
       "ChenyuHe <hechenyu@zju.edu.cn>"
-    ]
+    ],
+    "summary": "Adds block-FP8 CPU expert GEMV (from #36) with padded scale strides, an avx512f tier and float64 parity tests"
   },
   "36": {
     "number": 36,
@@ -1111,7 +1216,8 @@
     "gpu_untested": false,
     "authors": [
       "Gabriel A. Devenyi <gdevenyi@gmail.com>"
-    ]
+    ],
+    "summary": "Already merged as part of #399, which adds the padded-scale-stride fix, an avx512f tier and stronger tests"
   },
   "595": {
     "number": 595,
@@ -1126,7 +1232,9 @@
     "gpu_untested": false,
     "authors": [
       "KarrAcaRn <claude2@owayo.com>"
-    ]
+    ],
+    "upstream_followup": "our own upstream PR",
+    "summary": "Forecasts GPU memory and fit before loading (ft info); ft serve refuses configs that cannot fit (our own PR to upstream)"
   },
   "390": {
     "number": 390,
@@ -1140,7 +1248,8 @@
     "authors": [
       "Sam Izdat <ghsamizdat@gmail.com>"
     ],
-    "superseded_by": "0ffd5c8 (#438)"
+    "superseded_by": "0ffd5c8 (#438)",
+    "summary": "Already covered by #438 (QuantConfig reader); next's tests cover these mixed-precision layouts"
   },
   "380": {
     "number": 380,
@@ -1153,7 +1262,8 @@
     "gpu_untested": true,
     "authors": [
       "nkolesnikov <33605615+Fgeeha@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Image publishing is upstream infrastructure the fork does not need; documented command fails (no --host 0.0.0.0)"
   },
   "368": {
     "number": 368,
@@ -1167,7 +1277,8 @@
     "authors": [
       "Circle-Cheng <yc.22319139@gmail.com>"
     ],
-    "superseded_by": "eee1723 (#494)"
+    "superseded_by": "eee1723 (#494)",
+    "summary": "Already covered by #494, which dequantizes Q8_0 and all GGML types via the gguf reference dequantizer"
   },
   "359": {
     "number": 359,
@@ -1183,7 +1294,10 @@
     "gpu_untested": false,
     "authors": [
       "Circle-Cheng <yc.22319139@gmail.com>"
-    ]
+    ],
+    "upstream_followup": "offered upstream (candidate, see fork/upstream-candidates.md)",
+    "summary": "Dense Gemma-4 GGUF checkpoints failed to parse/load; expert fields now default to 0",
+    "fixup": "Native-quant swap and offload assertion fixed for dense GGUF; conflict with #494 resolved"
   },
   "346": {
     "number": 346,
@@ -1199,7 +1313,9 @@
     "gpu_untested": false,
     "authors": [
       "vikoabastian <11003051+vianbas@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Partial or malformed Gemma-4 tool-call markers leaked into content; a scrub hook now strips them",
+    "fixup": "A closed unparseable block is dropped whole, so the text after it is kept"
   },
   "341": {
     "number": 341,
@@ -1216,7 +1332,10 @@
     "gpu_untested": false,
     "authors": [
       "Sebastián Real <tuxevil@gmail.com>"
-    ]
+    ],
+    "upstream_followup": "offered upstream (candidate, see fork/upstream-candidates.md)",
+    "summary": "Adds a reproducible client-side serving benchmark (TTFT, decode, prefix-cache cases) for a running server",
+    "fixup": "Sends --api-key as bearer; treats a missing prompt_tokens_details as a cache miss"
   },
   "340": {
     "number": 340,
@@ -1231,7 +1350,8 @@
     "gpu_untested": false,
     "authors": [
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "--moe-cache-auto ignored the KV pool's dummy page 0, risking boot OOM and under-delivering --kv-reserve-tokens"
   },
   "339": {
     "number": 339,
@@ -1246,7 +1366,8 @@
     "gpu_untested": false,
     "authors": [
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Triton varlen conv fallback did a D2H sync per prefill (illegal under capture); the host-known max is now passed in"
   },
   "338": {
     "number": 338,
@@ -1261,7 +1382,8 @@
     "gpu_untested": true,
     "authors": [
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Fuses Flash-Next's PLE n-gram row-id hash (39 launches per layer) into one capture-safe Triton kernel"
   },
   "327": {
     "number": 327,
@@ -1274,7 +1396,8 @@
     "gpu_untested": false,
     "authors": [
       "Yasitha Herath <35001977+amodhyh@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Fails to load a standard Llama GGUF, caps context at 8192, ignores Llama 3 rope scaling, no tests"
   },
   "317": {
     "number": 317,
@@ -1289,7 +1412,8 @@
       "Erik Bogado <erikbogado@gmail.com>"
     ],
     "revisit_with": 260,
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Stacked on #260"
   },
   "316": {
     "number": 316,
@@ -1305,7 +1429,9 @@
     "gpu_untested": false,
     "authors": [
       "Erik Bogado <erikbogado@gmail.com>"
-    ]
+    ],
+    "summary": "Under HIP graph capture the fused expert copy lost its host mappings; now falls back to per-bank copies on ROCm",
+    "fixup": "Test stub given next's _disk_tier attribute"
   },
   "315": {
     "number": 315,
@@ -1320,7 +1446,8 @@
     "gpu_untested": false,
     "authors": [
       "Sebastián Real <tuxevil@gmail.com>"
-    ]
+    ],
+    "summary": "GGUF user-defined tokens (e.g. <think>) were split into subwords; now re-added as atomic tokens when needed"
   },
   "300": {
     "number": 300,
@@ -1334,7 +1461,8 @@
     "authors": [
       "Aswinkumar <aswinkumar1999@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs rework on next (uses renamed moe_backend kwarg, conflicts, no tests); revisit with the MoE work"
   },
   "298": {
     "number": 298,
@@ -1348,7 +1476,8 @@
     "authors": [
       "Ahmed Hassanin <eng.ahmd@ymail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Laguna model too large and Windows not testable here; should be split into two PRs"
   },
   "296": {
     "number": 296,
@@ -1362,7 +1491,8 @@
     "authors": [
       "JIAQI13 <35429081+JIAQI13@users.noreply.github.com>"
     ],
-    "superseded_by": "0ffd5c8 (#438)"
+    "superseded_by": "0ffd5c8 (#438)",
+    "summary": "Already covered by #438 (QuantConfig reader); next's tests include this layout (ct_block_moe)"
   },
   "295": {
     "number": 295,
@@ -1375,7 +1505,8 @@
     "gpu_untested": true,
     "authors": [
       "recrudesce <recrudesce@gmail.com>"
-    ]
+    ],
+    "summary": "Image installs freetoken from PyPI, not the checkout, so fork changes are missing; claims unsupported Pascal GPUs"
   },
   "294": {
     "number": 294,
@@ -1391,7 +1522,8 @@
     "authors": [
       "JIAQI13 <35429081+JIAQI13@users.noreply.github.com>"
     ],
-    "superseded_by": "0ffd5c8 (#438)"
+    "superseded_by": "0ffd5c8 (#438)",
+    "summary": "Already covered by #438 (QuantConfig reader); next's tests include this layout (modelopt_mixed_fp8_shared)"
   },
   "292": {
     "number": 292,
@@ -1405,7 +1537,8 @@
     "authors": [
       "Earl Co <hello@tekiz.ai>"
     ],
-    "superseded_by": "865ed79 (#507)"
+    "superseded_by": "865ed79 (#507)",
+    "summary": "Already covered by #507 (upstream GLM-5.3-Flash support); provisioning scripts out of scope"
   },
   "285": {
     "number": 285,
@@ -1419,7 +1552,8 @@
     "authors": [
       "fangyuan-3149 <314945674@qq.com>"
     ],
-    "superseded_by": "bd8bd44 (#354), 853a88d (#408), 2dbb852 (#575)"
+    "superseded_by": "bd8bd44 (#354), 853a88d (#408), 2dbb852 (#575)",
+    "summary": "KV-quant core covered by #354 + #408, MSVC build by #575; remaining Windows fixes would need separate PRs"
   },
   "278": {
     "number": 278,
@@ -1434,7 +1568,8 @@
     "gpu_untested": false,
     "authors": [
       "bernimccoy <85797556+bernimccoy@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Offload-vs-hybrid pick used one bench verdict per expert format for all models; now matched to the model's expert size"
   },
   "275": {
     "number": 275,
@@ -1450,7 +1585,8 @@
     "authors": [
       "Yausen <yuyi2439@qq.com>"
     ],
-    "superseded_by": "0ffd5c8 (#438)"
+    "superseded_by": "0ffd5c8 (#438)",
+    "summary": "Already covered by #438 (QuantConfig reader); next's tests include this layout (ct_mixed_dense)"
   },
   "270": {
     "number": 270,
@@ -1464,7 +1600,8 @@
     "authors": [
       "Cerynitius <ruixiu_zhang@outlook.com>"
     ],
-    "superseded_by": "865ed79 (#507), 3faef36 (#479)"
+    "superseded_by": "865ed79 (#507), 3faef36 (#479)",
+    "summary": "Already covered by #507 (upstream GLM-5.3-Flash support) and #479 (image input)"
   },
   "269": {
     "number": 269,
@@ -1479,7 +1616,8 @@
     "gpu_untested": false,
     "authors": [
       "sime2408 <simun.sunjic@gmail.com>"
-    ]
+    ],
+    "summary": "A tokenizer/detokenizer dying at startup showed only as 'exited during load'; it now reports its error to the supervisor"
   },
   "267": {
     "number": 267,
@@ -1493,7 +1631,8 @@
     "authors": [
       "HaileyStorm <HaileyCollet@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Sound, unused in this fork for now; adopt when needed"
   },
   "266": {
     "number": 266,
@@ -1506,7 +1645,8 @@
     "gpu_untested": false,
     "authors": [
       "HaileyStorm <HaileyCollet@gmail.com>"
-    ]
+    ],
+    "summary": "Quote-heuristic text filter for Qwen markers, no reproduction; an exact token-level fix would be smaller"
   },
   "264": {
     "number": 264,
@@ -1519,7 +1659,8 @@
     "gpu_untested": false,
     "authors": [
       "HaileyStorm <HaileyCollet@gmail.com>"
-    ]
+    ],
+    "summary": "Requires nvcc minor version to match torch, refusing working setups (13.1 vs cu130); #132's major-only check suffices"
   },
   "260": {
     "number": 260,
@@ -1533,7 +1674,8 @@
     "authors": [
       "David <david@example.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "ROCm - cannot be tested here; revisit with #217, #535, #317"
   },
   "258": {
     "number": 258,
@@ -1547,7 +1689,8 @@
     "authors": [
       "Lancer <maruixiang6688@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs rework on next (6-file conflict), DFlash2 compatibility unverified; own project later on the 27B"
   },
   "254": {
     "number": 254,
@@ -1562,7 +1705,8 @@
     "gpu_untested": false,
     "authors": [
       "yuyi2439 <68320855+yuyi2439@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "bench_decode_moe now passes ft serve options through '--' instead of mirroring server flags"
   },
   "253": {
     "number": 253,
@@ -1575,7 +1719,8 @@
     "gpu_untested": false,
     "authors": [
       "fireflyer <fireflyer@localhost>"
-    ]
+    ],
+    "summary": "Downgrades the whole stack to torch 2.10/cu128 for V100; would drop native kernels on newer GPUs"
   },
   "251": {
     "number": 251,
@@ -1588,7 +1733,8 @@
     "gpu_untested": false,
     "authors": [
       "JuanForge <contact.juan.coding@gmail.com>"
-    ]
+    ],
+    "summary": "Image clones upstream instead of the checkout, runs a nonexistent module (ft) and does not bind 0.0.0.0"
   },
   "245": {
     "number": 245,
@@ -1603,7 +1749,9 @@
     "gpu_untested": false,
     "authors": [
       "fangyuan-3149 <314945674@qq.com>"
-    ]
+    ],
+    "summary": "torch deprecates _set_allocator_settings (used for expandable segments); now uses the replacement API",
+    "fixup": "Uses torch._C._accelerator_setAllocatorSettings with the old call as fallback (PR's API missing in 2.11)"
   },
   "241": {
     "number": 241,
@@ -1617,7 +1765,8 @@
     "authors": [
       "skywalk1411 <61213518+skywalk1411@users.noreply.github.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "ROCm - cannot be tested here; also edits shared CUDA headers, revisit with the other ROCm PRs"
   },
   "231": {
     "number": 231,
@@ -1632,7 +1781,8 @@
     "gpu_untested": false,
     "authors": [
       "Victor Cruz <vcruz305@gmail.com>"
-    ]
+    ],
+    "summary": "Adds --moe-collect-stats: logs expert-cache miss rate, worst layers and a routing oracle bound"
   },
   "230": {
     "number": 230,
@@ -1647,7 +1797,8 @@
     "gpu_untested": false,
     "authors": [
       "Carlos Alvarado <carlos-alvarado@outlook.com>"
-    ]
+    ],
+    "summary": "Adds --ssl-certfile/--ssl-keyfile for serving over HTTPS via uvicorn"
   },
   "224": {
     "number": 224,
@@ -1662,7 +1813,8 @@
     "gpu_untested": false,
     "authors": [
       "mac <av_samarin@mail.ru>"
-    ]
+    ],
+    "summary": "Adds OpenAI-compatible logprobs/top_logprobs for chat and legacy completions (400 when a parser would hide tokens)"
   },
   "223": {
     "number": 223,
@@ -1677,7 +1829,8 @@
     "gpu_untested": false,
     "authors": [
       "mac <av_samarin@mail.ru>"
-    ]
+    ],
+    "summary": "Invalid sampling params (temperature<0, top_p, top_k=0, non-finite) now return 400; rebuild timeout is bounded"
   },
   "222": {
     "number": 222,
@@ -1693,7 +1846,10 @@
     "gpu_untested": false,
     "authors": [
       "mac <av_samarin@mail.ru>"
-    ]
+    ],
+    "upstream_followup": "offered upstream (candidate, see fork/upstream-candidates.md)",
+    "summary": "Abort is now delivered from the stream's finally and non-streaming requests are watched for disconnects",
+    "fixup": "Request-ring and --api-key middlewares made pure ASGI so disconnects reach the handler"
   },
   "221": {
     "number": 221,
@@ -1709,7 +1865,9 @@
     "gpu_untested": false,
     "authors": [
       "mac <av_samarin@mail.ru>"
-    ]
+    ],
+    "summary": "Client disconnect left the /bench/run child running; now torn down via its process group; request ports bounded",
+    "fixup": "Windows lacks os.killpg; the child is stopped directly there (test added)"
   },
   "217": {
     "number": 217,
@@ -1723,7 +1881,8 @@
     "authors": [
       "Samuel Ishida <samuel.ishida@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "ROCm - cannot be tested here; revisit with the other ROCm PRs"
   },
   "211": {
     "number": 211,
@@ -1738,7 +1897,8 @@
     "gpu_untested": false,
     "authors": [
       "avlp12 <alisvolatprop12@proton.me>"
-    ]
+    ],
+    "summary": "GGUF MoE GEMV put tokens*top_k on gridDim.z (cap 65535), so large prefills failed; z is now chunked with an offset"
   },
   "210": {
     "number": 210,
@@ -1752,7 +1912,8 @@
     "authors": [
       "Victor Cruz <vcruz305@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "DeepSeek-V4 too large for this machine"
   },
   "198": {
     "number": 198,
@@ -1767,7 +1928,9 @@
     "gpu_untested": false,
     "authors": [
       "pedro-moser <pedro.niederauer.moser@gmail.com>"
-    ]
+    ],
+    "summary": "Expert cache took the memory needed by forced KV pages (--num-pages/--num-tokens with --moe-cache-auto)",
+    "fixup": "KV floor applied in the shared plan_moe_cache_auto (engine and ft info), with a test"
   },
   "185": {
     "number": 185,
@@ -1781,7 +1944,8 @@
     "authors": [
       "Erich Stuntebeck <erichstuntebeck@airia.com>"
     ],
-    "superseded_by": 211
+    "superseded_by": 211,
+    "summary": "Already covered by #211 (chunks the moe_vec z grid past the 65535 cap); this PR's test passes on next"
   },
   "196": {
     "number": 196,
@@ -1795,7 +1959,8 @@
     "authors": [
       "probe <probe@example.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Tuned for sm_120, not available here; 27.8k lines, too large for batch review; own project later"
   },
   "192": {
     "number": 192,
@@ -1808,7 +1973,8 @@
     "gpu_untested": false,
     "authors": [
       "Mitali Agrawal <mitaliagrawal@Mitalis-MacBook-Air.local>"
-    ]
+    ],
+    "summary": "Deliberate code duplication as a fixture for an external radar tool; #191 dedupes the gate instead"
   },
   "191": {
     "number": 191,
@@ -1823,7 +1989,8 @@
     "gpu_untested": false,
     "authors": [
       "Mitali Agrawal <mitaliagrawal@Mitalis-MacBook-Air.local>"
-    ]
+    ],
+    "summary": "Moves duplicated maintenance 503 gate into server/maintenance.py so all API entrypoints answer consistently"
   },
   "190": {
     "number": 190,
@@ -1839,7 +2006,9 @@
     "gpu_untested": false,
     "authors": [
       "qxZap <MileaMihai@outlook.it>"
-    ]
+    ],
+    "summary": "Gemma-4 GGUF parser crashed when llama.cpp writes attention.head_count_kv as a scalar; now normalised to a per-layer list",
+    "fixup": "Adds the missing test (fails before)"
   },
   "177": {
     "number": 177,
@@ -1854,7 +2023,8 @@
     "gpu_untested": false,
     "authors": [
       "taking-lying-flat <1615405@qq.com>"
-    ]
+    ],
+    "summary": "Triton grouped decode kernel used the wrong KV head for GQA groups spanning a partial 16-head tile; blocks now per KV group"
   },
   "64": {
     "number": 64,
@@ -1868,7 +2038,8 @@
     "authors": [
       "rhyce.git <rhyce@comley.dev>"
     ],
-    "superseded_by": 190
+    "superseded_by": 190,
+    "summary": "Already covered by #190 (same scalar head_count_kv fix), adopted with a test"
   },
   "169": {
     "number": 169,
@@ -1883,7 +2054,8 @@
     "gpu_untested": false,
     "authors": [
       "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
-    ]
+    ],
+    "summary": "Prefill Triton kernels loaded mid-request; warmup now runs on every backend over a length ladder, plus --skip-prefill-warmup"
   },
   "160": {
     "number": 160,
@@ -1896,7 +2068,8 @@
     "gpu_untested": true,
     "authors": [
       "spaz122772 <35985754+spaz122772@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Drops csrc from package-data, but GGUF and other JIT kernels compile from it at runtime; wheel installs would break"
   },
   "159": {
     "number": 159,
@@ -1911,7 +2084,8 @@
     "gpu_untested": false,
     "authors": [
       "avlp12 <alisvolatprop12@proton.me>"
-    ]
+    ],
+    "summary": "GGUF JIT extension failed to build with some g++ versions under C++17; now compiled as C++20 (CUDA branch)"
   },
   "154": {
     "number": 154,
@@ -1926,7 +2100,8 @@
     "gpu_untested": false,
     "authors": [
       "Victor Cruz <vcruz305@gmail.com>"
-    ]
+    ],
+    "summary": "Split multi-shard GGUFs were unopenable; the reader now resolves the shard set and aggregates tensor tables"
   },
   "153": {
     "number": 153,
@@ -1941,7 +2116,8 @@
     "gpu_untested": false,
     "authors": [
       "Ruslan Rakhimov <risonyo@gmail.com>"
-    ]
+    ],
+    "summary": "bench_offload_cache_copy skips a geometry the cache refuses instead of aborting; exits 1 if a requested one measured nothing"
   },
   "145": {
     "number": 145,
@@ -1956,7 +2132,8 @@
     "gpu_untested": false,
     "authors": [
       "Ruslan Rakhimov <risonyo@gmail.com>"
-    ]
+    ],
+    "summary": "Cache-rebuild e2e test checked reply text, which reasoning models put in reasoning_content; now checks completion_tokens"
   },
   "138": {
     "number": 138,
@@ -1971,7 +2148,8 @@
     "gpu_untested": false,
     "authors": [
       "Victor Cruz <vcruz305@gmail.com>"
-    ]
+    ],
+    "summary": "GGUF kernel dispatchers returned uninitialized memory on an unknown quant type; they now raise with the supported list"
   },
   "137": {
     "number": 137,
@@ -1985,7 +2163,8 @@
     "authors": [
       "Christian Stewart <christian@aperture.us>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "ROCm - cannot be tested here; revisit with the other ROCm PRs"
   },
   "131": {
     "number": 131,
@@ -1999,7 +2178,8 @@
     "authors": [
       "Victor Cruz <vcruz305@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "User's call: own project later (5.9k lines, partly overlaps #494, 53 commits behind next)"
   },
   "125": {
     "number": 125,
@@ -2012,7 +2192,8 @@
     "gpu_untested": false,
     "authors": [
       "huo-ju <virushuo@gmail.com>"
-    ]
+    ],
+    "summary": "Not reproducible: next's pageable-pointer check passes on CUDA 13.2; dropping the assertion only loses coverage"
   },
   "118": {
     "number": 118,
@@ -2025,7 +2206,8 @@
     "gpu_untested": false,
     "authors": [
       "ascorb12 <Ascorb@hotmail.com>"
-    ]
+    ],
+    "summary": "next's max_seq_len already is min(context, KV tokens); oversized prompts get an immediate HTTP 400"
   },
   "116": {
     "number": 116,
@@ -2039,7 +2221,8 @@
     "authors": [
       "John Pezzulli <38448408+jpezzulli@users.noreply.github.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "DeepSeek-V4 too large for this machine; revisit with #105"
   },
   "109": {
     "number": 109,
@@ -2054,7 +2237,8 @@
     "gpu_untested": false,
     "authors": [
       "none <claude@example.com>"
-    ]
+    ],
+    "summary": "Adds --swa-full-tokens-ratio to size the SWA window pool at load, not only via /v1/cache/rebuild"
   },
   "108": {
     "number": 108,
@@ -2069,7 +2253,8 @@
     "gpu_untested": false,
     "authors": [
       "Phillip Munn <25081499+phillipmunn@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Adds OpenAI-compatible GET /v1/models/{model_id} for clients that validate a model name (404 for unknown names)"
   },
   "105": {
     "number": 105,
@@ -2083,7 +2268,8 @@
     "authors": [
       "avlp12 <alisvolatprop12@proton.me>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "DeepSeek-V4 too large for this machine; revisit with #116"
   },
   "104": {
     "number": 104,
@@ -2097,7 +2283,8 @@
     "authors": [
       "Lancer <maruixiang6688@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs multi-GPU"
   },
   "93": {
     "number": 93,
@@ -2111,7 +2298,8 @@
     "authors": [
       "Earl Co <info@earlco.in>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Kimi-K3 too large for this machine"
   },
   "90": {
     "number": 90,
@@ -2126,7 +2314,8 @@
     "gpu_untested": false,
     "authors": [
       "alogotron <alogotron@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Documents libnccl-dev: the pynccl JIT links with -lnccl, so the first TP launch failed at link time without it"
   },
   "88": {
     "number": 88,
@@ -2141,7 +2330,8 @@
     "gpu_untested": false,
     "authors": [
       "xinze-zheng <wxzheng@berkeley.edu>"
-    ]
+    ],
+    "summary": "Scheduler uses a threading.RLock for tqdm instead of a multiprocessing semaphore that could leak at TP termination"
   },
   "71": {
     "number": 71,
@@ -2155,7 +2345,8 @@
     "authors": [
       "Carlos Alvarado <carlos-alvarado@outlook.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs multi-GPU and DeepSeek-V4, neither available here"
   },
   "70": {
     "number": 70,
@@ -2169,7 +2360,8 @@
     "authors": [
       "Carlos Alvarado <carlos-alvarado@outlook.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs multi-GPU and DeepSeek-V4, neither available here"
   },
   "69": {
     "number": 69,
@@ -2183,7 +2375,8 @@
     "authors": [
       "Carlos Alvarado <carlos-alvarado@outlook.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs multi-GPU and DeepSeek-V4, neither available here"
   },
   "65": {
     "number": 65,
@@ -2197,7 +2390,8 @@
     "authors": [
       "Jason Kneen <jason.kneen@bouncingfish.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "macOS / Apple Silicon - cannot be tested here"
   },
   "59": {
     "number": 59,
@@ -2211,7 +2405,8 @@
     "authors": [
       "mkornreich <52514824+mkornreich@users.noreply.github.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs rework on next (13-file conflict with Gemma-4 changes); own project later, E2B/E4B are testable here"
   },
   "31": {
     "number": 31,
@@ -2224,7 +2419,8 @@
     "gpu_untested": false,
     "authors": [
       "Oliver Heard <ogwh1990@gmail.com>"
-    ]
+    ],
+    "summary": "Targets Nvfp4DenseLinear classes next no longer has (#418); late-load stall does not show on the RTX 4090 (~27 s capture)"
   },
   "30": {
     "number": 30,
@@ -2238,7 +2434,8 @@
     "authors": [
       "James Palmer <james.pa@outlook.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "DeepSeek-V4 too large for this machine; revisit with #105 and #116"
   },
   "24": {
     "number": 24,
@@ -2252,7 +2449,8 @@
     "authors": [
       "Lukas Rakauskas <rakauskaslukas123@gmail.com>"
     ],
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "summary": "Needs reimplementation on next (conflicts with #132, would drop A100 prebuilt kernels); Turing cannot be tested here"
   },
   "23": {
     "number": 23,
@@ -2266,7 +2464,8 @@
     "authors": [
       "bouclem <bouclement2012@gmail.com>"
     ],
-    "superseded_by": "0d652e7 (#132)"
+    "superseded_by": "0d652e7 (#132)",
+    "summary": "Already covered by #132 (RDNA3/RDNA4 ROCm runtime foundation): is_rocm, gfx arch detection, HIP flags and hip_compat.h on next"
   },
   "586": {
     "number": 586,
@@ -2279,7 +2478,8 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready"
   },
   "583": {
     "number": 583,
@@ -2292,7 +2492,8 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; Windows cannot be tested here"
   },
   "582": {
     "number": 582,
@@ -2305,7 +2506,8 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready"
   },
   "581": {
     "number": 581,
@@ -2318,7 +2520,8 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; Windows cannot be tested here"
   },
   "580": {
     "number": 580,
@@ -2331,7 +2534,8 @@
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; Windows cannot be tested here"
   },
   "491": {
     "number": 491,
@@ -2344,7 +2548,8 @@
     "gpu_untested": true,
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready"
   },
   "400": {
     "number": 400,
@@ -2357,7 +2562,8 @@
     "gpu_untested": true,
     "authors": [
       "assistant.pi <assistant.pi@fireworks.ai>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; ROCm cannot be tested here"
   },
   "378": {
     "number": 378,
@@ -2370,7 +2576,8 @@
     "gpu_untested": true,
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; ROCm cannot be tested here"
   },
   "293": {
     "number": 293,
@@ -2383,7 +2590,8 @@
     "gpu_untested": true,
     "authors": [
       "Clayton Rush Williams <Clayton.R.Williams@protonmail.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; Flash-Next cannot run here"
   },
   "199": {
     "number": 199,
@@ -2396,7 +2604,8 @@
     "gpu_untested": true,
     "authors": [
       "pedro-moser <pedro.niederauer.moser@gmail.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready"
   },
   "197": {
     "number": 197,
@@ -2409,7 +2618,8 @@
     "gpu_untested": true,
     "authors": [
       "pedro-moser <pedro.niederauer.moser@gmail.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; Laguna cannot run here"
   },
   "189": {
     "number": 189,
@@ -2422,7 +2632,8 @@
     "gpu_untested": true,
     "authors": [
       "Yuu <206304251+nekomario28@users.noreply.github.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready"
   },
   "135": {
     "number": 135,
@@ -2435,7 +2646,8 @@
     "gpu_untested": true,
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; ROCm/multi-GPU cannot be tested here"
   },
   "134": {
     "number": 134,
@@ -2448,7 +2660,8 @@
     "gpu_untested": true,
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; ROCm cannot be tested here"
   },
   "133": {
     "number": 133,
@@ -2461,6 +2674,7 @@
     "gpu_untested": true,
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
-    ]
+    ],
+    "summary": "Draft - revisit when ready; ROCm cannot be tested here"
   }
 }

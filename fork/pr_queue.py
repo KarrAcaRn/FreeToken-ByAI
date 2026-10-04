@@ -12,6 +12,11 @@ WORK = "next"
 HERE = pathlib.Path(__file__).parent
 LOG = HERE / "pr-decisions.json"
 TABLE = HERE / "pr-decisions.md"
+README = HERE.parent / "README.md"
+FORK = "KarrAcaRn/FreeToken-ByAI"
+ADOPTED = {"adopted": "Adopted", "adopted-with-fixups": "Adopted + fixup", "reimplemented": "Reimplemented", "own": "Our own PR"}
+NOT_ADOPTED = {"superseded": "Superseded", "obsolete": "Obsolete", "rejected": "Rejected",
+               "deferred": "Deferred", "feature": "Feature, later"}
 # A changed head on a deferred PR means the blocker may be gone.
 RECHECK_ON_NEW_HEAD = {"deferred"}
 
@@ -67,6 +72,80 @@ def render(log):
         by = f" by #{e['superseded_by']}" if e.get("superseded_by") else ""
         rows.append(f"| {link} | {e['title']} | {authors} | {e['decision']}{by}{gpu} | {reason} |")
     TABLE.write_text("\n".join(rows) + "\n")
+    render_readme(log)
+
+
+def _is_fix(title: str) -> bool:
+    import re
+
+    head = re.sub(r"^(\[[^\]]*\]\s*)+", "", title).strip().lower()
+    return head.startswith("fix")
+
+
+def _short(e: dict) -> str:
+    text = e.get("summary") or e["reason"].split(". ")[0]
+    return text.replace("|", "/").replace("\n", " ")
+
+
+def _followup(e: dict) -> str:
+    def link(h):
+        return f"[{h}](https://github.com/{FORK}/commit/{h})"
+
+    parts = []
+    commits = [c for c in e.get("commits", []) if c and " " not in c]
+    if e["decision"] == "adopted-with-fixups":
+        note = e.get("fixup") or "our fixup"
+        parts.append(f"{note} ({', '.join(link(c) for c in commits[1:]) or 'see log'})")
+    elif e["decision"] == "reimplemented":
+        parts.append(f"{e.get('fixup') or 'our version'} ({', '.join(link(c) for c in commits)})")
+    if e.get("upstream_followup"):
+        parts.append(e["upstream_followup"])
+    return "; ".join(parts).replace("|", "/")
+
+
+def render_readme(log):
+    """Fill the generated blocks of README.md between their markers."""
+    if not README.exists():
+        return
+    text = README.read_text()
+
+    def block(name: str, body: str) -> None:
+        nonlocal text
+        start, end = f"<!-- fork:{name}:start -->", f"<!-- fork:{name}:end -->"
+        if start in text and end in text:
+            head, rest = text.split(start, 1)
+            text = head + start + "\n" + body + "\n" + end + rest.split(end, 1)[1]
+
+    def pr(num):
+        return f"[#{num}](https://github.com/{UPSTREAM}/pull/{num})"
+
+    entries = sorted(log.values(), key=lambda e: -int(e["number"]))
+    not_adopted = [e for e in entries if e["decision"] in NOT_ADOPTED]
+    block("not-adopted", ", ".join(pr(e["number"]) for e in sorted(not_adopted, key=lambda e: int(e["number"]))))
+
+    def table(rows, with_followup):
+        head = "| PR | Title | Status | Why |" + (" Our follow-up |" if with_followup else "")
+        sep = "|---|---|---|---|" + ("---|" if with_followup else "")
+        out = [head, sep]
+        for e in rows:
+            label = ADOPTED.get(e["decision"]) or NOT_ADOPTED.get(e["decision"], e["decision"])
+            title = e["title"].replace("|", "/")
+            line = f"| {pr(e['number'])} | {title} | {label} | {_short(e)} |"
+            out.append(line + (f" {_followup(e)} |" if with_followup else ""))
+        return "\n".join(out)
+
+    adopted = [e for e in entries if e["decision"] in ADOPTED]
+    fixes = [e for e in adopted if _is_fix(e["title"])]
+    improvements = [e for e in adopted if not _is_fix(e["title"])]
+    order = {"rejected": 0, "superseded": 1, "obsolete": 2, "feature": 3, "deferred": 4}
+    not_adopted.sort(key=lambda e: (order[e["decision"]], -int(e["number"])))
+    body = "\n\n".join([
+        f"### Bug fixes we adopted ({len(fixes)})", table(fixes, True),
+        f"### Improvements we adopted ({len(improvements)})", table(improvements, True),
+        f"### Not adopted ({len(not_adopted)})", table(not_adopted, False),
+    ])
+    block("pr-table", body)
+    README.write_text(text)
 
 
 def git(*args):
