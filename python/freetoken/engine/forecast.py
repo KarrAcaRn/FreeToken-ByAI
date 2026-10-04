@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import math
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -50,6 +51,8 @@ CATEGORY_LABELS = {
     "embeddings": "embeddings / lm_head",
     "vision": "vision encoder",
     "mtp": "MTP / draft heads",
+    "draft": "speculative draft model",
+    "verify_states": "speculative verify GDN states",
     "other": "norms / other",
     "rope": "rope tables",
 }
@@ -563,6 +566,24 @@ def _tips_embed_device(inp: ForecastInputs) -> Iterable[Change]:
                      note="input-embedding rows read from pinned host RAM; decode speed unchanged")
 
 
+def _tips_dflash_block(inp: ForecastInputs) -> Iterable[Change]:
+    states = inp.weights.gpu.get("verify_states", 0)
+    config = inp.config
+    if not states:
+        return
+    from freetoken.speculative.dflash.config import DFlashConfig
+    from freetoken.utils import cached_load_hf_config
+
+    block = config.speculative_dflash_block_size or DFlashConfig.from_hf_config(
+        cached_load_hf_config(config.speculative_draft_model_path)).block_size
+    per_state = states // (block + 1)
+    for n, cost in ((6, 1), (4, 2)):
+        if 1 < n < block:
+            yield Change(f"--speculative-dflash-block-size {n}", "dflash_block", cost,
+                         _set(speculative_dflash_block_size=n), weight_delta=(n - block) * per_state,
+                         note="fewer drafted tokens per verify, lower speedup")
+
+
 def _tips_moe(inp: ForecastInputs) -> Iterable[Change]:
     config = inp.config
     mc = config.model_config
@@ -633,7 +654,7 @@ def _tips_kv_dtype(inp: ForecastInputs) -> Iterable[Change]:
 # reaches the forecast through the pool family's kv_cost, so nothing else changes.
 TIP_CANDIDATES: list[Callable[[ForecastInputs], Iterable[Change]]] = [
     _tips_concurrency, _tips_memory_ratio, _tips_prefill, _tips_cache_type, _tips_encoders, _tips_moe,
-    _tips_kv_dtype, _tips_embed_device,
+    _tips_kv_dtype, _tips_embed_device, _tips_dflash_block,
 ]
 
 
@@ -752,9 +773,71 @@ def suggest_tips(inp: ForecastInputs, base: Forecast, max_combo: int = 3) -> tup
 # ---------------------------------------------------------------------------------------------
 
 
+_DRAFT_FP8_LINEAR = re.compile(
+    r"^(fc|layers\.\d+\.(self_attn\.[qkvo]_proj|mlp\.(gate|up|down)_proj|(attention|mlp)_conv\.kernel_projection))\.weight$"
+)
+
+
+def draft_resident_bytes(draft_path: str, quant: str) -> int:
+    """VRAM of a DFlash draft as the worker loads it: the checkpoint's tensors, with the projections
+    as e4m3 + one fp32 scale per output row under ``--speculative-draft-quant fp8``."""
+    from freetoken.models.loader import iter_weight_files
+
+    total = 0
+    for file in iter_weight_files(draft_path):
+        for name, (dtype, shape) in _safetensors_header(file).items():
+            numel = math.prod(shape)
+            if quant == "fp8" and len(shape) == 2 and _DRAFT_FP8_LINEAR.match(name):
+                total += numel + 4 * shape[0]
+            else:
+                total += numel * _SAFETENSORS_BYTES.get(dtype, 2)
+    return total
+
+
+_SAFETENSORS_BYTES = {"F64": 8, "F32": 4, "BF16": 2, "F16": 2, "F8_E4M3": 1, "U8": 1, "I8": 1, "I32": 4, "I64": 8}
+
+
+def _safetensors_header(file: str) -> dict[str, tuple[str, list[int]]]:
+    import json
+    import struct
+
+    with open(file, "rb") as f:
+        (n,) = struct.unpack("<Q", f.read(8))
+        header = json.loads(f.read(n))
+    header.pop("__metadata__", None)
+    return {k: (v["dtype"], v["shape"]) for k, v in header.items()}
+
+
+def _speculative_bytes(config) -> tuple[int, int]:
+    """(draft weights, verify GDN states) a ``--speculative-algorithm dflash`` start keeps on the GPU."""
+    if getattr(config, "speculative_algorithm", None) != "dflash" or not config.speculative_draft_model_path:
+        return 0, 0
+    from freetoken.engine.engine import _dflash_target_verify_graph_enabled_for_config
+    from freetoken.kvcache.linear_state_pool import state_pool_bytes
+    from freetoken.speculative.dflash.config import DFlashConfig
+    from freetoken.utils import cached_load_hf_config
+
+    draft_cfg = DFlashConfig.from_hf_config(cached_load_hf_config(config.speculative_draft_model_path))
+    draft = draft_resident_bytes(config.speculative_draft_model_path, config.speculative_draft_quant)
+    # the draft attention's fp32 rope table, built for its full position range
+    draft += draft_cfg.max_position_embeddings * draft_cfg.head_dim * 4
+    states = 0
+    if _dflash_target_verify_graph_enabled_for_config(config):
+        block = config.speculative_dflash_block_size or draft_cfg.block_size
+        if block > 1:
+            # one state per verified token for the verify graphs, plus the pre-verify copy
+            states = (block + 1) * state_pool_bytes(config, num_slots=1)
+    return draft, states
+
+
 def forecast_inputs(config, model, free_before: int | None) -> ForecastInputs:
     """Inputs from the meta-device model of a resolved config, as Engine.__init__ builds it."""
     weights = resident_weights(model, config)
+    draft, states = _speculative_bytes(config)
+    if draft:
+        weights.gpu["draft"] = draft
+    if states:
+        weights.gpu["verify_states"] = states
     per_expert, max_slots = 0, None
     if _is_offload(config):
         from freetoken.engine.engine import shared_offload_method

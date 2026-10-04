@@ -5,6 +5,7 @@ configuration through those functions directly and compares."""
 
 import copy
 import json
+import math
 import struct
 import time
 
@@ -344,3 +345,25 @@ def test_kv_dtype_tips_shrink_bytes_per_token_and_pick_a_code_decoding_backend(t
     config = copy.copy(r.inputs.config)
     changes["--kv-cache-dtype fp8"].apply(config)
     assert _backend_supports_kv_quant(config.attention_backend, "fp8")
+
+
+def test_draft_resident_bytes_prices_the_fp8_projections(tmp_path):
+    from freetoken.engine.forecast import draft_resident_bytes
+
+    tensors = {
+        "fc.weight": ("BF16", [64, 128]),
+        "layers.0.self_attn.q_proj.weight": ("BF16", [64, 64]),
+        "layers.0.mlp.up_proj.weight": ("BF16", [96, 64]),
+        "layers.0.attention_conv.kernel_projection.weight": ("BF16", [16, 64]),
+        "layers.0.attention_conv.base_kernel": ("BF16", [2, 2, 64]),
+        "candidate_selector.predecessor_codebook": ("BF16", [100, 8]),
+        "norm.weight": ("BF16", [64]),
+    }
+    path = write_checkpoint(tmp_path / "draft", {"architectures": ["DFlash2DraftModel"]}, tensors)
+    bf16 = sum(2 * math.prod(shape) for _, shape in tensors.values())
+    assert draft_resident_bytes(path, "none") == bf16
+    # projections: 1 byte per weight + one fp32 scale per output row; the rest stays bf16
+    projections = [("fc.weight", 64), ("layers.0.self_attn.q_proj.weight", 64),
+                   ("layers.0.mlp.up_proj.weight", 96), ("layers.0.attention_conv.kernel_projection.weight", 16)]
+    saved = sum(math.prod(tensors[n][1]) - 4 * rows for n, rows in projections)
+    assert draft_resident_bytes(path, "fp8") == bf16 - saved
