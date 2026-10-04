@@ -1,4 +1,70 @@
 {
+  "602": {
+    "number": 602,
+    "title": "fix(moe): fit Qwen3.8 Flash Next FP8 banks across host and GPU memory",
+    "head_sha": "cc175ba9970d",
+    "reviewed_at": "2026-10-04",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Keeps leading FP8-block expert source layers in VRAM when host RAM cannot hold all banks (also mid-load, re-reading MemAvailable). Not judged on its merits yet: the target (Qwen3.8 Flash Next FP8, host RAM short of its banks) cannot run here, and our only MoE is NVFP4 and fits in RAM, so the FP8-only path cannot be exercised. Points for the revisit: the mid-load fallback moves layers to the GPU without checking VRAM; it now conflicts with #601 in build_expert_banks; GPU-resident source layers would also be duplicated by our slot-cache preload (fix/moe-ttft) and should be skipped there.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "云微 <1067852565@qq.com>"
+    ],
+    "summary": "FP8 expert layers kept in VRAM when host RAM is short; deferred - the FP8 model and RAM shortage cannot be reproduced here"
+  },
+  "601": {
+    "number": 601,
+    "title": "feat(moe): serve NVFP4 and MXFP4 experts fused through the expert banks",
+    "head_sha": "c1b802da78ab",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted-with-fixups",
+    "reason": "Resident ('fused') experts load through the expert-bank loader (HF pieces or FTW banks straight to the GPU), so fused serves bf16, fp8_block, NVFP4 and MXFP4; unified-memory GPUs (GB10) auto-pick fused. Merge conflicts with our disk tier (ram_prefix / disk_tier), NVFP4 TP (tp_ok stays True) and the FTWFormatError validation (#459) were combined: the PR's _split_bank_entries now raises FTWFormatError. Tested on the RTX 4090 with Qwen3.6-35B-A3B NVFP4 truncated to 20 layers (the full experts do not fit 24 GB resident): fused and offload give token-identical greedy output, fused 263 vs offload 222 tok/s; the full model on offload is unchanged (same tokens, same prefill/decode speed). Breaking: FTW files converted with --moe-backend fused/triton (dense experts) must be reconverted. Follow-up: since hit-D2D is on by default here, the unified-memory inert-flag warning names --disable-moe-prefill-hit-d2d instead of firing on every start.",
+    "commits": [
+      "191a795",
+      "1b43e59"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ],
+    "summary": "Fused (resident) MoE serves NVFP4 and MXFP4 experts via the expert banks; on GB10 auto-picks fused",
+    "fixup": "conflicts with disk tier, NVFP4 TP and FTW validation combined; the unified-memory warning follows our hit-D2D default"
+  },
+  "599": {
+    "number": 599,
+    "title": "fix(server): report the backend kv page size in stats",
+    "head_sha": "33f7034ee459",
+    "reviewed_at": "2026-10-04",
+    "decision": "adopted",
+    "reason": "/v1/stats reported the CLI page_size although the engine may override it for its attention backend; it now takes the size from the engine's cache_pools (as openai_api already does). Small, correct, with a test. Nothing to improve.",
+    "commits": [
+      "cbc463d"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "云微 <1067852565@qq.com>"
+    ],
+    "summary": "/v1/stats reports the attention backend's real KV page size instead of the CLI value"
+  },
+  "596": {
+    "number": 596,
+    "title": "feat(engine): --embed-device cpu keeps the input embedding in RAM",
+    "head_sha": "9e1029f85bbe",
+    "reviewed_at": "2026-10-04",
+    "decision": "own",
+    "reason": "Our own PR, opened from feat/cpu-embedding (credits #456's author). The feature is on next since a53a5b5 (merge 85c52d9), plus the ft info tip.",
+    "commits": [
+      "a53a5b5"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "KarrAcaRn <claude2@owayo.com>"
+    ],
+    "upstream_followup": "our own upstream PR",
+    "summary": "Input embedding table in pinned host RAM: +75k tokens of context on the 27B (our own PR to upstream)"
+  },
   "589": {
     "number": 589,
     "title": "fix(checkpoint): resolve HF repo Ids before conversion",

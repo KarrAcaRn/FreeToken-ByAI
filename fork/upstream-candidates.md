@@ -94,3 +94,6 @@ greedy output unchanged; tests/moe (incl. two new fill_slots tests), tests/engin
 tests/scheduler, tests/server pass. Without cudaMemcpyBatchAsync (CUDA < 13) hit-D2D still
 falls back to full-layer copies, so the preload then only helps the first decode steps; a
 fallback that gathers misses with the fused index-copy kernel would cover that.
+If upstream merges #601 first, its unified-memory inert-flag warning lists
+`--moe-prefill-hit-d2d` as set; with the new default it must name `--disable-moe-prefill-hit-d2d`
+instead (as next's 1b43e59 does).
