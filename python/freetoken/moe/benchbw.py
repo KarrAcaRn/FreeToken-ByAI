@@ -863,6 +863,10 @@ def _print_report(r: dict) -> None:
         m = w["model"]
         print(f"\n  {name}  H={m['hidden']} I={m['inter']} E={m['experts']} top_k={m['top_k']}")
         _print_kernels(w["kernels"], iw)
+    if any(e.get("recommended") == "hybrid" for e in all_kernels):
+        print("\n  note: hybrid computes only the GPU slot cache's misses on the CPU, so serving "
+              "keeps a hybrid\n  pick only while the cache holds under 15% of a model's experts "
+              "and decodes on offload otherwise.")
     print(f"\n  saved: {r['out_path']}")
     if r.get("custom_out_path"):
         print(f"  custom profile; before `ft serve`, run: {custom_profile_hint(r['out_path'])}")
