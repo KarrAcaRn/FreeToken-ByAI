@@ -576,7 +576,7 @@ def _tips_dflash_block(inp: ForecastInputs) -> Iterable[Change]:
 
     block = config.speculative_dflash_block_size or DFlashConfig.from_hf_config(
         cached_load_hf_config(config.speculative_draft_model_path)).block_size
-    per_state = states // block
+    per_state = states // (block * config.max_running_req)
     for n, cost in ((6, 1), (4, 2)):
         if 1 < n < block:
             yield Change(f"--speculative-dflash-block-size {n}", "dflash_block", cost,
@@ -823,15 +823,17 @@ def _speculative_bytes(config) -> tuple[int, int]:
     draft = draft_resident_bytes(config.speculative_draft_model_path, config.speculative_draft_quant)
     # the draft attention's fp32 rope table, built for its full position range
     draft += draft_cfg.max_position_embeddings * draft_cfg.head_dim * 4
-    # the draft's context K/V (bf16), preallocated per layer window
+    # the draft's context K/V (bf16), preallocated per layer window, one slot per running request
     draft += DraftContextCache.nbytes_for(
-        draft_cfg.layer_windows, config.max_seq_len, draft_cfg.num_key_value_heads, draft_cfg.head_dim, 2)
+        draft_cfg.layer_windows, config.max_seq_len, draft_cfg.num_key_value_heads, draft_cfg.head_dim, 2,
+        num_slots=config.max_running_req)
     states = 0
     if _dflash_target_verify_graph_enabled_for_config(config):
         block = config.speculative_dflash_block_size or draft_cfg.block_size
         if block > 1:
-            # per verified token: the GDN conv state and recurrence inputs the commit replays
-            states = block * dflash_verify_bytes_per_token(config)
+            # per verified token: the GDN conv state and recurrence inputs the commit replays,
+            # for the largest verify graph (every running request at the full block)
+            states = config.max_running_req * block * dflash_verify_bytes_per_token(config)
     return draft, states
 
 
