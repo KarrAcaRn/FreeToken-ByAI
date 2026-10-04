@@ -63,6 +63,21 @@ class ForwardInput(NamedTuple):
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
 
+def _row_logprobs(req, outputs, row: int) -> tuple[float | None, list[int] | None, list[float] | None]:
+    """The sampled token's logprob and the requested top logprobs of one output row."""
+    if not req.sampling_params.logprobs or outputs.chosen_logprobs_cpu is None:
+        return None, None, None
+    chosen = float(outputs.chosen_logprobs_cpu[row].item())
+    requested_top = req.sampling_params.top_logprobs
+    if requested_top > 0 and outputs.top_ids_cpu is not None:
+        return (
+            chosen,
+            [int(t) for t in outputs.top_ids_cpu[row, :requested_top].tolist()],
+            outputs.top_logprobs_cpu[row, :requested_top].tolist(),
+        )
+    return chosen, [], []
+
+
 def _drain_before_schedule(last_data: ForwardData | None) -> bool:
     return last_data is not None and (
         last_data[1].num_tokens > 1 or getattr(last_data[1], "force_drain", False)
@@ -357,7 +372,6 @@ class Scheduler(SchedulerIOMixin):
             return
 
         batch, outputs = last_data[0].batch, last_data[1]
-        next_tokens_cpu = outputs.next_tokens_cpu
         outputs.copy_done_event.synchronize()
         num_tokens = getattr(outputs, "num_tokens", 1)
         reply: List[DetokenizeMsg] = []
@@ -395,7 +409,7 @@ class Scheduler(SchedulerIOMixin):
                     continue
 
                 if num_tokens > 1:
-                    self._drain_multi_token(req, next_tokens_cpu, i, num_tokens, reply, new_finished_reqs, batch)
+                    self._drain_multi_token(req, outputs, i, num_tokens, reply, new_finished_reqs, batch)
                 else:
                     self._drain_single_token(req, outputs, i, reply, new_finished_reqs, batch)
 
@@ -466,18 +480,7 @@ class Scheduler(SchedulerIOMixin):
         req.append_host(next_token.unsqueeze(0))
         next_token = int(next_token.item())
 
-        row_chosen_logprob: float | None = None
-        row_top_ids: list[int] | None = None
-        row_top_logprobs: list[float] | None = None
-        if req.sampling_params.logprobs and outputs.chosen_logprobs_cpu is not None:
-            row_chosen_logprob = float(outputs.chosen_logprobs_cpu[i].item())
-            requested_top = req.sampling_params.top_logprobs
-            if requested_top > 0 and outputs.top_ids_cpu is not None:
-                row_top_ids = [int(t) for t in outputs.top_ids_cpu[i, :requested_top].tolist()]
-                row_top_logprobs = outputs.top_logprobs_cpu[i, :requested_top].tolist()
-            else:
-                row_top_ids = []
-                row_top_logprobs = []
+        row_chosen_logprob, row_top_ids, row_top_logprobs = _row_logprobs(req, outputs, i)
         # EOS / stop-string -> "stop", output budget exhausted -> "length";
         # EOS and stop strings win over length.
         # Overlap can advance device_len ahead of the token delivered to the host.
@@ -539,12 +542,13 @@ class Scheduler(SchedulerIOMixin):
             # None'd GDN ping-pong slots).
             self.cache_manager.cache_req(req, finished=False)
 
-    def _drain_multi_token(self, req, next_tokens_cpu, i, num_tokens, reply, new_finished_reqs, batch):
-        tokens = next_tokens_cpu[i * num_tokens:(i + 1) * num_tokens]
+    def _drain_multi_token(self, req, outputs, i, num_tokens, reply, new_finished_reqs, batch):
+        first = i * num_tokens
+        tokens = outputs.next_tokens_cpu[first:first + num_tokens]
         emit_count = _multi_token_emit_count(req.input_ids.numel(), req.max_device_len, tokens.numel())
         appended = 0
         finished = emit_count == 0
-        for t in tokens[:emit_count]:
+        for j, t in enumerate(tokens[:emit_count]):
             t_scalar = int(t.item())
             req.append_host(t.unsqueeze(0))
             appended += 1
@@ -553,7 +557,14 @@ class Scheduler(SchedulerIOMixin):
             matched_stop = self._match_stop_str(req) if not hit_eos and req.sampling_params.stop_strs else None
             finished = hit_length or hit_eos or matched_stop is not None
             finish_reason = ("stop" if (hit_eos or matched_stop is not None) else "length") if finished else None
-            reply.append(DetokenizeMsg(uid=req.uid, next_token=t_scalar, finished=finished, finish_reason=finish_reason, matched_stop=matched_stop, stop_strs=req.sampling_params.stop_strs or None))
+            if t_scalar == self.toolcall_anchor_id and req.toolcall_anchor_len is None and not finished:
+                req.toolcall_anchor_len = req.input_ids.numel()
+            chosen, top_ids, top_logprobs = _row_logprobs(req, outputs, first + j)
+            reply.append(DetokenizeMsg(
+                uid=req.uid, next_token=t_scalar, finished=finished, finish_reason=finish_reason,
+                matched_stop=matched_stop, stop_strs=req.sampling_params.stop_strs or None,
+                chosen_logprob=chosen, top_ids=top_ids, top_logprobs=top_logprobs,
+            ))
             if finished:
                 break
         # The step wrote the KV of the anchor and the accepted drafts, i.e. of every emitted

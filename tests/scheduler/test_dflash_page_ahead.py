@@ -91,12 +91,13 @@ def test_multi_token_drain_marks_a_state_past_the_stop(eos_at, ahead):
     req.cached_len, req.device_len = 10, 11  # complete_one ran: the anchor's KV is in
     freed = []
     sched = SimpleNamespace(
-        eos_token_ids={eos}, finished_reqs=set(), _match_stop_str=lambda r: None,
+        eos_token_ids={eos}, finished_reqs=set(), _match_stop_str=lambda r: None, toolcall_anchor_id=None,
         decode_manager=SimpleNamespace(remove_req=lambda r: None),
         _free_req_resources=lambda r: freed.append((r.cached_len, r.linear_state_ahead)),
     )
     finished = set()
-    Scheduler._drain_multi_token(sched, req, tokens, 0, 4, [], finished, None)
+    outputs = SimpleNamespace(next_tokens_cpu=tokens, chosen_logprobs_cpu=None)
+    Scheduler._drain_multi_token(sched, req, outputs, 0, 4, [], finished, None)
     kept = 4 if eos_at is None else eos_at + 1
     # every kept token but the last has its KV written
     assert req.cached_len == 9 + kept
@@ -105,3 +106,26 @@ def test_multi_token_drain_marks_a_state_past_the_stop(eos_at, ahead):
         assert not finished and not freed
     else:
         assert freed == [(9 + kept, ahead)]
+
+
+def test_multi_token_drain_reports_each_tokens_logprobs():
+    from freetoken.scheduler.scheduler import Scheduler
+
+    tokens = torch.tensor([5, 6, 7], dtype=torch.int32)
+    req = Req(input_ids=torch.arange(1, 11, dtype=torch.int32), table_idx=0, cached_len=9,
+              output_len=50, uid=0, sampling_params=SamplingParams(logprobs=True, top_logprobs=2),
+              cache_handle=None)
+    req.cached_len, req.device_len = 10, 11
+    sched = SimpleNamespace(eos_token_ids=set(), finished_reqs=set(), _match_stop_str=lambda r: None,
+                            toolcall_anchor_id=None)
+    outputs = SimpleNamespace(
+        next_tokens_cpu=tokens,
+        chosen_logprobs_cpu=torch.tensor([-0.1, -0.2, -0.3]),
+        top_ids_cpu=torch.tensor([[5, 1, 2], [6, 1, 2], [7, 1, 2]], dtype=torch.int32),
+        top_logprobs_cpu=torch.tensor([[-0.1, -3.0, -4.0], [-0.2, -3.0, -4.0], [-0.3, -3.0, -4.0]]),
+    )
+    reply = []
+    Scheduler._drain_multi_token(sched, req, outputs, 0, 3, reply, set(), None)
+    assert [m.next_token for m in reply] == [5, 6, 7]
+    assert [round(m.chosen_logprob, 3) for m in reply] == [-0.1, -0.2, -0.3]
+    assert [m.top_ids for m in reply] == [[5, 1], [6, 1], [7, 1]]

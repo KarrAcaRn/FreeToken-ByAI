@@ -1494,8 +1494,11 @@ class Engine:
             self._run_mm_encoder(batch)
 
         # DFlash path: decode with speculative decoding
+        # penalties are built for one row per request: a verify block would apply them to its
+        # first row only, so such a request decodes without speculation
         if (
             self.dflash_worker is not None and batch.is_decode and batch.size == 1
+            and args.penalties is None
             and _dflash_can_draft(self.dflash_worker, batch.reqs[0])
         ):
             if self._dflash_gate is None or self._dflash_gate.should_run(batch.reqs[0].uid):
@@ -1703,7 +1706,7 @@ class Engine:
                     )
                     output_tokens = None
             if output_tokens is None:
-                output_tokens, accepted, verify_hidden = self._dflash_verify_decode_loop(
+                output_tokens, accepted, verify_hidden, verify_logits = self._dflash_verify_decode_loop(
                     batch, req, args, base_token, draft_to_verify, verify_input, old_cached_len, slot,
                 )
             if gate is not None:
@@ -1731,6 +1734,15 @@ class Engine:
             )
 
         output_tokens_cpu = output_tokens.to("cpu", non_blocking=True)
+        logprobs_out = None
+        if args.logprob_rows is not None:
+            # emitted token j was sampled from verify row j (the anchor's row predicts the first)
+            n = output_tokens.numel()
+            logprobs_out = self.sampler.compute_logprobs(
+                verify_logits[:n], output_tokens,
+                BatchSamplingArgs(temperatures=None, logprob_rows=args.logprob_rows.repeat(n),
+                                  max_top_logprobs=args.max_top_logprobs),
+            )
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)
         if gate is not None:
@@ -1746,8 +1758,10 @@ class Engine:
                     else 1.0
                 ),
             )
+        chosen, top_ids, top_logprobs = logprobs_out if logprobs_out is not None else (None, None, None)
         return ForwardOutput(
             output_tokens, output_tokens_cpu, copy_done_event,
+            chosen_logprobs_cpu=chosen, top_ids_cpu=top_ids, top_logprobs_cpu=top_logprobs,
             num_tokens=output_tokens.numel(),
             force_drain=True,
         )
@@ -1765,10 +1779,11 @@ class Engine:
 
     def _dflash_verify_decode_loop(
         self, batch, req, args, base_token, draft_to_verify, verify_input, old_cached_len, slot,
-    ) -> tuple[torch.Tensor, int, list[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, int, list[torch.Tensor], torch.Tensor]:
         """Verify token by token through the decode path (no verify graph for this length or
         target, e.g. an offloaded MoE): stops at the first rejected draft. Returns the output
-        tokens (anchor first), the accepted count and the kept tokens' hidden states."""
+        tokens (anchor first), the accepted count, the kept tokens' hidden states and the
+        logits of every step."""
         worker = self.dflash_worker
         pool = self.linear_state_pool
         pre_verify = snapshot_linear_state_slot(pool, slot) if pool is not None else None
@@ -1781,6 +1796,7 @@ class Engine:
             torch.rand(num_candidates, dtype=torch.float32, device=self.device) if sampling_verify else None
         )
         output_tokens, accepted = None, 0
+        step_logits = []
         for i in range(verify_input.numel()):
             position_i = old_cached_len + i
             req.cached_len = position_i
@@ -1801,7 +1817,8 @@ class Engine:
                     )
                 else:
                     logits_i, hidden_i = self.model.forward(return_hidden_layers=worker.target_layer_ids)
-            logits_i = logits_i[:1]
+            logits_i = logits_i[:1].clone()
+            step_logits.append(logits_i)
             hidden_i = clone_hidden_outputs([h[:1] for h in hidden_i])
             if pool is not None:
                 step_states.append(snapshot_linear_state_slot(pool, slot))
@@ -1840,7 +1857,8 @@ class Engine:
         commit_len = output_tokens.numel() - 1
         if pool is not None and commit_len < len(step_states):
             restore_linear_state_for_commit(pool, slot, pre_verify, step_states, commit_len)
-        return output_tokens, accepted, [torch.cat(parts, dim=0) for parts in hidden_parts]
+        hidden = [torch.cat(parts, dim=0) for parts in hidden_parts]
+        return output_tokens, accepted, hidden, torch.cat(step_logits, dim=0)
 
     def _warmup_prefill(self) -> None:
         """Compile the Triton prefill path before the first real request.
