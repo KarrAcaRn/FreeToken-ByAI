@@ -1309,15 +1309,11 @@ class Engine:
                     logits, hidden_states = self.model.forward(
                         return_hidden_layers=worker.target_layer_ids
                     )
-                row = 0
+                spans, row = [], 0
                 for req in batch.reqs:
-                    n = req.extend_len
-                    slot = worker.slot_of(req.uid)
-                    if slot is not None:
-                        worker.store_hidden_states(
-                            slot, [h[row : row + n] for h in hidden_states], req.cached_len
-                        )
-                    row += n
+                    spans.append((worker.slot_of(req.uid), row, req.extend_len, req.cached_len))
+                    row += req.extend_len
+                worker.store_hidden_states_batch(spans, hidden_states)
             elif use_graph:
                 logits = self.graph_runner.replay(batch)
             else:
@@ -1440,11 +1436,10 @@ class Engine:
             if gate is not None:
                 target_end = torch.cuda.Event(enable_timing=True)
                 target_end.record(self.stream)
-            for b, (out, _) in enumerate(results):
-                commit_len = out.numel() - 1
-                worker.store_hidden_states(
-                    slots[b], [h[row_base[b] : row_base[b] + commit_len] for h in verify_hidden], old_cached[b]
-                )
+            worker.store_hidden_states_batch(
+                [(slots[b], row_base[b], out.numel() - 1, old_cached[b]) for b, (out, _) in enumerate(results)],
+                verify_hidden,
+            )
         finally:
             restore_verify_state(batch, verify_state)
 

@@ -132,21 +132,41 @@ class DFlashWorker:
     def store_hidden_states(self, slot: int, hidden_states: list[torch.Tensor], start_position: int) -> None:
         """Project target-layer hidden states ([tokens, hidden] each, positions from
         ``start_position``) into every draft layer's context K/V of ``slot``."""
-        rows = hidden_states[0].shape[0]
-        if rows == 0:
-            return
+        self.store_hidden_states_batch([(slot, 0, hidden_states[0].shape[0], start_position)], hidden_states)
+
+    def store_hidden_states_batch(
+        self, spans: list[tuple[int, int, int, int]], hidden_states: list[torch.Tensor]
+    ) -> None:
+        """Store several requests' rows with one projection: ``spans`` are (slot, first row,
+        rows, start position) into ``hidden_states`` ([tokens, hidden] per target layer)."""
         keep = self.context.rows_needed
-        skip = rows - keep if keep is not None and rows > keep else 0
-        features = torch.cat([h[skip:] for h in hidden_states], dim=-1)
+        picks, kept = [], []
+        for slot, first, rows, start in spans:
+            if rows <= 0 or slot is None:
+                continue
+            skip = rows - keep if keep is not None and rows > keep else 0
+            picks.append((first + skip, rows - skip, start + skip))
+            kept.append((slot, rows, start, rows - skip))
+        if not picks:
+            return
+        if len(picks) == 1:
+            first, n, _ = picks[0]
+            features = torch.cat([h[first : first + n] for h in hidden_states], dim=-1)
+        else:
+            index = torch.cat([torch.arange(f, f + n) for f, n, _ in picks]).to(hidden_states[0].device)
+            features = torch.cat([h.index_select(0, index) for h in hidden_states], dim=-1)
         context = self.draft_model.project_context_features(features)
-        positions = torch.arange(
-            start_position + skip, start_position + rows, dtype=torch.int32, device=context.device
-        )
+        positions = torch.cat([
+            torch.arange(p, p + n, dtype=torch.int32) for _, n, p in picks
+        ]).to(context.device, non_blocking=True)
         layer_kv = [
             layer.self_attn.project_context_kv(context, positions)
             for layer in self.draft_model.layers.op_list
         ]
-        self.context.append(slot, layer_kv, start_position, rows)
+        row = 0
+        for slot, rows, start, n in kept:
+            self.context.append(slot, [(k[row : row + n], v[row : row + n]) for k, v in layer_kv], start, rows)
+            row += n
 
     def target_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Project target hidden states without LMHead's prefill last-token slicing."""
