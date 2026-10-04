@@ -22,8 +22,14 @@ logger = init_logger(__name__)
 
 def project_lm_head_all_positions(lm_head, hidden_states: torch.Tensor) -> torch.Tensor:
     """Project every hidden row through an LM head, bypassing prefill last-token slicing."""
-    module = getattr(lm_head, "tied_embedding", None) or lm_head
-    logits = F.linear(hidden_states, module.weight, getattr(lm_head, "bias", None))
+    tied = getattr(lm_head, "tied_embedding", None)
+    if tied is not None:
+        logits = lm_head.tied_kernel.linear(hidden_states, tied.weight, lm_head.bias)
+    elif getattr(lm_head, "quant_method", None) is not None:
+        # the head's own kernel: a quantized (e.g. NVFP4) head stores packed weights
+        logits = lm_head.quant_method.apply(lm_head, hidden_states)
+    else:
+        logits = F.linear(hidden_states, lm_head.weight, getattr(lm_head, "bias", None))
     tp_size = getattr(lm_head, "tp_size", 1)
     if tp_size == 1:
         return logits
