@@ -1,32 +1,17 @@
 from __future__ import annotations
 
-import os
-import time
 from typing import TYPE_CHECKING
 
 import torch
 from freetoken.engine.graph import project_lm_head_all_positions
 
 from freetoken.speculative.dflash.config import DFlashConfig
+from freetoken.speculative.dflash.context import DraftContextCache
 from freetoken.speculative.dflash.model import DFlashDraftModel
 from freetoken.speculative.dflash.weight import iter_dflash_weights
 
 if TYPE_CHECKING:
     from freetoken.engine.engine import Engine
-
-
-def _dflash_worker_timing_now(device: torch.device) -> float | None:
-    if os.environ.get("FREETOKEN_DEBUG_DFLASH_TIMING", "0") != "1":
-        return None
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    return time.perf_counter()
-
-
-def _dflash_worker_elapsed_ms(start: float | None, end: float | None) -> float:
-    if start is None or end is None:
-        return 0.0
-    return (end - start) * 1000.0
 
 
 class DFlashWorker:
@@ -41,6 +26,7 @@ class DFlashWorker:
         block_size: int | None = None,
         draft_quant: str = "none",
         linear_state_bytes_per_token: int = 0,
+        max_context_len: int = 32768,
     ):
         from freetoken.utils import cached_load_hf_config
 
@@ -72,15 +58,17 @@ class DFlashWorker:
         self.target_embed = target_model.model.embed_tokens
         self.target_lm_head = target_model.lm_head
 
-        # Hidden context storage grows lazily and get_context() returns a view into it.
-        # Cross-attention needs multiple context positions to differentiate draft tokens.
-        self._context_buffer: list[torch.Tensor] = []
-        self._context_len = 0
-        self._context_storage: torch.Tensor | None = None
-        self._context_kv_cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None
-        self._context_kv_len = 0
-        self.last_context_kv_append_ms = 0.0
-        self.last_draft_model_forward_ms = 0.0
+        # The draft's context K/V, preallocated before the KV pool is sized (see context.py)
+        self.context = DraftContextCache(
+            self.config.layer_windows,
+            max_context_len,
+            self.config.num_key_value_heads,
+            self.config.head_dim,
+            torch.bfloat16,
+            device,
+        )
+        self._uid: int | None = None
+        self._last_tokens: torch.Tensor | None = None  # the finished request's ids, for carry-over
         self._mask_embeds: torch.Tensor | None = None
         self._draft_input_storage: torch.Tensor | None = None
         self.last_draft_probs: torch.Tensor | None = None
@@ -117,107 +105,50 @@ class DFlashWorker:
             )
         return self._pre_verify_views
 
-    def store_hidden_states(self, hidden_states: list[torch.Tensor]) -> None:
-        """Store hidden states from a forward pass into the context buffer.
+    def begin_request(self, uid: int, token_ids: torch.Tensor, cached_len: int) -> None:
+        """Called on each prefill chunk: a new request keeps the previous request's context
+        through its cached prefix when that request's tokens match it (a multi-turn chat
+        continues the last conversation), and starts empty otherwise."""
+        if uid == self._uid:
+            return
+        self._uid = uid
+        prev = self._last_tokens
+        self._last_tokens = None
+        if (
+            cached_len > 0
+            and prev is not None
+            and self.context.end_pos >= cached_len
+            and prev.numel() >= cached_len
+            and torch.equal(prev[:cached_len], token_ids[:cached_len].to(prev.dtype))
+        ):
+            self.context.truncate(cached_len)
+        else:
+            self.context.clear()
 
-        Args:
-            hidden_states: list of [num_tokens, hidden] tensors from target layers.
-                           For decode: num_tokens=1. For prefill: num_tokens=prompt_len.
-        """
+    def finish_request(self, token_ids: torch.Tensor) -> None:
+        """Remember the finished request's tokens behind the stored context (host ids)."""
+        self._uid = None
+        self._last_tokens = token_ids[: self.context.end_pos].clone()
+        self.last_draft_probs = None
+
+    def store_hidden_states(self, hidden_states: list[torch.Tensor], start_position: int) -> None:
+        """Project target-layer hidden states ([tokens, hidden] each, positions from
+        ``start_position``) into every draft layer's context K/V."""
         rows = hidden_states[0].shape[0]
-        context_dim = sum(hidden.shape[1] for hidden in hidden_states)
-        self._ensure_context_capacity(rows, context_dim, hidden_states[0].dtype, hidden_states[0].device)
-        assert self._context_storage is not None
-        start = self._context_len
-        end = start + rows
-        offset = 0
-        for hidden in hidden_states:
-            width = hidden.shape[1]
-            self._context_storage[start:end, offset : offset + width].copy_(hidden)
-            offset += width
-        context = self._context_storage[start:end]
-        self._context_len = end
-        append_start = _dflash_worker_timing_now(context.device)
-        self._append_context_kv_cache(context, start)
-        append_end = _dflash_worker_timing_now(context.device)
-        self.last_context_kv_append_ms = _dflash_worker_elapsed_ms(append_start, append_end)
-
-    def _append_context_kv_cache(self, context: torch.Tensor, start_position: int) -> None:
-        draft_model = getattr(self, "draft_model", None)
-        layers = getattr(draft_model, "layers", None)
-        if not layers:
+        if rows == 0:
             return
-        layer_list = getattr(layers, "op_list", layers)
-
-        project_context_features = getattr(draft_model, "project_context_features", None)
-        context_for_attention = project_context_features(context) if project_context_features is not None else context
+        keep = self.context.rows_needed
+        skip = rows - keep if keep is not None and rows > keep else 0
+        features = torch.cat([h[skip:] for h in hidden_states], dim=-1)
+        context = self.draft_model.project_context_features(features)
         positions = torch.arange(
-            start_position,
-            start_position + context.shape[0],
-            dtype=torch.int32,
-            device=context_for_attention.device,
+            start_position + skip, start_position + rows, dtype=torch.int32, device=context.device
         )
-        cache = getattr(self, "_context_kv_cache", None)
-        if cache is None or len(cache) != len(layer_list):
-            cache = [None] * len(layer_list)
-
-        appended = False
-        for i, layer in enumerate(layer_list):
-            attention = getattr(layer, "self_attn", layer)
-            project_context_kv = getattr(attention, "project_context_kv", None)
-            if project_context_kv is None:
-                continue
-            new_k, new_v = project_context_kv(context_for_attention, positions)
-            end = start_position + context.shape[0]
-            entry = cache[i]
-            if entry is None:
-                cache[i] = self._alloc_context_kv_entry(new_k, new_v, end)
-            else:
-                pool_k, pool_v, cap = entry
-                if end > cap:
-                    cap = max(end, 2 * cap)
-                    pool_k = self._grow_context_kv(pool_k, cap)
-                    pool_v = self._grow_context_kv(pool_v, cap)
-                pool_k[start_position:end].copy_(new_k)
-                pool_v[start_position:end].copy_(new_v)
-                cache[i] = (pool_k, pool_v, cap)
-            appended = True
-
-        if appended:
-            self._context_kv_cache = cache
-            self._context_kv_len = start_position + context.shape[0]
-
-    @staticmethod
-    def _alloc_context_kv_entry(new_k: torch.Tensor, new_v: torch.Tensor, length: int):
-        cap = max(length, 2 * new_k.shape[0], 16)
-        pool_k = torch.empty((cap, *new_k.shape[1:]), dtype=new_k.dtype, device=new_k.device)
-        pool_v = torch.empty((cap, *new_v.shape[1:]), dtype=new_v.dtype, device=new_v.device)
-        pool_k[:length].copy_(new_k)
-        pool_v[:length].copy_(new_v)
-        return (pool_k, pool_v, cap)
-
-    @staticmethod
-    def _grow_context_kv(pool: torch.Tensor, cap: int) -> torch.Tensor:
-        grown = torch.empty((cap, *pool.shape[1:]), dtype=pool.dtype, device=pool.device)
-        grown[: pool.shape[0]].copy_(pool)
-        return grown
-
-    def _ensure_context_capacity(
-        self,
-        add_tokens: int,
-        context_dim: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> None:
-        required = self._context_len + add_tokens
-        storage = getattr(self, "_context_storage", None)
-        if storage is not None and storage.shape[0] >= required:
-            return
-        new_capacity = max(required, 2 * (storage.shape[0] if storage is not None else 0), 16)
-        new_storage = torch.empty((new_capacity, context_dim), dtype=dtype, device=device)
-        if storage is not None and self._context_len > 0:
-            new_storage[:self._context_len].copy_(storage[:self._context_len])
-        self._context_storage = new_storage
+        layer_kv = [
+            layer.self_attn.project_context_kv(context, positions)
+            for layer in self.draft_model.layers.op_list
+        ]
+        self.context.append(layer_kv, start_position, rows)
 
     def target_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Project target hidden states without LMHead's prefill last-token slicing."""
@@ -232,43 +163,9 @@ class DFlashWorker:
             logits = torch.tanh(logits / float(softcap)) * float(softcap)
         return logits
 
-    def reset_context(self) -> None:
-        """Clear the context buffer (called when a request finishes)."""
-        self._context_buffer.clear()
-        self._context_len = 0
-        self._context_storage = None
-        self._context_kv_cache = None
-        self._context_kv_len = 0
-        self.last_context_kv_append_ms = 0.0
-        self.last_draft_model_forward_ms = 0.0
-        self._draft_input_storage = None
-        self.last_draft_probs = None
-
     @property
     def context_length(self) -> int:
-        return self._context_len
-
-    def get_context(self) -> torch.Tensor:
-        """Get the full context features buffer: [seq_len, context_dim]."""
-        if self._context_len == 0:
-            raise RuntimeError("DFlash context buffer is empty")
-        assert self._context_storage is not None
-        return self._context_storage[:self._context_len]
-
-    def get_context_kv_cache(self) -> list[tuple[torch.Tensor, torch.Tensor] | None] | None:
-        cache = getattr(self, "_context_kv_cache", None)
-        if cache is None or getattr(self, "_context_kv_len", 0) != self._context_len:
-            return None
-        out = []
-        for kv in cache:
-            if kv is None:
-                return None
-            if len(kv) == 3:
-                pool_k, pool_v, _ = kv
-                out.append((pool_k[: self._context_kv_len], pool_v[: self._context_kv_len]))
-            else:  # legacy 2-tuple (tests / external callers)
-                out.append(kv)
-        return out
+        return self.context.end_pos
 
     def _draft_input_embeds(self, base_token_id: torch.Tensor) -> torch.Tensor:
         if self.block_size == 1:
@@ -313,39 +210,18 @@ class DFlashWorker:
 
     def draft(
         self,
-        hidden_states: list[torch.Tensor] | None,  # target-layer hidden states to append first, if any
-        base_token_id: torch.Tensor,       # [1] — last verified token
-        position: int,                      # position of base token
+        base_token_id: torch.Tensor,       # [1] — the anchor: the last emitted token
+        position: int,                      # position of the anchor
         sampling_args=None,                 # BatchSamplingArgs; None / greedy -> argmax drafts
     ) -> torch.Tensor:
-        """Generate block_size draft tokens in parallel.
+        """Generate block_size draft tokens in parallel over the stored context.
 
         Returns: draft_tokens [block_size]
         """
         bs = self.block_size
-
-        # 1. Store current hidden states (None: the last verify stored them) and get full context
-        if hidden_states is not None:
-            self.store_hidden_states(hidden_states)
-        context_features = self.get_context()  # [seq_len, context_dim]
-
         mask_embeds = self._draft_input_embeds(base_token_id)
         positions = self._draft_positions(position)
-
-        # 4. Draft model forward
-        context_kv_cache = self.get_context_kv_cache()
-        forward_start = _dflash_worker_timing_now(self.device)
-        if context_kv_cache is None:
-            draft_hidden = self.draft_model.forward(mask_embeds, context_features, positions)
-        else:
-            draft_hidden = self.draft_model.forward(
-                mask_embeds,
-                context_features,
-                positions,
-                context_kv_cache=context_kv_cache,
-            )
-        forward_end = _dflash_worker_timing_now(self.device)
-        self.last_draft_model_forward_ms = _dflash_worker_elapsed_ms(forward_start, forward_end)
+        draft_hidden = self.draft_model.forward(mask_embeds, positions, self.context.all_layer_kv())
 
         # Only positions 1..bs-1 are candidate draft tokens. Position 0 is the
         # sampled target base token and is not consumed by the engine.

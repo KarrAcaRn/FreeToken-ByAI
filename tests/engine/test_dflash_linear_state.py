@@ -16,9 +16,6 @@ from freetoken.speculative.utils import (
     select_output_tokens,
     select_streaming_output_tokens,
 )
-from freetoken.speculative.dflash.worker import DFlashWorker
-from freetoken.speculative.dflash.config import DFlashConfig
-from freetoken.speculative.dflash.model import _DFlashAttention
 
 
 def testselect_output_tokens_accepts_longest_matching_prefix():
@@ -70,65 +67,6 @@ def test_dflash_target_verify_graph_allows_explicit_fused_moe_with_capture_safe_
     )
 
     assert _dflash_target_verify_graph_enabled_for_config(config) is True
-
-
-def test_dflash_worker_stores_hidden_context_in_single_contiguous_buffer():
-    worker = DFlashWorker.__new__(DFlashWorker)
-    worker._context_buffer = []
-    worker._context_len = 0
-
-    worker.store_hidden_states([
-        torch.tensor([[1.0], [2.0]]),
-        torch.tensor([[10.0], [20.0]]),
-    ])
-    worker.store_hidden_states([
-        torch.tensor([[3.0]]),
-        torch.tensor([[30.0]]),
-    ])
-
-    context = worker.get_context()
-
-    assert len(worker._context_buffer) == 0
-    assert worker.context_length == 3
-    assert context.tolist() == [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]
-
-
-def test_dflash_attention_cached_context_matches_uncached_forward():
-    from freetoken.speculative.dflash.model import _DFlashAttention
-
-    if not torch.cuda.is_available():
-        pytest.skip("FlashInfer RMSNorm projection path requires CUDA")
-
-    device = torch.device("cuda")
-    cfg = DFlashConfig(
-        hidden_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=1,
-        num_key_value_heads=1,
-        head_dim=64,
-        layer_types=["full_attention"],
-    )
-    attn = _DFlashAttention(cfg, layer_id=0).to(device)
-    attn._apply_rope_inplace = lambda positions, query, key: None
-    with torch.no_grad():
-        eye = torch.eye(64, dtype=torch.bfloat16, device=device)
-        attn.q_proj.weight.copy_(eye)
-        attn.k_proj.weight.copy_(eye)
-        attn.v_proj.weight.copy_(eye * 0.5)
-        attn.o_proj.weight.copy_(eye)
-        attn.q_norm.weight.fill_(1)
-        attn.k_norm.weight.fill_(1)
-
-    hidden_states = torch.arange(128, dtype=torch.bfloat16, device=device).view(2, 64) / 128
-    context = torch.arange(192, dtype=torch.bfloat16, device=device).view(3, 64) / 192
-    positions = torch.arange(2, dtype=torch.int32, device=device)
-    context_positions = torch.arange(3, dtype=torch.int32, device=device)
-    context_kv = attn.project_context_kv(context, context_positions)
-
-    uncached = attn.forward(hidden_states, context, positions)
-    cached = attn.forward(hidden_states, context, positions, context_kv=context_kv)
-
-    assert torch.allclose(cached, uncached, atol=1e-3, rtol=1e-3)
 
 
 def test_dflash_adaptive_gate_disables_when_slower_than_baseline():

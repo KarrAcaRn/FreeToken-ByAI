@@ -147,15 +147,9 @@ class _DFlashAttention(BaseOP):
         )
         return context_k_flat.view(-1, self.num_kv_heads, self.head_dim), context_v
 
-    def forward(self, hidden_states, context, positions, context_kv=None, attn_mask=None):
+    def forward(self, hidden_states, positions, context_kv, attn_mask=None):
         q = self.q_proj.forward(hidden_states)
-        if context_kv is None:
-            context_positions = torch.arange(
-                context.shape[0], dtype=positions.dtype, device=positions.device
-            )
-            context_k, context_v = self.project_context_kv(context, context_positions)
-        else:
-            context_k, context_v = context_kv
+        context_k, context_v = context_kv
         block_k = self.k_proj.forward(hidden_states)
         block_v = self.v_proj.forward(hidden_states)
 
@@ -359,9 +353,8 @@ class _DFlashDecoderLayer(BaseOP):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        context: torch.Tensor,
         positions: torch.Tensor,
-        context_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+        context_kv: tuple[torch.Tensor, torch.Tensor],
         attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Pre-norm cross-attention
@@ -369,9 +362,7 @@ class _DFlashDecoderLayer(BaseOP):
         hidden_states = self.input_layernorm.forward(hidden_states)
         if self.attention_conv is not None:
             hidden_states, taps = self.attention_conv.prepare(hidden_states)
-        hidden_states = self.self_attn.forward(
-            hidden_states, context, positions, context_kv=context_kv, attn_mask=attn_mask
-        )
+        hidden_states = self.self_attn.forward(hidden_states, positions, context_kv, attn_mask=attn_mask)
         if self.attention_conv is not None:
             hidden_states = self.attention_conv.finish(hidden_states, taps)
         hidden_states = residual + hidden_states
@@ -454,49 +445,31 @@ class DFlashDraftModel(BaseOP):
 
     def forward(
         self,
-        mask_embeds: torch.Tensor,    # [block_size, hidden] — embedded mask tokens (from target's embedding)
-        context_features: torch.Tensor,  # [ctx_len, num_target_layers * hidden] — target hidden states
+        mask_embeds: torch.Tensor,    # [block_size, hidden] — embedded anchor + mask tokens (target's embedding)
         positions: torch.Tensor,      # [block_size] — positions for RoPE
-        context_kv_cache: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
+        context_kv_cache: list[tuple[torch.Tensor, torch.Tensor]],  # per layer: its context K, V
     ) -> torch.Tensor:
         """Run draft model forward, return hidden states [block_size, hidden].
 
         The caller applies the target model's LM head to get logits.
         """
-        use_context_kv_cache = (
-            context_kv_cache is not None
-            and len(context_kv_cache) == len(self.layers.op_list)
-            and all(kv is not None for kv in context_kv_cache)
-        )
-        context = None if use_context_kv_cache else self.project_context_features(context_features)
-
         # The attention mask depends only on (context_len, block_len, layer kind);
         # build it once per kind instead of once per layer.
-        if use_context_kv_cache:
-            context_len = context_kv_cache[0][0].shape[0]
-        else:
-            context_len = context.shape[0]
         masks: dict[tuple, torch.Tensor | None] = {}
-        for layer in self.layers.op_list:
+        h = mask_embeds
+        for layer, context_kv in zip(self.layers.op_list, context_kv_cache, strict=True):
             attn = layer.self_attn
-            key = (attn.layer_type, attn.is_causal, attn.sliding_window)
+            key = (context_kv[0].shape[0], attn.layer_type, attn.is_causal, attn.sliding_window)
             if key not in masks:
                 masks[key] = _dflash_context_block_mask(
-                    context_len,
+                    key[0],
                     mask_embeds.shape[0],
                     mask_embeds.device,
                     layer_type=attn.layer_type,
                     is_causal=attn.is_causal,
                     sliding_window=attn.sliding_window,
                 )
-
-        # Run through layers
-        h = mask_embeds
-        for i, layer in enumerate(self.layers.op_list):
-            context_kv = context_kv_cache[i] if use_context_kv_cache else None
-            attn = layer.self_attn
-            key = (attn.layer_type, attn.is_causal, attn.sliding_window)
-            h = layer.forward(h, context, positions, context_kv=context_kv, attn_mask=masks[key])
+            h = layer.forward(h, positions, context_kv, attn_mask=masks[key])
 
         return self.norm.forward(h)
 

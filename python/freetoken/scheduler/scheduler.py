@@ -702,9 +702,9 @@ class Scheduler(SchedulerIOMixin):
         # Polymorphic free: the DSV4 manager returns the request's window pages + cmp/idx blocks
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).
-        # DFlash: clear context buffer when the request finishes
+        # DFlash: the next request may continue this one's draft context (multi-turn chat)
         if self.engine.dflash_worker is not None:
-            self.engine.dflash_worker.reset_context()
+            self.engine.dflash_worker.finish_request(req.input_ids)
         self.cache_manager.cache_req(req, finished=True)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1

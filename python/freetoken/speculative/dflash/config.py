@@ -54,6 +54,16 @@ class DFlashConfig:
         return len(self.target_layer_ids)
 
     @property
+    def layer_windows(self) -> List[int | None]:
+        """Each draft layer's attention window over the context (None: full attention)."""
+        return [
+            self.sliding_window
+            if (self.layer_types[i] if i < len(self.layer_types) else "full_attention") == "sliding_attention"
+            else None
+            for i in range(self.num_hidden_layers)
+        ]
+
+    @property
     def context_dim(self) -> int:
         """Concatenated target hidden states dimension = num_target_layers * hidden_size."""
         return self.num_target_layers * self.hidden_size

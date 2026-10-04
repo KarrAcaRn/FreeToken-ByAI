@@ -666,6 +666,7 @@ class Engine:
                     state_pool_bytes(config, num_slots=1)
                     if _dflash_target_verify_graph_enabled_for_config(config) else 0
                 ),
+                max_context_len=config.max_seq_len,
             )
             logger.info_rank0(
                 f"DFlash enabled: block_size={self.dflash_worker.block_size}, "
@@ -1371,15 +1372,25 @@ class Engine:
                 return self._forward_batch_dflash(batch, args)
 
         use_graph = self.graph_runner.can_use_cuda_graph(batch)
+        # DFlash runs one request at a time; every target forward of it (prefill chunks, and
+        # the plain decode steps when the gate is off) feeds the draft's context
+        worker = self.dflash_worker if batch.size == 1 else None
         with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
-            if use_graph:
+            if worker is not None:
+                req = batch.reqs[0]
+                if batch.is_prefill:
+                    worker.begin_request(req.uid, req.input_ids, req.cached_len)
+                if use_graph:
+                    logits, hidden_states = self.graph_runner.replay(
+                        batch, return_hidden_layers=worker.target_layer_ids
+                    )
+                else:
+                    logits, hidden_states = self.model.forward(
+                        return_hidden_layers=worker.target_layer_ids
+                    )
+                worker.store_hidden_states(hidden_states, req.cached_len)
+            elif use_graph:
                 logits = self.graph_runner.replay(batch)
-            elif self.dflash_worker is not None and batch.is_prefill:
-                # Extract hidden states for DFlash context buffer
-                logits, hidden_states = self.model.forward(
-                    return_hidden_layers=self.dflash_worker.target_layer_ids
-                )
-                self.dflash_worker.store_hidden_states(hidden_states)
             else:
                 logits = self.model.forward()
         if self.cpu_moe_executor is not None:
@@ -1422,7 +1433,7 @@ class Engine:
         position = req.cached_len
         target_start = target_end = None
         draft_start = _dflash_timing_now(self.device)
-        draft_tokens = worker.draft(None, base_token, position, sampling_args=args)
+        draft_tokens = worker.draft(base_token, position, sampling_args=args)
         draft_end = _dflash_timing_now(self.device)
 
         output_tokens = base_token[:1].clone()
@@ -1683,7 +1694,9 @@ class Engine:
 
                 commit_len = output_tokens.numel() - 1
                 if commit_len > 0:
-                    worker.store_hidden_states([h[:commit_len] for h in verify_hidden_states])
+                    worker.store_hidden_states(
+                        [h[:commit_len] for h in verify_hidden_states], old_cached_len
+                    )
                 replay_len = _dflash_verify_replay_len(
                     commit_len,
                     verify_len,
@@ -2291,13 +2304,6 @@ def _adjust_config(config: EngineConfig):
 
     if config.cuda_graph_max_bs is None:
         override("cuda_graph_max_bs", config.max_running_req)
-
-    if dflash_enabled and getattr(config, "cache_type", "radix") != "naive":
-        logger.warning_rank0(
-            "DFlash currently requires prompt tokens to be forwarded into its context buffer; "
-            "forcing cache_type='naive' to disable prefix reuse."
-        )
-        override("cache_type", "naive")
 
     if is_dsv4:
         _adjust_dsv4_config(config, override)
