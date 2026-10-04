@@ -773,6 +773,15 @@ def parse_args(
         help="Store the draft's projections as fp8 (e4m3, one scale per output row): half the "
              "VRAM of a bf16 draft. Verification stays exact; only the acceptance rate can move.",
     )
+    parser.add_argument(
+        "--disable-speculative-adaptive",
+        action="store_false",
+        dest="speculative_adaptive",
+        default=ServerArgs.speculative_adaptive,
+        help="Speculate on every decode step. By default a request stops speculating once its "
+             "cycles measure slower than plain decode (a draft that rarely matches, e.g. a "
+             "language it was not trained on).",
+    )
 
     parser.add_argument(
         "--enable-special-token-ckpt",

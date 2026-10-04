@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import statistics
-import time
 from collections import deque
-from dataclasses import dataclass, field
 from typing import Any, NamedTuple, TYPE_CHECKING
 
 import torch
@@ -209,20 +206,27 @@ def restore_linear_state_for_commit(
     restore_linear_state_slot(pool, slot, snapshot)
 
 
-def restore_graph_linear_state_for_commit(
+def commit_graph_linear_state(
+    gdn_layers: list,
     pool: Any,
-    slot: int,
-    pre_verify_snapshot: tuple[torch.Tensor, torch.Tensor],
-    graph_snapshots: tuple[torch.Tensor, torch.Tensor],
+    slot: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    graph_snapshots: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     commit_len: int,
 ) -> None:
+    """Advance the live GDN slot over the first ``commit_len`` tokens of a graph verify, which
+    left the slot untouched: copy the conv state after the last kept token and replay each
+    layer's recurrence from the inputs the verify stored. ``slot`` is ``[1]`` int32 and
+    ``cu_seqlens`` is ``[0, commit_len]`` int32, both on the device."""
     if commit_len <= 0:
-        snapshot = pre_verify_snapshot
-    elif commit_len <= graph_snapshots[0].shape[0]:
-        snapshot = (graph_snapshots[0][commit_len - 1], graph_snapshots[1][commit_len - 1])
-    else:
-        raise ValueError(f"commit_len={commit_len} exceeds graph snapshots={graph_snapshots[0].shape[0]}")
-    restore_linear_state_slot(pool, slot, snapshot)
+        return
+    conv_steps, mixed, ab = graph_snapshots
+    if commit_len > conv_steps.shape[0]:
+        raise ValueError(f"commit_len={commit_len} exceeds graph snapshots={conv_steps.shape[0]}")
+    pool.conv_states.index_copy_(1, slot.long(), conv_steps[commit_len - 1].unsqueeze(1))
+    for layer in gdn_layers:
+        li = pool.local_index(layer.layer_id)
+        layer.dflash_commit(pool, slot, cu_seqlens, mixed[li, :commit_len], ab[li, :, :commit_len])
 
 
 # ---------------------------------------------------------------------------
@@ -405,12 +409,3 @@ class AdaptiveGate:
                 f"baseline proxy {baseline_ms * self.margin:.3f} ms/token "
                 f"(plain decode estimate {baseline_ms:.3f} ms, margin {self.margin})"
             )
-
-    @classmethod
-    def from_env(cls) -> AdaptiveGate:
-        return cls(
-            margin=float(os.environ.get("FREETOKEN_SPEC_ADAPTIVE_MARGIN", "1.15")),
-            min_cycles=int(os.environ.get("FREETOKEN_SPEC_ADAPTIVE_MIN_CYCLES", "12")),
-            eval_interval=int(os.environ.get("FREETOKEN_SPEC_ADAPTIVE_EVAL_INTERVAL", "8")),
-            reprobe_every=int(os.environ.get("FREETOKEN_SPEC_ADAPTIVE_REPROBE_EVERY", "8")),
-        )

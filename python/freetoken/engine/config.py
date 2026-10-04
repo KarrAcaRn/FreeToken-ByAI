@@ -100,6 +100,8 @@ class EngineConfig:
     speculative_dflash_block_size: int | None = None  # None: the draft checkpoint's block_size
     # --speculative-draft-quant: "fp8" stores the draft's projections as e4m3 + per-row scales
     speculative_draft_quant: str = "none"
+    # --speculative-adaptive: stop speculating for a request that measures slower than plain decode
+    speculative_adaptive: bool = True
 
     def __post_init__(self):
         if self.moe_backend is None:

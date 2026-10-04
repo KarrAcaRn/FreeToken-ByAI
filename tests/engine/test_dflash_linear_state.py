@@ -48,19 +48,13 @@ def testselect_streaming_output_tokens_waits_until_bonus_after_all_accept():
     assert torch.equal(out, torch.tensor([10, 20, 30, 41], dtype=torch.int32))
 
 
-def test_dflash_target_verify_graph_disabled_for_offload_moe_backend(monkeypatch):
-    import freetoken.engine.engine as engine
-
-    monkeypatch.setattr(engine, "_DFLASH_TARGET_VERIFY_GRAPH", True)
+def test_dflash_target_verify_graph_disabled_for_offload_moe_backend():
     config = SimpleNamespace(moe_strategy="offload")
 
     assert _dflash_target_verify_graph_enabled_for_config(config) is False
 
 
-def test_dflash_target_verify_graph_allows_explicit_fused_moe_with_capture_safe_topk(monkeypatch):
-    import freetoken.engine.engine as engine
-
-    monkeypatch.setattr(engine, "_DFLASH_TARGET_VERIFY_GRAPH", True)
+def test_dflash_target_verify_graph_allows_explicit_fused_moe_with_capture_safe_topk():
     config = SimpleNamespace(
         moe_strategy="fused",
         model_config=SimpleNamespace(is_moe=True),
@@ -156,6 +150,11 @@ def test_sample_and_select_greedy_matches_exact_match():
     verify_logits[3, 4] = 10
     args = BatchSamplingArgs(temperatures=None)  # greedy
     worker = SimpleNamespace(last_draft_probs=None)
+    sampler = SimpleNamespace(sample=lambda logits, _args: logits.argmax(dim=-1))
+
+    out, accepted = sample_and_select(sampler, args, worker, base, drafts, verify_logits, 4)
+    assert accepted == 2
+    assert torch.equal(out, torch.tensor([5, 1, 2, 9], dtype=torch.int32))
 
 def test_sample_and_select_sampling_uses_rejection_chain():
     from freetoken.engine.engine import _dflash_sample_and_select as sample_and_select
@@ -167,28 +166,32 @@ def test_sample_and_select_sampling_uses_rejection_chain():
     draft_probs = torch.zeros(3, V)
     draft_probs[0, 1] = draft_probs[1, 2] = draft_probs[2, 3] = 1.0
     target_probs_logits = torch.zeros(4, V)
-    target_probs_logits[0, 1] = 10; target_probs_logits[1, 2] = 10
-    target_probs_logits[2, 3] = 10; target_probs_logits[3, 7] = 10
+    target_probs_logits[0, 1] = 40; target_probs_logits[1, 2] = 40
+    target_probs_logits[2, 3] = 40; target_probs_logits[3, 7] = 40
     args = BatchSamplingArgs(temperatures=torch.tensor([1.0]))
     worker = SimpleNamespace(last_draft_probs=draft_probs)
 
+    out, accepted = sample_and_select(None, args, worker, base, drafts, target_probs_logits, 4)
+    assert accepted == 3
+    assert torch.equal(out, torch.tensor([5, 1, 2, 3, 7], dtype=torch.int32))
 
 
-def test_dflash_target_verify_lens_within_budget_filters_by_snapshot_memory():
+
+def test_dflash_target_verify_lens_within_budget_filters_by_commit_memory():
     from freetoken.engine.graph import _dflash_target_verify_lens_within_budget
 
     pool = SimpleNamespace(
         conv_states=torch.zeros((2, 4, 3, 2), dtype=torch.float32),
         recurrent_states=torch.zeros((2, 4, 1, 3, 3), dtype=torch.float32),
     )
-    # one shared buffer of len per-token states, 120 B each here
-    assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 480) == [1, 2, 3, 4]
-    assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 300) == [1, 2]
+    # per token: conv state 2*3*2 fp32 = 48 B, q/k/v 2*3 + a/b 2*2*1 bf16 = 20 B
+    assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 272) == [1, 2, 3, 4]
+    assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 150) == [1, 2]
     assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 0) == []
     assert _dflash_target_verify_lens_within_budget([1, 2], None, 0) == [1, 2]
 
 
-def test_graph_capture_buffer_target_verify_recurrent_snapshots_are_layer_major():
+def test_graph_capture_buffer_target_verify_commit_inputs():
     from freetoken.core import Batch, Req
     from freetoken.engine.graph import GraphCaptureBuffer
 
@@ -198,7 +201,7 @@ def test_graph_capture_buffer_target_verify_recurrent_snapshots_are_layer_major(
     )
     buffer = GraphCaptureBuffer.init_dflash_verify(
         2, vocab_size=5, device=torch.device("cpu"),
-        hidden_size=3, hidden_dtype=torch.float32,
+        hidden_size=3, hidden_dtype=torch.bfloat16,
         num_hidden_layers=1, linear_state_pool=pool,
     )
     req = Req(
@@ -209,8 +212,10 @@ def test_graph_capture_buffer_target_verify_recurrent_snapshots_are_layer_major(
     batch = Batch(reqs=[req], phase="decode")
     batch.padded_reqs = batch.reqs
     buffer.set_dflash_target_verify_batch(batch, verify_len=2, return_linear_snapshots=True)
-    assert buffer.dflash_recurrent_states.shape == (4, 2, 1, 3, 3)
-    assert torch.equal(
-        batch.fla_metadata.dflash_recurrent_state_indices,
-        torch.arange(4, dtype=torch.int32),
-    )
+    fla = batch.fla_metadata
+    assert fla.dflash_disable_state_update
+    assert fla.dflash_conv_states_buffer.shape == (2, 4, 3, 2)
+    assert fla.dflash_gdn_mixed.shape == (4, 2, 3)
+    assert fla.dflash_gdn_ab.shape == (4, 2, 2, 1)
+    for t in (fla.dflash_conv_states_buffer, fla.dflash_gdn_mixed, fla.dflash_gdn_ab):
+        assert t.is_contiguous()

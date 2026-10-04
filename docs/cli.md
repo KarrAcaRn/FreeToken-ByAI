@@ -91,6 +91,19 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
 
+### Speculative decoding (DFlash)
+
+One request decodes at a time with a draft model; the target verifies every drafted token, so
+greedy output matches plain decoding up to bf16 ties. Prefix reuse (`--cache-type radix`) stays on.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--speculative-algorithm` | off | `dflash` |
+| `--speculative-draft-model-path` | — | DFlash draft checkpoint (e.g. a `z-lab/*-DFlash*` repo) |
+| `--speculative-dflash-block-size` | draft's | Anchor + drafted tokens per verify; smaller blocks keep less verify memory and draft fewer tokens |
+| `--speculative-draft-quant` | none | `fp8` stores the draft's projections as e4m3 (half the VRAM); only the acceptance rate can move |
+| `--disable-speculative-adaptive` | adaptive on | Speculate on every step, even for a request that measures slower than plain decode |
+
 ### API behaviour
 
 | Flag | Default | Meaning |

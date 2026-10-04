@@ -277,6 +277,18 @@ def state_pool_bytes(config, num_slots: int | None = None) -> int:
     return per_req * slots
 
 
+def dflash_verify_bytes_per_token(config) -> int:
+    """Device bytes one DFlash graph-verify token keeps for the GDN commit: per linear layer,
+    the conv state after it, its post-conv q/k/v and its a/b gates (the commit replays the
+    recurrence from them instead of storing a full state per token). 0 without GDN layers."""
+    group = config.model_config.linear_attention_group()
+    if group is None:
+        return 0
+    n_layers, conv_dim, v_heads = _linear_local_dims(group, config.tp_info.size)
+    elem = torch.empty((), dtype=config.dtype).element_size()
+    return n_layers * elem * (conv_dim * (group.conv_kernel_dim - 1) + conv_dim + 2 * v_heads)
+
+
 def _linear_pool_num_slots(config) -> int:
     """LinearStatePool slot count. Hybrid-radix non-evictable peak is 4 slots per running request
     (1 live + 2 ping-pong + 1 committed snapshot locked through decode), plus a cross-request
