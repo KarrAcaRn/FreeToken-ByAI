@@ -88,7 +88,7 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--moe-cpu-threads` | physical cores | CPU worker threads for the cpu/hybrid executor |
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, nvfp4, mxfp4), so fp8 experts cannot use it |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
-| `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
+| `--disable-moe-prefill-hit-d2d` | hit-D2D on | Stream all of a prefill's experts over PCIe instead of copying the cache-resident ones device-side (the split needs CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
 
 ### API behaviour

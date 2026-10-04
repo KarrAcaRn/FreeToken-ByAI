@@ -497,6 +497,17 @@ class Engine:
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
+        self._fill_moe_slot_cache()
+
+    def _fill_moe_slot_cache(self) -> None:
+        """Start the expert slot cache full instead of empty (graph capture and the
+        prefill warmup reset it): a prefill then streams only the non-resident experts."""
+        if self.moe_offload_cache is None:
+            return
+        filled = self.moe_offload_cache.fill_slots()
+        if filled:
+            total = self.moe_offload_cache.num_layers * self.moe_offload_cache.num_experts
+            logger.info_rank0(f"MoE slot cache preloaded with {filled} of {total} experts")
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         if config.tp_info.size == 1 or config.use_pynccl:
@@ -1036,6 +1047,7 @@ class Engine:
             moe_offload_cache=self.moe_offload_cache,
             mrope=config.model_config.model_is_mrope,
         )
+        self._fill_moe_slot_cache()
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
@@ -1408,7 +1420,7 @@ _DENSE_MOE_SETTINGS = {
     "moe_cpu_threads": 0,
     "moe_hybrid_max_fetch": -1,
     "moe_prefill_overlap": True,
-    "moe_prefill_hit_d2d": False,
+    "moe_prefill_hit_d2d": True,
     "expert_load": "auto",
 }
 
