@@ -267,6 +267,13 @@ request, and whether we offered it back upstream.
   comparison, the 27B's own MTP head (simulated offline on the same prompts) accepts about as
   many tokens per cycle as DFlash2 at MTP=7 (4.7 vs 4.3–4.5), but drafting 7 tokens takes 7
   sequential steps (13 ms) instead of one 7 ms pass: ~150 instead of ~200 tok/s on code.
+- **No more ~0.8 s first-token floor on MoE offload:** every prefill streamed all expert layers
+  over PCIe, because the GPU expert cache filled only during decode and the copy of cached
+  experts was off. The cache now starts filled (9.2k of Qwen3.6-35B-A3B's 10.2k experts) and a
+  prefill copies only the missing experts over PCIe: a short prompt's first token comes after
+  ~170 ms instead of 790 ms, a 6k-token prompt prefills in 1.15 s instead of 1.6 s, with
+  unchanged decode speed and output. `--disable-moe-prefill-hit-d2d` restores the old copy. On
+  branch `fix/moe-ttft`, meant for an upstream pull request.
 - **Fixes found while reviewing, offered back upstream:**
   - dense Gemma-4 GGUF checkpoints load end to end (on top of
     [#359](https://github.com/FlashML-org/FreeToken/pull/359));
@@ -278,9 +285,6 @@ request, and whether we offered it back upstream.
 
 ### Planned next
 
-- **Time-to-first-token floor on MoE offload:** Qwen3.6-35B-A3B pays ~0.8 s before the first
-  token on every request, independent of prompt length; expert misses, kernel warmup and PCIe
-  streaming are already ruled out.
 - **Hot-expert pinning**, our own version of
   [#563](https://github.com/FlashML-org/FreeToken/pull/563).
 - **A residency-aware offload-vs-hybrid pick:** `ft bench bw` recommends `hybrid` for

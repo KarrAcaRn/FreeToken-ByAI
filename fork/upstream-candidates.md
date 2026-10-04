@@ -9,6 +9,7 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | Load dense Gemma-4 GGUFs end to end | 5b0cb77 (merge of #359), 7f2fc79 | Candidate, see below |
 | bench_serving: --api-key and the zero-hit cache report | b36d49d, 23d92b6 (on top of #341) | Candidate, see below |
 | Pure ASGI middlewares, so #222's non-streaming abort works | f8de64f (on top of #222) | Candidate, see below |
+| MoE offload: preload the expert slot cache, prefill hit-D2D by default | 2012f9e (branch `fix/moe-ttft`, from main) | Candidate, ready as a branch; see below |
 
 ## Load dense Gemma-4 GGUFs end to end
 
@@ -78,3 +79,18 @@ one decoded to the end), 0.12 s after. A minimal FastAPI repro shows the cause i
 How to send it: suggest it on #222 (it is the missing piece for that PR), or as its own small
 fix PR that also benefits upstream main (its _record_request_middleware alone hides disconnects
 from every handler). On main only the request-ring middleware exists (no --api-key yet).
+
+## MoE offload: preloaded expert slot cache and prefill hit-D2D by default
+
+Branch `fix/moe-ttft` (from main, commit 2012f9e). On an offloaded MoE every request paid a
+fixed ~0.8 s before its first token: prefill streams whole expert layers into the double
+buffer, the slot cache (filled only by decode misses) held 342 of 10240 experts, and
+`--moe-prefill-hit-d2d` was off. The branch fills the free slots after startup and makes
+hit-D2D the default (`--disable-moe-prefill-hit-d2d`; `--moe-prefill-hit-d2d` still parses).
+
+Tested on RedHatAI/Qwen3.6-35B-A3B-NVFP4, RTX 4090 (PCIe 4.0), CUDA 13.1, plain main + branch:
+22-token prompt TTFT 787 -> 160 ms, 6.3k-token prompt 1.60 -> 1.15 s, decode ~150 tok/s and
+greedy output unchanged; tests/moe (incl. two new fill_slots tests), tests/engine,
+tests/scheduler, tests/server pass. Without cudaMemcpyBatchAsync (CUDA < 13) hit-D2D still
+falls back to full-layer copies, so the preload then only helps the first decode steps; a
+fallback that gathers misses with the fused index-copy kernel would cover that.
