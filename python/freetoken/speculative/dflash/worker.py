@@ -25,7 +25,9 @@ class DFlashWorker:
         device: torch.device,
         block_size: int | None = None,
         draft_quant: str = "none",
-        linear_state_bytes_per_token: int = 0,
+        verify_row_bytes: int = 0,
+        verify_batch: int = 1,
+        target_hidden_size: int = 0,
         max_context_len: int = 32768,
         num_context_slots: int = 1,
     ):
@@ -77,15 +79,15 @@ class DFlashWorker:
         self._mask_embeds: torch.Tensor | None = None
         self._draft_input_storage: torch.Tensor | None = None
         self._position_offsets = torch.arange(self.block_size, dtype=torch.int32, device=device)
-        # Hybrid GDN targets: the verify graphs keep, per verified token, the conv state and the
-        # recurrence inputs the commit replays. Hold that memory now, before the KV pool is
-        # sized; the graph capture takes it over.
+        # The verify graphs keep, per verified token, its logits, the hidden states the draft
+        # reads and (GDN targets) the conv state and recurrence inputs the commit replays. Hold
+        # that memory now, before the KV pool is sized; the graph capture takes it over.
         self._verify_reserve: torch.Tensor | None = None
-        if linear_state_bytes_per_token and self.block_size > 1:
-            # the largest verify graph: every context slot's request at the full block
+        if verify_row_bytes and self.block_size > 1:
+            row = verify_row_bytes + len(self.target_layer_ids) * target_hidden_size * 2
+            # the largest verify graph: verify_batch requests at the full block
             self._verify_reserve = torch.empty(
-                num_context_slots * self.block_size * linear_state_bytes_per_token,
-                dtype=torch.uint8, device=device)
+                verify_batch * self.block_size * row, dtype=torch.uint8, device=device)
 
     def release_verify_reserve(self) -> None:
         self._verify_reserve = None
