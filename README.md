@@ -128,7 +128,7 @@ request, and whether we offered it back upstream.
 | [#338](https://github.com/FlashML-org/FreeToken/pull/338) | perf(ple): fuse the n-gram row-id hash into one Triton kernel | Adopted | Fuses Flash-Next's PLE n-gram row-id hash (39 launches per layer) into one capture-safe Triton kernel |  |
 | [#337](https://github.com/FlashML-org/FreeToken/pull/337) | feat(moe): NVMe disk tier for MoE expert banks | Adopted + fixup | Adds opt-in NVMe disk tier (--moe-disk-tier) so expert banks larger than host RAM can run | Windows mmap flags, empty-bank pin_prefix, and a stale family test fixed ([4d2fa42](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4d2fa42)) |
 | [#305](https://github.com/FlashML-org/FreeToken/pull/305) | feat(server): add --api-key bearer authentication | Adopted | Adds --api-key bearer authentication (tests, docs, CORS preflight, shell client sends the key) |  |
-| [#258](https://github.com/FlashML-org/FreeToken/pull/258) | feat(dflash): support dflash | Adopted + fixup | Speculative decoding with DFlash drafts; with our DFlash2 support and fixes the 27B decodes 2-3x faster on an RTX 4090 | DFlash2 drafts and an fp8 draft option; triton verify graphs; GDN verify-state memory and the draft reserved before the KV pool; the per-request KV page leak fixed and the integrity check back on; ft info prices draft and verify states ([99a2093](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/99a2093), [d16bc96](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/d16bc96), [9a3714d](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/9a3714d), [4c03cb7](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4c03cb7), [7c19c2e](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/7c19c2e), [4b05651](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4b05651), [e214732](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/e214732), [4364741](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4364741)) |
+| [#258](https://github.com/FlashML-org/FreeToken/pull/258) | feat(dflash): support dflash | Adopted + fixup | Speculative decoding with DFlash drafts; with our DFlash2 support and fixes the 27B decodes 3-4.6x faster on an RTX 4090 | DFlash2 drafts and an fp8 draft option; triton verify graphs; GDN verify-state memory and the draft reserved before the KV pool; the per-request KV page leak fixed and the integrity check back on; ft info prices draft and verify states; one target forward per cycle instead of two ([99a2093](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/99a2093), [d16bc96](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/d16bc96), [9a3714d](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/9a3714d), [4c03cb7](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4c03cb7), [7c19c2e](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/7c19c2e), [4b05651](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4b05651), [e214732](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/e214732), [4364741](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/4364741), [b498b6d](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/b498b6d)) |
 | [#254](https://github.com/FlashML-org/FreeToken/pull/254) | feat(bench): pass ft serve options through '--' in bench_decode_moe | Adopted | bench_decode_moe now passes ft serve options through '--' instead of mirroring server flags |  |
 | [#231](https://github.com/FlashML-org/FreeToken/pull/231) | feat(moe): --moe-collect-stats, so expert-cache behaviour is measurable | Adopted | Adds --moe-collect-stats: logs expert-cache miss rate, worst layers and a routing oracle bound |  |
 | [#230](https://github.com/FlashML-org/FreeToken/pull/230) | feat(server): add TLS certificate support | Adopted | Adds --ssl-certfile/--ssl-keyfile for serving over HTTPS via uvicorn |  |
@@ -249,12 +249,14 @@ request, and whether we offered it back upstream.
   [#258](https://github.com/FlashML-org/FreeToken/pull/258)): `--speculative-algorithm dflash
   --speculative-draft-model-path z-lab/Qwen3.8-27B-DFlash2 --speculative-draft-quant fp8`. We
   added DFlash2 drafts (the only ones published for Qwen3.8-27B), an fp8 draft, verify graphs
-  for the triton backend, the memory handling a hybrid GDN target needs, and fixed a KV page
-  leak per request. Qwen3.8-27B decodes 96–139 tok/s instead of 45 on code and English (5.5
-  tokens per target forward); the context drops from 100k to 27k tokens (36k with
+  for the triton backend, the memory handling a hybrid GDN target needs, fixed a KV page
+  leak per request, and cut the loop to one target forward per cycle (the PR ran two).
+  Qwen3.8-27B decodes 190–207 tok/s instead of 45 on code and math, 125 on prose (4.3 tokens
+  per target forward); the context drops from 100k to 27k tokens (36k with
   `--speculative-dflash-block-size 6`), which `ft info` shows. For comparison, the
-  checkpoint's own MTP head would reach 2.7 / 3.8 / 4.7 tokens per cycle at MTP=2/4/7
-  (measured offline), below DFlash2's 5.5.
+  checkpoint's own MTP head (simulated offline on the same prompts) accepts about as many
+  tokens per cycle as DFlash2 at MTP=7 (4.7 vs 4.3–4.5), but drafting 7 tokens takes 7
+  sequential steps (13 ms) instead of one 7 ms pass: ~150 instead of ~200 tok/s on code.
 - **Fixes found while reviewing, offered back upstream:**
   - dense Gemma-4 GGUF checkpoints load end to end (on top of
     [#359](https://github.com/FlashML-org/FreeToken/pull/359));
@@ -266,10 +268,9 @@ request, and whether we offered it back upstream.
 
 ### Planned next
 
-- **Faster DFlash cycles:** the verify forward (~26 ms) and the DFlash2 draft (~7 ms) take
-  33 ms, but a cycle takes ~57 ms; the rest is host syncs and copies in the speculative loop.
-  Trimming it would take the 27B from ~95 to ~150 tok/s. Batch sizes above 1 and prefix reuse
-  with DFlash are open too.
+- **DFlash beyond one request:** speculation runs at batch size 1 and without prefix reuse
+  (the PR forces the naive cache); the adaptive gate also compares against the verify forward
+  instead of a plain decode step.
 - **Time-to-first-token floor on MoE offload:** Qwen3.6-35B-A3B pays ~0.8 s before the first
   token on every request, independent of prompt length; expert misses, kernel warmup and PCIe
   streaming are already ruled out.
