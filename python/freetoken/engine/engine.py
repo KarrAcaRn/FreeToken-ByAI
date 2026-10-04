@@ -657,6 +657,10 @@ class Engine:
                 device=self.device,
                 block_size=config.speculative_dflash_block_size,
                 draft_quant=config.speculative_draft_quant,
+                linear_state_bytes_per_token=(
+                    state_pool_bytes(config, num_slots=1)
+                    if _dflash_target_verify_graph_enabled_for_config(config) else 0
+                ),
             )
             logger.info_rank0(
                 f"DFlash enabled: block_size={self.dflash_worker.block_size}, "
@@ -786,6 +790,9 @@ class Engine:
         if self.linear_state_pool is not None:
             self.dummy_req.linear_slot_idx = self.linear_state_pool.padding_slot
         self.page_table[self.dummy_req.table_idx].fill_(num_tokens)  # point to dummy page
+        if self.dflash_worker is not None:
+            self.dflash_worker.release_verify_reserve()
+            torch.cuda.empty_cache()
         self.graph_runner = GraphRunner(
             stream=self.stream,
             device=self.device,
@@ -1318,6 +1325,9 @@ class Engine:
         #    the backend; _sync_get_memory empties the cache so freed memory is reclaimed).
         gc.collect()
         free_min = self._sync_get_memory()[0]
+        if self.dflash_worker is not None:
+            self.dflash_worker.release_verify_reserve()
+            torch.cuda.empty_cache()
         self.graph_runner = GraphRunner(
             stream=self.stream,
             device=self.device,
@@ -1463,7 +1473,10 @@ class Engine:
                 linear_slot = req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
                 linear_state_snapshot = (
                     linear_slot,
-                    snapshot_linear_state_slot(self.linear_state_pool, linear_slot),
+                    snapshot_linear_state_slot(
+                        self.linear_state_pool, linear_slot,
+                        out=worker.pre_verify_snapshot(self.linear_state_pool),
+                    ),
                 )
 
             try:
@@ -1513,7 +1526,11 @@ class Engine:
                             verify_logits, verify_hidden_states, verify_linear_graph_snapshots = target_result
                         else:
                             verify_logits, verify_hidden_states = target_result
-                    except RuntimeError:
+                    except RuntimeError as exc:
+                        logger.warning_rank0(
+                            f"DFlash target-verify graph failed ({type(exc).__name__}: {exc}); "
+                            "falling back to decode-loop verify"
+                        )
                         restore_verify_state(batch, req, verify_state)
                         verified_with_target_graph = False
                         verified_with_decode = True

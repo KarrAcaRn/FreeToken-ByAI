@@ -40,6 +40,7 @@ class DFlashWorker:
         device: torch.device,
         block_size: int | None = None,
         draft_quant: str = "none",
+        linear_state_bytes_per_token: int = 0,
     ):
         from freetoken.utils import cached_load_hf_config
 
@@ -84,6 +85,37 @@ class DFlashWorker:
         self._draft_input_storage: torch.Tensor | None = None
         self.last_draft_probs: torch.Tensor | None = None
         self._position_offsets = torch.arange(self.block_size, dtype=torch.int32, device=device)
+        # Hybrid GDN targets: the verify graphs keep one boundary state per verified token. Hold
+        # that memory now, before the KV pool is sized; the graph capture takes it over.
+        self._verify_reserve: torch.Tensor | None = None
+        if linear_state_bytes_per_token and self.block_size > 1:
+            self._verify_reserve = torch.empty(
+                self.block_size * linear_state_bytes_per_token, dtype=torch.uint8, device=device)
+        # ... plus the pre-verify copy of the request's slot, kept for the whole run
+        self._pre_verify_flat: torch.Tensor | None = None
+        self._pre_verify_views: tuple[torch.Tensor, torch.Tensor] | None = None
+        if linear_state_bytes_per_token:
+            self._pre_verify_flat = torch.empty(
+                linear_state_bytes_per_token + 256, dtype=torch.uint8, device=device)
+
+    def release_verify_reserve(self) -> None:
+        self._verify_reserve = None
+
+    def pre_verify_snapshot(self, pool) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """(conv, recurrent) views of the persistent pre-verify buffer, shaped like one ``pool`` slot."""
+        if self._pre_verify_flat is None:
+            return None
+        if self._pre_verify_views is None:
+            conv, rec = pool.conv_states[:, 0], pool.recurrent_states[:, 0]
+            conv_bytes = conv.numel() * conv.element_size()
+            rec_start = -(-conv_bytes // 256) * 256  # keep the recurrent view aligned
+            rec_bytes = rec.numel() * rec.element_size()
+            assert rec_start + rec_bytes <= self._pre_verify_flat.numel()
+            self._pre_verify_views = (
+                self._pre_verify_flat[:conv_bytes].view(conv.dtype).view(conv.shape),
+                self._pre_verify_flat[rec_start : rec_start + rec_bytes].view(rec.dtype).view(rec.shape),
+            )
+        return self._pre_verify_views
 
     def store_hidden_states(self, hidden_states: list[torch.Tensor]) -> None:
         """Store hidden states from a forward pass into the context buffer.

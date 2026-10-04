@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
 
@@ -104,6 +105,7 @@ class GraphCaptureBuffer:
         hidden_dtype: torch.dtype | None = None,
         num_hidden_layers: int = 0,
         linear_state_pool=None,
+        shared_snapshots: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> GraphCaptureBuffer:
         buffer = cls.init(
             verify_len,
@@ -116,7 +118,15 @@ class GraphCaptureBuffer:
         buffer.table_idx = torch.zeros(1, dtype=torch.int32, device=device)
         buffer.fla_cu_seqlens = torch.tensor([0, verify_len], dtype=torch.int32, device=device)
         buffer.fla_has_initial_state = torch.ones(1, dtype=torch.bool, device=device)
-        if linear_state_pool is not None:
+        if shared_snapshots is not None:
+            # contiguous views of one flat storage, in the [len, layers, ...] / [layers, len, ...]
+            # layouts the verify kernels write (_ensure_dflash_target_verify_linear_buffers)
+            conv_shape = (verify_len, *linear_state_pool.conv_states[:, 0].shape)
+            rec = linear_state_pool.recurrent_states
+            rec_shape = (rec.shape[0], verify_len, *rec.shape[2:])
+            buffer.dflash_conv_states = shared_snapshots[0][: math.prod(conv_shape)].view(conv_shape)
+            buffer.dflash_recurrent_states = shared_snapshots[1][: math.prod(rec_shape)].view(rec_shape)
+        elif linear_state_pool is not None:
             snapshot_len = max(verify_len - 1, 0)
             buffer.dflash_conv_states = torch.empty(
                 (snapshot_len, *linear_state_pool.conv_states[:, 0].shape),
@@ -263,27 +273,20 @@ def _dflash_target_verify_lens_within_budget(
     linear_state_pool,
     budget_bytes: int,
 ) -> List[int]:
-    """Keep the largest prefix of verify lens whose per-len GDN snapshot buffers fit
-    in ``budget_bytes``. Target-verify graphs own a per-len conv/recurrent snapshot
-    buffer set sized ``layers * len * state_bytes``; without a budget, large block
-    sizes (e.g. 16) OOM at capture. A dropped len simply falls back to decode-loop
-    verify at runtime, so this is a pure performance/robustness gate."""
+    """Keep the verify lens whose GDN snapshot buffer fits in ``budget_bytes``. All target-verify
+    graphs share one buffer of per-token conv/recurrent states sized for the longest kept len
+    (the graphs never run at once). A dropped len falls back to decode-loop verify at runtime,
+    so this is a pure performance/robustness gate."""
     if linear_state_pool is None:
         return list(lens)
+    per_token_bytes = _linear_state_bytes_per_token(linear_state_pool)
+    return [n for n in sorted(lens) if n * per_token_bytes <= budget_bytes]
+
+
+def _linear_state_bytes_per_token(linear_state_pool) -> int:
     conv = linear_state_pool.conv_states        # [layers, slots, conv_dim, K-1]
     rec = linear_state_pool.recurrent_states    # [layers, slots, heads, K, V]
-    layers = rec.shape[0]
-    conv_per_token = conv.shape[0] * conv[0, 0].numel() * conv.element_size()
-    rec_per_token = layers * rec[0, 0].numel() * rec.element_size()
-    per_token_bytes = conv_per_token + rec_per_token
-    kept: List[int] = []
-    total = 0
-    for verify_len in sorted(lens):
-        total += verify_len * per_token_bytes
-        if total > budget_bytes:
-            break
-        kept.append(verify_len)
-    return kept
+    return (conv[:, 0].numel() * conv.element_size()) + (rec[:, 0].numel() * rec.element_size())
 
 
 class GraphRunner:
@@ -412,8 +415,10 @@ class GraphRunner:
         if not self.dflash_target_verify_lens:
             return
         linear_state_pool = get_global_ctx().linear_state_pool
+        shared_snapshots = None
         if linear_state_pool is not None:
-            budget = int(get_free_memory(self.device) * 0.30)
+            # the engine released the draft worker's reservation for this buffer just before
+            budget = int(get_free_memory(self.device) * 0.9)
             kept = _dflash_target_verify_lens_within_budget(
                 self.dflash_target_verify_lens, linear_state_pool, budget
             )
@@ -426,6 +431,12 @@ class GraphRunner:
             self.dflash_target_verify_lens = kept
             if not kept:
                 return
+            n = max(kept)
+            conv, rec = linear_state_pool.conv_states, linear_state_pool.recurrent_states
+            shared_snapshots = (
+                torch.empty(n * conv[:, 0].numel(), dtype=conv.dtype, device=self.device),
+                torch.empty(n * rec[:, 0].numel(), dtype=rec.dtype, device=self.device),
+            )
         init_verify = getattr(self.attn_backend, "init_dflash_target_verify_capture_graph", None)
         prepare_capture = getattr(self.attn_backend, "prepare_for_dflash_target_verify_capture", None)
         if init_verify is None or prepare_capture is None:
@@ -443,6 +454,7 @@ class GraphRunner:
                 hidden_dtype=self.hidden_dtype,
                 num_hidden_layers=len(self.hidden_layer_ids),
                 linear_state_pool=linear_state_pool,
+                shared_snapshots=shared_snapshots,
             )
             buffer.fla_cu_seqlens = torch.tensor(
                 [0, verify_len], dtype=torch.int64, device=self.device
@@ -470,6 +482,9 @@ class GraphRunner:
             self.dflash_target_verify_graph_map[verify_len] = graph
             self.dflash_target_verify_buffers[verify_len] = buffer
 
+        logger.info_rank0(
+            f"DFlash target verify graphs captured for lens {self.dflash_target_verify_lens}"
+        )
     def _run_model_into_buffer(
         self,
         model: BaseLLMModel,
@@ -558,7 +573,8 @@ class GraphRunner:
             assert buffer.dflash_recurrent_states is not None
             linear_snapshots = (
                 buffer.dflash_conv_states[:verify_len],
-                buffer.dflash_recurrent_states[:, :verify_len].transpose(0, 1).contiguous(),
+                # a view: the commit copies out the one accepted state, never all of them
+                buffer.dflash_recurrent_states[:, :verify_len].transpose(0, 1),
             )
         if wants_hidden:
             assert buffer.hidden_states is not None

@@ -243,8 +243,9 @@ def test_dflash_target_verify_lens_within_budget_filters_by_snapshot_memory():
         conv_states=torch.zeros((2, 4, 3, 2), dtype=torch.float32),
         recurrent_states=torch.zeros((2, 4, 1, 3, 3), dtype=torch.float32),
     )
-    assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 1200) == [1, 2, 3, 4]
-    assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 480) == [1, 2]
+    # one shared buffer of len per-token states, 120 B each here
+    assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 480) == [1, 2, 3, 4]
+    assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 300) == [1, 2]
     assert _dflash_target_verify_lens_within_budget([1, 2, 3, 4], pool, 0) == []
     assert _dflash_target_verify_lens_within_budget([1, 2], None, 0) == [1, 2]
 

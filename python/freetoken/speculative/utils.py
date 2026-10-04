@@ -174,8 +174,15 @@ def repeat_sampling_args(args: BatchSamplingArgs, repeat: int) -> BatchSamplingA
 # Linear (GDN) state snapshot / restore
 # ---------------------------------------------------------------------------
 
-def snapshot_linear_state_slot(pool: Any, slot: int) -> tuple[torch.Tensor, torch.Tensor]:
-    return pool.conv_states[:, slot].clone(), pool.recurrent_states[:, slot].clone()
+def snapshot_linear_state_slot(
+    pool: Any, slot: int, out: tuple[torch.Tensor, torch.Tensor] | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Copy one GDN slot's (conv, recurrent) state, into ``out`` when given (no allocation)."""
+    if out is None:
+        return pool.conv_states[:, slot].clone(), pool.recurrent_states[:, slot].clone()
+    out[0].copy_(pool.conv_states[:, slot])
+    out[1].copy_(pool.recurrent_states[:, slot])
+    return out
 
 
 def restore_linear_state_slot(
