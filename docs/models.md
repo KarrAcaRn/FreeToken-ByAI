@@ -56,7 +56,7 @@ names for the same memory. On these GPUs `auto` resolves every MoE model to
 `fused`: the default is the resident path only. GGUF and DeepSeek-V4 experts
 have no resident path and stay on `offload`. Offload-only flags
 (`--moe-cpu-layers`, `--moe-cache-size` / `-rate` / `-auto`,
-`--moe-prefill-hit-d2d`, `--disable-moe-prefill-overlap`) are ignored with a
+`--disable-moe-prefill-hit-d2d`, `--disable-moe-prefill-overlap`) are ignored with a
 warning; pass `--moe-strategy offload` to use them.
 
 ## Notes
