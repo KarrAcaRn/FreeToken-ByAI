@@ -1,4 +1,20 @@
 {
+  "603": {
+    "number": 603,
+    "title": "feat(deepseek-v41): support text and vision serving",
+    "head_sha": "c1a2a75a1878",
+    "reviewed_at": "2026-10-05",
+    "decision": "deferred",
+    "reason": "10.9k-line DeepSeek-V4.1-Flash port (117 files: model, packed sparse attention, Engram disk tables, vision, DSML tool parser) that also moves the DeepSeek KV pools to kvcache/dsv4/ and changes numerics for other models without a flag (block-FP8 decode GEMV tiling from SM count, mHC stage-1 tiling also for GLM-5.3-Flash, DS FP4 decode launch). Not judged on its merits yet: validated on a 96 GiB Blackwell with 249 GiB RAM, far beyond this machine (no GPU at all since 2026-10-05). Its head equals upstream's own branch split/dsv41-support, so it will likely land upstream and reach us through the sync; a dry merge into next conflicts in 8 files (engine/config.py, cpu_moe_ext.cpp, e4m3_compat.py, kvcache/base.py, dsv4/v4_pool.py, scheduler.py, tokenize.py + its test). Once it lands, check whether #460 (other V4.1 port) is superseded.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "andy-yang-1 <andy_yang@berkeley.edu>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ],
+    "revisit": "after-queue",
+    "summary": "DeepSeek-V4.1 too large for this machine; maintainer branch, expected to land upstream (8 conflicts with next)"
+  },
   "602": {
     "number": 602,
     "title": "fix(moe): fit Qwen3.8 Flash Next FP8 banks across host and GPU memory",
