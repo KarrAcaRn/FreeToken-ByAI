@@ -465,3 +465,32 @@ def test_bare_json_llama_call_passes_the_response_gate():
     assert [(c.name, json.loads(c.parameters)) for c in parsed[1]] == [("get_weather", {"city": "Berlin"})]
     # plain prose still is no tool call
     assert _parse_tool_response("It is sunny in Berlin.", spec, state) is None
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_llama_call_named_under_function_key(stream):
+    """Llama-3.2-1B names the tool under "function"; the call used to go out with name null."""
+    text = '<|python_tag|>{"type": "function", "function": "get_weather", "parameters": {"city": "Paris"}}'
+    parser = FunctionCallParser(TOOLS, tool_call_parser="llama3")
+    if stream:
+        calls, normal = [], ""
+        for i in range(0, len(text), 5):
+            n, c = parser.parse_stream_chunk(text[i : i + 5])
+            normal += n
+            calls += c
+        names = [c.name for c in calls if c.name]
+        args = json.loads("".join(c.parameters for c in calls))
+    else:
+        result = parser.parse_non_stream(text)
+        normal = result.normal_text
+        names = [c.name for c in result.calls]
+        args = json.loads(result.calls[0].parameters)
+    assert names == ["get_weather"]
+    assert args == {"city": "Paris"}
+    assert normal.strip() == ""
+
+
+def test_nameless_tool_call_is_not_forwarded():
+    parser = FunctionCallParser(TOOLS, tool_call_parser="llama3")
+    result = parser.parse_non_stream('<|python_tag|>{"parameters": {"city": "Paris"}}')
+    assert result.calls == []

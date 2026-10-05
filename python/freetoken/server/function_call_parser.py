@@ -64,6 +64,16 @@ def _should_forward_unknown_tool(name: Any) -> bool:
     return FORWARD_UNKNOWN_TOOLS or (isinstance(name, str) and ":" in name)
 
 
+def _hoist_function_name(obj: Any) -> Any:
+    # Llama-3.2-1B names the tool under "function":
+    # {"type": "function", "function": "get_weather", "parameters": {...}}
+    if not isinstance(obj, dict) or "name" in obj or not isinstance(obj.get("function"), str):
+        return obj
+    hoisted = {k: v for k, v in obj.items() if k not in ("type", "function")}
+    hoisted["name"] = obj["function"]
+    return hoisted
+
+
 TOOLS_TAG_LIST = [
     "<|plugin|>",
     "<|tool_call>",
@@ -317,8 +327,12 @@ class BaseFormatDetector(ABC):
 
         results = []
         for act in action:
+            act = _hoist_function_name(act)
             name = act.get("name")
-            if not (name and name in tool_indices):
+            if not isinstance(name, str) or not name:
+                logger.warning(f"Model emitted a tool call without a name: {act}")
+                continue
+            if name not in tool_indices:
                 logger.warning(f"Model attempted to call undefined function: {name}")
                 if not _should_forward_unknown_tool(name):
                     continue
@@ -620,6 +634,7 @@ class BaseFormatDetector(ABC):
 
                 is_current_complete = _is_complete_json(current_text[start_idx : start_idx + end_idx])
 
+                obj = _hoist_function_name(obj)
                 # Validate tool name if present
                 if (
                     "name" in obj
