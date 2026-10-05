@@ -90,6 +90,16 @@ def _gemm_wave(device: torch.device) -> int:
         _GEMM_WAVE[idx] = wave
     return wave
 
+def _small_smem(device: torch.device) -> bool:
+    idx = device.index if device.index is not None else torch.cuda.current_device()
+    small = _SMALL_SMEM.get(idx)
+    if small is None:
+        small = _SMALL_SMEM[idx] = torch.cuda.get_device_properties(idx).shared_memory_per_multiprocessor < (128 << 10)
+    return small
+
+
+_SMALL_SMEM: dict = {}
+
 # Above this M the dequant-to-scratch + cuBLAS path wins (the in-K dot GEMM re-dequants
 # each weight tile M/BLOCK_M times; cuBLAS is ~4x its per-tile FLOP efficiency).
 _GEMM_MAX_INKERNEL_M = 64
@@ -550,7 +560,8 @@ def _gemm_inkernel(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tenso
     BLOCK_M = 16 if M <= 16 else (32 if M <= 32 else 64)
     BLOCK_N = 128
     num_warps = 8 if BLOCK_M == 64 else 4
-    num_stages = 3
+    # Two stages on ~100 KB-smem consumer parts: +4-7% weight bandwidth at M=8 on sm_89.
+    num_stages = 2 if BLOCK_M == 16 and _small_smem(a.device) else 3
 
     K_WORDS = K // 8
     num_mn = triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)
