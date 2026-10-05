@@ -148,3 +148,19 @@ def test_instruct_2507_text_stays_content_and_thinking_still_splits():
 
     thinking = SimpleNamespace(config=SimpleNamespace(reasoning_parser="qwen3"))
     assert _split_reasoning("reason</think>answer", spec, thinking) == ("reason", "answer")
+
+
+def test_every_qwen3_instruct_checkpoint_skips_the_reasoning_parser():
+    """Qwen3-VL and Qwen3-Coder Instruct templates never open a think block either, so
+    with qwen3 every plain answer would land in reasoning_content."""
+    vl = _Config({"architectures": ["Qwen3VLForConditionalGeneration"], "model_type": "qwen3_vl"})
+    for model_path, reasoning in (
+        ("Qwen/Qwen3-VL-8B-Instruct", None),
+        ("Qwen/Qwen3-VL-30B-A3B-Instruct", None),
+        ("Qwen/Qwen3-VL-8B-Thinking", "qwen3"),
+    ):
+        with patch("freetoken.utils.cached_load_hf_config", lambda _path: vl):
+            args, _ = parse_args(["--model", model_path])
+        assert args.reasoning_parser == reasoning, model_path
+    args, _ = _qwen3_moe("Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    assert args.reasoning_parser is None
