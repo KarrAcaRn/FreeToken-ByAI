@@ -35,7 +35,7 @@ try:
 except Exception:  # pragma: no cover — jinja2 always ships with transformers
     _TemplateError = ()
 
-from .function_call_parser import FunctionCallParser, TOOLS_TAG_LIST, ToolCallItem
+from .function_call_parser import FunctionCallParser, ToolCallItem
 from .reasoning_parser import (
     DSV4_SPECIAL_TOKENS,
     ReasoningParser,
@@ -486,9 +486,10 @@ def _parse_tool_response(
 ) -> tuple[str, list[ToolCallItem]] | None:
     if not spec.parse_tools:
         return None
-    if not any(tag in text for tag in TOOLS_TAG_LIST):
-        return None
     parser = _make_tool_parser(spec, state)
+    # the detector knows its own opener; Llama 3.2 calls may be bare JSON without any tag
+    if not parser.has_tool_call(text):
+        return None
     result = parser.parse_non_stream(text)
     if not result.calls:
         return None

@@ -447,3 +447,21 @@ def test_gemma4_unparsed_closed_block_keeps_trailing_prose():
 
     assert result.calls == []
     assert result.normal_text == "Here is the answer: 42."
+
+
+def test_bare_json_llama_call_passes_the_response_gate():
+    """Llama 3.2 emits custom-tool calls as bare JSON without <|python_tag|>; the
+    response gate must leave that decision to the detector."""
+    from types import SimpleNamespace
+
+    from freetoken.core import SamplingParams
+    from freetoken.server.generation import GenSpec, _parse_tool_response
+
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+    spec = GenSpec(messages=[], sampling_params=SamplingParams(), parser_tools=tools)
+    state = SimpleNamespace(config=SimpleNamespace(tool_call_parser="llama3", reasoning_parser=None))
+    parsed = _parse_tool_response('{"name": "get_weather", "parameters": {"city": "Berlin"}}', spec, state)
+    assert parsed is not None
+    assert [(c.name, json.loads(c.parameters)) for c in parsed[1]] == [("get_weather", {"city": "Berlin"})]
+    # plain prose still is no tool call
+    assert _parse_tool_response("It is sunny in Berlin.", spec, state) is None
