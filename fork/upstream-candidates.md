@@ -13,6 +13,7 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | Profile-picked hybrid falls back to offload for large expert caches; CPU pool leaves the engine a core | 74e0ece (branch `fix/moe-hybrid-pick`, from main) | Candidate, ready as a branch; see below |
 | Non-stream tool calls: the detector decides (Llama 3.2 bare-JSON calls) | 925e5f8 | Candidate, applies to upstream main as is; see below |
 | gpt-oss: tool recipient in the role header | 3b54232 | Candidate, applies to upstream main as is; see below |
+| Llama 3.2: tool name under the "function" key | 0c6aec0 | Candidate, applies to upstream main as is; see below |
 | Qwen3 Instruct checkpoints (VL, Coder) get no qwen3 reasoning parser | bfc41c7 (on top of #564) | Suggest on #564, which is still open upstream |
 | Hoist a system message the template silently drops (Qwen3-VL, gpt-oss) | 2b3563c (on top of our #487 version) | Candidate together with #487's approach |
 
@@ -139,7 +140,12 @@ went through the server's reasoning split and tool parser (`_split_reasoning`, `
   in the role header), which gpt-oss-20b's own template renders. The harmony reasoning parser read
   the recipient only from the channel header, so the call became content holding the JSON. It now
   moves the recipient into the channel header before scanning (non-stream and streaming).
+- 0c6aec0 (found in the live run): Llama-3.2-1B-Instruct emits `{"type": "function", "function":
+  "get_weather", "parameters": {...}}`. `parse_base_json` read only `"name"`, and with unknown-tool
+  forwarding on the call reached the client as `name: null`. The name is now hoisted from
+  `"function"` (non-stream and streaming); a nameless call is dropped.
 
-Tested: CPU only (tokenizers/templates of unsloth/Llama-3.2-1B-Instruct and openai/gpt-oss-20b);
-tests/server + tests/tokenizer pass, each new test fails without its fix. Needs a live run once
-the GPU is back.
+Tested: tests/server + tests/tokenizer pass, each new test fails without its fix. Live on the
+RTX 4090 (2026-10-05): Llama-3.2-1B-Instruct, gpt-oss-20b and Qwen3-VL-8B-Instruct each return a
+parsed get_weather call (stream and non-stream), plain answers keep a non-empty content, and a
+mid-conversation system message takes effect.
