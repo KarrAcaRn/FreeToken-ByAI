@@ -112,6 +112,38 @@ but this is a numerics change, hence opt-in.
 Qwen3.8-27B-NVFP4 has no large bf16 linears (its projections are fp8, its lm_head NVFP4), so
 the option does nothing there.
 
+## Qwen3.8-Flash-Next on 24 GB VRAM + 30 GB RAM
+
+`RadixArk/Qwen3.8-Flash-Next-NVFP4` (126 GB: ~68 GB experts, 47.7 GB PLE table) runs with the
+disk tier, the checkpoint on cephfs (no local NVMe):
+
+    ft serve --model RadixArk/Qwen3.8-Flash-Next-NVFP4 --text-model-only --max-running-requests 1 \
+      --kv-cache-dtype fp8 --moe-disk-tier on --expert-ram-experts 160 --ple-backend disk \
+      --disable-moe-prefill-overlap --cuda-graph-max-bs 0 --online-quant fp8 \
+      --expert-profile flash-next-profile.json   # scripts/record_expert_profile.py
+
+Where a decode token went (2.4 tok/s, 128 RAM experts by id): 417 ms per token, 287 ms of it in
+the synchronous disk fetches (~96 experts per token, 2 per layer, each layer waiting the ~4 ms
+ceph latency); the GPU idled ~87%. ~19% of the 24,576 experts fit the VRAM slot cache, 23% of
+the activated ones miss it.
+
+| Step | disk experts/token | decode tok/s |
+|---|---|---|
+| 48 RAM experts/layer by id | - | 2.2 |
+| 128 by id | 95.8 | 2.40-2.52 |
+| 128 ranked by Strata's profile | 80.9 | 2.69 |
+| 128 ranked by our own coding-prompt profile | 69.8 | 2.99 |
+| 160 ranked (RAM limit: ~2 GB left) | 58.2 | 3.20-3.28 |
+
+Measured and dropped: router lookahead prefetch (next layer's router on this layer's MoE
+input, Strata's `RouterLookahead`): recall 34%, precision 31% on Flash-Next, and on ceph the
+wrong reads plus the page-cache pressure made it slower (1.26 tok/s). Buffered reads through
+the page cache instead of pinned RAM experts: slower (1.45 tok/s). An exclusive RAM tier
+(ranks after the VRAM share): worse, the shared LRU slot cache does not keep the top ranks.
+Bigger levers left, both larger projects: 2-3 bit experts (Strata's Q2/IQ2 GGUFs, ~35 GB,
+would fit RAM + VRAM and drop the disk from decode) and Flash-Next's MTP head for speculative
+decoding (Strata claims 1.6-1.8x).
+
 ## Not done: options that need a decision
 
 - **DFlash block size.** `--speculative-dflash-block-size 16` (drafter trained at 8):
