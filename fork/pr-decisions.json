@@ -369,16 +369,18 @@
     "title": "fix(server): do not auto-select qwen3 parser for instruct-2507",
     "head_sha": "b5630ea2c313",
     "reviewed_at": "2026-10-03",
-    "decision": "adopted",
-    "reason": "Small, tested: --reasoning-parser auto no longer picks qwen3 for Instruct-2507 checkpoints (empty message.content). The model path is the only signal (shared architecture with Thinking-2507); acceptable for an auto heuristic, an explicit flag still wins.",
+    "decision": "adopted-with-fixups",
+    "reason": "Small, tested: --reasoning-parser auto no longer picks qwen3 for Instruct-2507 checkpoints (empty message.content). The model path is the only signal (shared architecture with Thinking-2507); acceptable for an auto heuristic, an explicit flag still wins. 2026-10-05: with Qwen3-VL-8B-Instruct downloaded, auto still picked qwen3 for it (its template never opens <think>), so every answer would be reasoning only; our follow-up matches any Qwen3 Instruct checkpoint.",
     "commits": [
-      "dce9d11"
+      "dce9d11",
+      "bfc41c7"
     ],
     "gpu_untested": false,
     "authors": [
       "Sanjay Sundaram <ssundaram@berkeley.edu>"
     ],
-    "summary": "--reasoning-parser auto no longer picks qwen3 for Instruct-2507 checkpoints (empty content)"
+    "summary": "--reasoning-parser auto no longer picks qwen3 for Instruct-2507 checkpoints (empty content)",
+    "fixup": "Rule widened from instruct-2507 to every Qwen3 *Instruct* checkpoint: Qwen3-VL and Qwen3-Coder Instruct got the qwen3 parser and empty message.content"
   },
   "562": {
     "number": 562,
