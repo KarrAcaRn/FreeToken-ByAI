@@ -727,16 +727,12 @@ def _gemm_scratch(a: torch.Tensor, packed_i32: torch.Tensor, scale: torch.Tensor
         return torch.nn.functional.linear(a, w)
     out = torch.empty((M, N), dtype=compute, device=a.device)
     w = torch.empty((chunk, K), dtype=compute, device=a.device)
-    tmp = torch.empty((M, chunk), dtype=compute, device=a.device)
     for n0 in range(0, N, chunk):
         n1 = min(n0 + chunk, N)
         wc = w[: n1 - n0]
         _dequant_rows(packed_i32[n0:n1], scale[n0:n1], gscale[n0:n1], wc, transposed)
-        # matmul into a contiguous temp: cuBLAS refuses a strided-out epilogue and torch
-        # would fall back to a slow path if given the non-contiguous out[:, n0:n1] directly.
-        tc = tmp[:, : n1 - n0]
-        torch.matmul(a, wc.t(), out=tc)
-        out[:, n0:n1].copy_(tc)
+        # out[:, n0:n1] is row-major with ldc=N, which cuBLAS writes directly (no temp + copy).
+        torch.mm(a, wc.t(), out=out[:, n0:n1])
     return out
 
 
