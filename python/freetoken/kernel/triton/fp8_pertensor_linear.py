@@ -298,13 +298,14 @@ def _scaled_mm(
             qa, wt, scale_a=sa, scale_b=weight_scale[0].reshape(()), out_dtype=out_dtype,
         )
     if scale_segments is not None:
-        return torch.cat([
+        # Each part writes its own column slice (ldc = N), no per-part outputs + cat.
+        out = torch.empty((a.shape[0], weight.shape[0]), dtype=out_dtype, device=a.device)
+        for s, e in scale_segments:
             torch._scaled_mm(
                 qa, weight[s:e].t(), scale_a=sa, scale_b=weight_scale[s].reshape(()),
-                out_dtype=out_dtype,
+                out_dtype=out_dtype, out=out[:, s:e],
             )
-            for s, e in scale_segments
-        ], dim=1)
+        return out
     return torch._scaled_mm(
         qa, wt,
         scale_a=input_scale.reshape(1, 1).expand(a.shape[0], 1).contiguous(),
