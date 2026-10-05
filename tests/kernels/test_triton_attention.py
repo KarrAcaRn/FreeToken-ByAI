@@ -1266,10 +1266,84 @@ def test_triton_backend_fresh_prefill_fast_path_matches_the_extend_kernel(monkey
     backend = triton_backend.TritonAttentionBackend(SimpleNamespace())
     backend.prepare_metadata(batch)
     calls = []
-    real = triton_backend._fresh_prefill_attention
-    monkeypatch.setattr(triton_backend, "_fresh_prefill_attention", lambda *a: calls.append(1) or real(*a))
+    real = triton_backend._fi_prefill_attention
+    monkeypatch.setattr(triton_backend, "_fi_prefill_attention", lambda *a: calls.append(1) or real(*a))
     fast = backend.forward(q, k, v, layer_id=0, batch=batch, attn_spec=spec)
-    monkeypatch.setattr(triton_backend, "_fresh_prefill_ok", lambda *a: False)
+    monkeypatch.setattr(triton_backend, "_fi_prefill_ok", lambda *a: False)
+    ref = backend.forward(q, k, v, layer_id=0, batch=batch, attn_spec=spec)
+
+    assert calls == [1]
+    torch.testing.assert_close(fast.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+@pytest.mark.parametrize("kv_quant", ["none", "fp8"])
+def test_triton_backend_prefixed_prefill_fast_path_matches_the_extend_kernel(monkeypatch, kv_quant):
+    """A chunked prefill gathers its cached prefix (an fp8 one dequantized) in front of its own
+    K/V for FlashInfer; it must match the triton extend kernel that reads the pool directly."""
+    pytest.importorskip("flashinfer")
+    import freetoken.attention.triton as triton_backend
+    from freetoken.attention import AttentionSpec
+
+    device = torch.device("cuda")
+    heads, kv_heads, head_dim = 8, 2, 128
+    prefixes, extends = [300, 0], [400, 280]
+    slots = sum(prefixes) + sum(extends)
+    torch.manual_seed(1)
+    rows_k = torch.randn(slots, kv_heads, head_dim, device=device, dtype=torch.bfloat16)
+    rows_v = torch.randn(slots, kv_heads, head_dim, device=device, dtype=torch.bfloat16)
+    if kv_quant == "fp8":
+        k_pool, v_pool, k_sc, v_sc = _fp8_cache(rows_k.float(), rows_v.float())
+    else:
+        k_pool, v_pool, k_sc, v_sc = rows_k, rows_v, None, None
+
+    class FakeKVCache:
+        def __init__(self):
+            self.device = device
+            self.kv_quant = kv_quant
+
+        def store_kv(self, k, v, out_loc, layer_id):  # prefix rows are already in the pool
+            pass
+
+        def k_cache(self, layer_id):
+            return k_pool
+
+        def v_cache(self, layer_id):
+            return v_pool
+
+        def k_scale(self, layer_id):
+            return k_sc
+
+        def v_scale(self, layer_id):
+            return v_sc
+
+    # request 0 owns slots [0, 700), request 1 [700, 980)
+    page_table = torch.zeros(2, 700, dtype=torch.int32, device=device)
+    page_table[0] = torch.arange(700, dtype=torch.int32)
+    page_table[1, :280] = torch.arange(700, 980, dtype=torch.int32)
+    ctx = SimpleNamespace(kv_cache=FakeKVCache(), page_table=page_table)
+    monkeypatch.setattr("freetoken.attention.triton.get_global_ctx", lambda: ctx)
+    batch = SimpleNamespace(
+        padded_reqs=[
+            SimpleNamespace(extend_len=e, device_len=p + e, cached_len=p, table_idx=i)
+            for i, (p, e) in enumerate(zip(prefixes, extends))
+        ],
+        positions=torch.cat([torch.arange(p, p + e) for p, e in zip(prefixes, extends)]).to(device),
+        out_loc=torch.cat([torch.arange(300, 700), torch.arange(700, 980)]).to(torch.int32).to(device),
+    )
+    total = sum(extends)
+    q = torch.randn(total, heads, head_dim, device=device, dtype=torch.bfloat16)
+    k = torch.cat([rows_k[300:700], rows_k[700:980]]).reshape(total, -1)
+    v = torch.cat([rows_v[300:700], rows_v[700:980]]).reshape(total, -1)
+    spec = AttentionSpec(sliding_window=None, sm_scale=head_dim**-0.5)
+
+    backend = triton_backend.TritonAttentionBackend(SimpleNamespace())
+    backend.prepare_metadata(batch)
+    calls = []
+    real = triton_backend._fi_prefill_attention
+    monkeypatch.setattr(triton_backend, "_fi_prefill_attention", lambda *a: calls.append(1) or real(*a))
+    fast = backend.forward(q, k, v, layer_id=0, batch=batch, attn_spec=spec)
+    monkeypatch.setattr(triton_backend, "_fi_prefill_ok", lambda *a: False)
     ref = backend.forward(q, k, v, layer_id=0, batch=batch, attn_spec=spec)
 
     assert calls == [1]
