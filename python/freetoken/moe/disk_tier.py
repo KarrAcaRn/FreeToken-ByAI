@@ -617,6 +617,20 @@ class DiskTier:
 
         _materialize_layer_gpu(cache, layer_id, materialize_count=self._ram)
         routed = expert_ids.reshape(-1)
+        # Copy only the RAM experts this prefill routes to, not the whole RAM prefix (~400 MB
+        # per layer at 160 experts); the skipped ones lose their identity-slot mapping, or a
+        # later decode would take their stale slots for hits.
+        routed_ram = torch.zeros(self._ram, dtype=torch.bool, device=routed.device)
+        routed_ram[routed[routed < self._ram].long()] = True
+        keep = torch.nonzero(routed_ram).squeeze(1)
+        drop = torch.nonzero(~routed_ram).squeeze(1)
+        n = keep.numel()
+        cache.evict_slots[:n].copy_(keep.to(cache.evict_slots.dtype))
+        cache.src_indices[:n].copy_(keep.to(cache.src_indices.dtype))
+        cache.num_indices.fill_(n)
+        cache.slot_for_id[layer_id, drop] = -1
+        cache.id_of_slot[drop] = -1
+        cache.usage[drop] = 0
         disk = torch.unique(routed[routed >= self._ram])
         if os.environ.get("FT_DISK_TIER_DEBUG") and layer_id < 3:
             print(f"[disk-tier dbg] layer={layer_id} routed={routed.numel()} "
