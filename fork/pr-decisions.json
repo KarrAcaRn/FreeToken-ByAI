@@ -892,16 +892,17 @@
     "head_sha": "464125213e26",
     "reviewed_at": "2026-10-03",
     "decision": "reimplemented",
-    "reason": "Qwen3.6+ templates (Qwen3.8-27B included) raise 'System message must be at the beginning.' on a later system message. The PR hoisted and merged system messages in render_messages for every model, reordering prompts for templates that render them in place (Qwen3). Ours renders as sent and only on a TemplateError retries with the system messages merged at the front; unrelated template errors re-raise. Checked on the cached Qwen3-0.6B (unchanged) and Qwen3.8-27B (now renders) templates.",
+    "reason": "Qwen3.6+ templates (Qwen3.8-27B included) raise 'System message must be at the beginning.' on a later system message. The PR hoisted and merged system messages in render_messages for every model, reordering prompts for templates that render them in place (Qwen3). Ours renders as sent and only on a TemplateError retries with the system messages merged at the front; unrelated template errors re-raise. Checked on the cached Qwen3-0.6B (unchanged) and Qwen3.8-27B (now renders) templates. 2026-10-05: a render check on the new test models showed Qwen3-VL-8B-Instruct and gpt-oss-20b dropping a mid-conversation system message without an error; the hoist now also runs when a text system message is missing from the render.",
     "commits": [
-      "d609fe6"
+      "d609fe6",
+      "2b3563c"
     ],
     "gpu_untested": false,
     "authors": [
       "Rafael Rincon <rafaeldrincon@gmail.com>"
     ],
     "summary": "Qwen3.6+ templates raise on a later system message; system messages are now merged to the front",
-    "fixup": "Renders as sent and only retries with system messages hoisted on a TemplateError"
+    "fixup": "Renders as sent and only retries with system messages hoisted on a TemplateError; 2026-10-05: also hoists when a template silently drops a later system message (Qwen3-VL, gpt-oss)"
   },
   "484": {
     "number": 484,
