@@ -27,6 +27,12 @@ models:
 - `google/gemma-4-12B-it-qat-q4_0-gguf` (GGUF, sliding-window attention)
 - `Qwen/Qwen3-0.6B` (quick server checks)
 
+Since 2026-10-05 the RTX 4090 is out of the machine for now, so new changes get CPU checks only
+(unit tests, loader and quantization scans, `ft info` forecasts) until it is back. For those we
+also keep `openai/gpt-oss-20b`, `nvidia/Gemma-4-26B-A4B-NVFP4`, `Qwen/Qwen3-VL-8B-Instruct`,
+`RedHatAI/Muse-Glimmer-30B-NVFP4`, `Qwen/Qwen3.6-35B-A3B-FP8`, `Qwen/Qwen3.8-27B-FP8`,
+`gesong2077/GLM-4.5-Air-NVFP4` and small Llama / Qwen2.5 / Mistral checkpoints.
+
 That is why this branch does **not** contain the ROCm patches, nor the patches for very large
 cards or models (multi-GPU tensor parallelism, DeepSeek-V4, Kimi-K3, full GLM-5.3, ...), nor
 patches for platforms we cannot run (Windows, macOS). Those are not judged as wrong: they wait
