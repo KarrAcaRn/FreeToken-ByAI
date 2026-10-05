@@ -16,6 +16,9 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | Llama 3.2: tool name under the "function" key | 0c6aec0 | Candidate, applies to upstream main as is; see below |
 | Qwen3 Instruct checkpoints (VL, Coder) get no qwen3 reasoning parser | bfc41c7 (on top of #564) | Suggest on #564, which is still open upstream |
 | Hoist a system message the template silently drops (Qwen3-VL, gpt-oss) | 2b3563c (on top of our #487 version) | Candidate together with #487's approach |
+| sm_89: round fp8 activations once (Triton double-rounds fp32 -> e4m3 via fp16) | 8236bb3, test fix 311f629 | Candidate, applies to upstream main as is; see below |
+| GLM DSA bf16 sparse attention fits 99 KiB shared memory (BLOCK_T=16) | 48653bf | Candidate; next's file also carries the fp8/nvfp4 DSA KV PRs, rebase onto main |
+| qwen4_exp chunked QSA prefill test: exact selection, output within bf16 rounding | 801f96b | Candidate, test only; see below |
 
 ## Load dense Gemma-4 GGUFs end to end
 
@@ -149,3 +152,23 @@ Tested: tests/server + tests/tokenizer pass, each new test fails without its fix
 RTX 4090 (2026-10-05): Llama-3.2-1B-Instruct, gpt-oss-20b and Qwen3-VL-8B-Instruct each return a
 parsed get_weather call (stream and non-stream), plain answers keep a non-empty content, and a
 mid-conversation system message takes effect.
+
+## Failing GPU tests on sm_89 (RTX 4090), 2026-10-05
+
+The seven "known failures" on the 4090 (also on plain upstream main) were three separate causes:
+
+- 8236bb3: Triton lowers fp32 -> `tl.float8e4nv` on sm_89 through fp16 and double-rounds when the
+  fp16 value is an e4m3 tie (42.002 -> 42.0 -> 40, not 44); 0.41% of arbitrary fp32 values. Hit
+  `_static_quant` (per-tensor W8A8) and `per_token_group_quant_fp8` (block fp8); W8A8 GEMM error up
+  to 1.0e-2 instead of the 1.7e-3 bf16 floor, failing `test_w8a8_matches_w8a8_reference`. Now
+  `round_e4m3` first (as the emulated path did); new `test_activation_quantizers_round_once` fails
+  on all four quantizers without it. Quantizer time unchanged (+-0.4 us).
+- 311f629: without row-wise `_scaled_mm` (sm_89 + torch < 2.12) each part's tensor-wise cuBLASLt
+  GEMM picks its kernel by M, so bs=1 vs bs=8 differ in the last bit (20/1280 outputs). The test
+  keeps bit equality where row-wise runs and otherwise checks the scheme stays W8A8.
+- 48653bf: `glm_dsa_sparse_attn` with an unquantized pool needs 102400 B shared memory at
+  BLOCK_T=32; sm_86/89/120 allow 101376, so GLM-5.x with bf16 KV raised OutOfResources on every
+  launch. BLOCK_T=16 below 128 KiB.
+- 801f96b: cuBLAS picks other algorithms for the shorter tail chunk (qkv_proj/o_proj differ by an
+  ulp), so `torch.equal` on the chunked QSA prefill failed on correct code. Selection is compared
+  exactly (indexer path is bit-identical); skipping the ring refresh still fails both unaligned cuts.
