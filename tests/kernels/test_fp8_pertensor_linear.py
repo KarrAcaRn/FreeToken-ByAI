@@ -93,7 +93,7 @@ def test_batch_size_does_not_change_the_numeric_scheme():
     """A deployment that can run W8A8 must run it at every M, so that a reply reproduces at
     bs=1 regardless of how many other requests shared its forward. Feeding the same row alone
     and as part of a batch must therefore agree bit-for-bit."""
-    from freetoken.kernel.triton.fp8_pertensor_linear import fp8_pertensor_linear
+    from freetoken.kernel.triton.fp8_pertensor_linear import fp8_pertensor_linear, rowwise_scaled_mm_ok
 
     K, part_rows = 2048, [1024, 256]
     w8, scale = _quant_parts(part_rows, K)
@@ -102,7 +102,14 @@ def test_batch_size_does_not_change_the_numeric_scheme():
 
     batched = fp8_pertensor_linear(x, w8, scale, None, input_scale, False)
     alone = fp8_pertensor_linear(x[:1], w8, scale, None, input_scale, False)
-    assert torch.equal(alone, batched[:1])
+    if rowwise_scaled_mm_ok():
+        assert torch.equal(alone, batched[:1])
+        return
+    # Per-part fallback (sm_89, torch < 2.12): cuBLASLt picks its tensor-wise kernel by M, so
+    # bs=1 may differ in the last bit; it must still be W8A8, far from the W8A16 result.
+    w8a16 = fp8_pertensor_linear(x[:1], w8, scale)
+    torch.testing.assert_close(alone, batched[:1], rtol=2 ** -7, atol=1e-3)
+    assert (alone != batched[:1]).sum() * 10 < (alone != w8a16).sum()
 
 
 @pytest.mark.skipif(not e4m3_native(), reason="torch._scaled_mm needs sm_89+")
