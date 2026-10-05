@@ -91,14 +91,31 @@ DFlash:
 - The torch profiler overstates host overhead: the GDN-commit graph cut profiled idle
   18% -> 13% but gained ~0.4% unprofiled. Judge launch-overhead work by unprofiled runs.
 
+## Opt-in: `--online-quant fp8`
+
+Same as `--quant-backend linear.none=fp8`. A checkpoint's bf16 linear weights (projections,
+an untied lm_head) are quantized at load to e4m3 with one fp32 scale per output row and run
+through the W8A16 kernels (GEMV at M=1, the small-M tiles, the triton GEMM for prefill,
+which is within 2-13% of bf16 cuBLAS). Layers with fewer than 1024 outputs (MoE routers,
+GDN `in_proj_ba`, shared-expert gates) stay bf16; tied lm_heads stay bf16; auto kernel
+selection never picks it. `ft info` prices the smaller weights. Outputs change slightly:
+greedy answers on the sample prompts stayed the same and the 16k-token retrieval test holds,
+but this is a numerics change, hence opt-in.
+
+| Model (4k prefill / decode bs=1 / KV tokens) | bf16 weights | --online-quant fp8 |
+|---|---|---|
+| Qwen3.6-35B-A3B NVFP4 (fp8 KV, 32k reserve) | 15389 / 149.8 / 9097 expert slots | 15091 / 209.9 (+40%) / 9876 slots |
+| Qwen3-VL-8B-Instruct | 9701 / 58.0 / 30k | 9814 / 103.6 (+79%) / 82k |
+| gpt-oss-20b | 13672 / 173.4 / 259k | 13279 / 216.3 (+25%) / 295k |
+| Muse-Glimmer-30B NVFP4 | 2736 / 45.8 / 69k | 2944 / 53.3 (+16%) / 131k |
+
+Qwen3.8-27B-NVFP4 has no large bf16 linears (its projections are fp8, its lm_head NVFP4), so
+the option does nothing there.
+
 ## Not done: options that need a decision
 
 - **DFlash block size.** `--speculative-dflash-block-size 16` (drafter trained at 8):
   code prompts +17-23%, prose slightly lower, 12-prompt total +1.6%. A usage hint, not a
   code change.
-- **Online fp8 for bf16 weights (opt-in).** Qwen3.6-35B-A3B keeps its attention/GDN
-  projections and lm_head in bf16: 52% + 16% of its decode step, already at the bandwidth
-  roof. Per-row fp8 (as `--speculative-draft-quant fp8` does for the drafter) would halve
-  those bytes, roughly +30% decode, but changes the model's numerics.
 - Smaller items: fla GDN chunk kernels are H100-tuned (~45 ms per 4k prefill, maybe ~1%);
   fusing silu*mul into the NVFP4 down GEMV (~0.7% decode); `in_proj_ba` bf16 GEMV (~1%).
