@@ -56,9 +56,32 @@ def pending(prs, log):
     return todo or last
 
 
+def refresh_upstream_state(log):
+    """Mark logged PRs that left upstream's open list as merged or closed (cleared again on reopen)."""
+    try:
+        open_nums = {pr["number"] for pr in open_prs()}
+    except OSError as err:
+        print(f"# open PR list unavailable ({err}); keeping the stored upstream states")
+        return
+    for num, e in log.items():
+        if int(num) in open_nums:
+            e.pop("upstream", None)
+        elif "upstream" not in e:
+            # upstream squash-merges with a "(#N)" subject suffix
+            merged = git("log", "--oneline", "-F", f"--grep=(#{num})", "upstream/main")
+            e["upstream"] = "merged" if merged else "closed"
+    LOG.write_text(json.dumps(log, indent=2, ensure_ascii=False) + "\n")
+
+
+def still_open(log):
+    return {n: e for n, e in log.items() if "upstream" not in e}
+
+
 def render(log):
+    log = still_open(log)
     rows = ["# Upstream PR decisions", "",
-            "Generated from `pr-decisions.json` by `python3 fork/pr_queue.py --render`.", "",
+            "Generated from `pr-decisions.json` by `python3 fork/pr_queue.py --render`. PRs that upstream "
+            "has merged or closed are left out; the JSON keeps their decisions.", "",
             "| PR | Title | Authors | Decision | Reason |", "|---|---|---|---|---|"]
     for num in sorted(log, key=int, reverse=True):
         e = log[num]
@@ -194,6 +217,7 @@ def main():
     args = ap.parse_args()
     log = load_log()
     if args.render:
+        refresh_upstream_state(log)
         render(log)
         return
     if args.overlap is not None:

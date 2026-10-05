@@ -46,7 +46,8 @@
       "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
     ],
     "summary": "Fused (resident) MoE serves NVFP4 and MXFP4 experts via the expert banks; on GB10 auto-picks fused",
-    "fixup": "conflicts with disk tier, NVFP4 TP and FTW validation combined; the unified-memory warning follows our hit-D2D default"
+    "fixup": "conflicts with disk tier, NVFP4 TP and FTW validation combined; the unified-memory warning follows our hit-D2D default",
+    "upstream": "merged"
   },
   "599": {
     "number": 599,
@@ -62,7 +63,8 @@
     "authors": [
       "云微 <1067852565@qq.com>"
     ],
-    "summary": "/v1/stats reports the attention backend's real KV page size instead of the CLI value"
+    "summary": "/v1/stats reports the attention backend's real KV page size instead of the CLI value",
+    "upstream": "merged"
   },
   "596": {
     "number": 596,
@@ -1299,7 +1301,8 @@
     "authors": [
       "Gabriel A. Devenyi <gdevenyi@gmail.com>"
     ],
-    "summary": "Already merged as part of #399, which adds the padded-scale-stride fix, an avx512f tier and stronger tests"
+    "summary": "Already merged as part of #399, which adds the padded-scale-stride fix, an avx512f tier and stronger tests",
+    "upstream": "closed"
   },
   "595": {
     "number": 595,
@@ -1433,7 +1436,8 @@
     "authors": [
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
     ],
-    "summary": "--moe-cache-auto ignored the KV pool's dummy page 0, risking boot OOM and under-delivering --kv-reserve-tokens"
+    "summary": "--moe-cache-auto ignored the KV pool's dummy page 0, risking boot OOM and under-delivering --kv-reserve-tokens",
+    "upstream": "closed"
   },
   "339": {
     "number": 339,
@@ -1449,7 +1453,8 @@
     "authors": [
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
     ],
-    "summary": "Triton varlen conv fallback did a D2H sync per prefill (illegal under capture); the host-known max is now passed in"
+    "summary": "Triton varlen conv fallback did a D2H sync per prefill (illegal under capture); the host-known max is now passed in",
+    "upstream": "closed"
   },
   "338": {
     "number": 338,
@@ -1465,7 +1470,8 @@
     "authors": [
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
     ],
-    "summary": "Fuses Flash-Next's PLE n-gram row-id hash (39 launches per layer) into one capture-safe Triton kernel"
+    "summary": "Fuses Flash-Next's PLE n-gram row-id hash (39 launches per layer) into one capture-safe Triton kernel",
+    "upstream": "closed"
   },
   "327": {
     "number": 327,
@@ -1699,7 +1705,8 @@
     "authors": [
       "sime2408 <simun.sunjic@gmail.com>"
     ],
-    "summary": "A tokenizer/detokenizer dying at startup showed only as 'exited during load'; it now reports its error to the supervisor"
+    "summary": "A tokenizer/detokenizer dying at startup showed only as 'exited during load'; it now reports its error to the supervisor",
+    "upstream": "closed"
   },
   "267": {
     "number": 267,
