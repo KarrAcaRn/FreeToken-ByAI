@@ -91,7 +91,7 @@ from every handler). On main only the request-ring middleware exists (no --api-k
 
 ## MoE offload: preloaded expert slot cache and prefill hit-D2D by default
 
-Branch `fix/moe-ttft` (from main, commit 2012f9e). On an offloaded MoE every request paid a
+Branch `fix/moe-ttft` (from main, commits f39f33a + 444eb32 after the 2026-10-05 rebase). On an offloaded MoE every request paid a
 fixed ~0.8 s before its first token: prefill streams whole expert layers into the double
 buffer, the slot cache (filled only by decode misses) held 342 of 10240 experts, and
 `--moe-prefill-hit-d2d` was off. The branch fills the free slots after startup and makes
