@@ -215,8 +215,14 @@ def _gemm(a: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor,
     N = weight.shape[0]
     compute = out_dtype if out_dtype in _TL_DTYPE else torch.bfloat16
     out = torch.empty((M, N), dtype=compute, device=a.device)
-    BLOCK_M = 64 if M >= 64 else 32
-    BLOCK_N, BLOCK_K = 128, 64
+    if M <= 32:
+        # Weight streaming: narrow N tiles give enough programs to fill the SMs and a deep K
+        # tile keeps each one fed -- 400 -> 870-890 GB/s at M=8 on sm_89 (DFlash draft blocks).
+        BLOCK_M = 16 if M <= 16 else 32
+        BLOCK_N, BLOCK_K = (16 if N <= 2048 else 32), 256
+    else:
+        BLOCK_M = 64 if M >= 64 else 32
+        BLOCK_N, BLOCK_K = 128, 64
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _gemm_kernel[grid](
         a, weight, weight_scale, out, M, N, K,
