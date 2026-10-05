@@ -312,6 +312,12 @@ closed drop out of these tables; the JSON keeps their decisions.
     piece of [#222](https://github.com/FlashML-org/FreeToken/pull/222));
   - `bench_serving.py`: `--api-key` and correct fresh-prefill rates with cache reporting (on
     [#341](https://github.com/FlashML-org/FreeToken/pull/341)).
+  - tool calls found by rendering each test model's own template: Llama 3.2's bare-JSON calls are
+    parsed in non-streaming replies too, and a gpt-oss call with the recipient in the role header
+    is no longer returned as plain text;
+  - `ft info` prices GLM-4.x's DF11-compressed weights (added to
+    [#595](https://github.com/FlashML-org/FreeToken/pull/595)) and refuses when the pinned expert
+    banks exceed the host RAM.
 - Many smaller fixups on adopted pull requests; see "Our follow-up" in the tables above.
 
 ### Planned next

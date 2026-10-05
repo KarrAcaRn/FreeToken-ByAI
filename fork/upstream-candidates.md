@@ -11,6 +11,10 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | Pure ASGI middlewares, so #222's non-streaming abort works | f8de64f (on top of #222) | Candidate, see below |
 | MoE offload: preload the expert slot cache, prefill hit-D2D by default | 2012f9e (branch `fix/moe-ttft`, from main) | Candidate, ready as a branch; see below |
 | Profile-picked hybrid falls back to offload for large expert caches; CPU pool leaves the engine a core | 74e0ece (branch `fix/moe-hybrid-pick`, from main) | Candidate, ready as a branch; see below |
+| Non-stream tool calls: the detector decides (Llama 3.2 bare-JSON calls) | 925e5f8 | Candidate, applies to upstream main as is; see below |
+| gpt-oss: tool recipient in the role header | 3b54232 | Candidate, applies to upstream main as is; see below |
+| Qwen3 Instruct checkpoints (VL, Coder) get no qwen3 reasoning parser | bfc41c7 (on top of #564) | Suggest on #564, which is still open upstream |
+| Hoist a system message the template silently drops (Qwen3-VL, gpt-oss) | 2b3563c (on top of our #487 version) | Candidate together with #487's approach |
 
 ## Load dense Gemma-4 GGUFs end to end
 
@@ -119,3 +123,23 @@ Tested on plain main + branch: auto with the profile falls back to offload at 15
 greedy output identical to explicit offload; with a 10% cache it stays hybrid; tests/moe and
 tests/engine pass (new tests/engine/test_profile_hybrid_pick.py).
 
+
+
+## Tool-call fixes found by rendering the new test models (2026-10-05, CPU only)
+
+Each model's own chat template renders an assistant tool call; the part the model would generate
+went through the server's reasoning split and tool parser (`_split_reasoning`, `_parse_tool_response`).
+
+- 925e5f8: `_parse_tool_response` parsed only when the reply held one of the global opener tags.
+  Llama 3.2 emits custom-tool calls as bare JSON (`{"name": ..., "parameters": ...}`), which
+  `Llama32Detector` handles and streaming already parsed; non-stream returned it as content. The
+  gate now asks the detector's `has_tool_call` (checked: no detector is narrower than the old tags
+  for what it parses).
+- 3b54232: Harmony allows `<|start|>assistant to=functions.x<|channel|>commentary ...` (recipient
+  in the role header), which gpt-oss-20b's own template renders. The harmony reasoning parser read
+  the recipient only from the channel header, so the call became content holding the JSON. It now
+  moves the recipient into the channel header before scanning (non-stream and streaming).
+
+Tested: CPU only (tokenizers/templates of unsloth/Llama-3.2-1B-Instruct and openai/gpt-oss-20b);
+tests/server + tests/tokenizer pass, each new test fails without its fix. Needs a live run once
+the GPU is back.
