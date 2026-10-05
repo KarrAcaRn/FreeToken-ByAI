@@ -221,7 +221,7 @@ def test_flashinfer_draft_attention_matches_the_masked_sdpa(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_fused_grouped_dynamic_conv_matches_the_torch_composition():
-    from freetoken.kernel.triton.dflash_conv import grouped_dynamic_conv
+    from freetoken.kernel.triton.dflash_kernels import grouped_dynamic_conv
 
     torch.manual_seed(3)
     blocks, block_len, hidden_size, group, taps = 3, 8, 320, 16, 2
@@ -232,3 +232,22 @@ def test_fused_grouped_dynamic_conv_matches_the_torch_composition():
     ref = _grouped_dynamic_convolve(hidden, projected[:, 1], base, group, block_len)
     got = grouped_dynamic_conv(hidden, projected[:, 1], base, group, block_len)
     torch.testing.assert_close(got.float(), ref.float(), atol=3e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_fused_greedy_selector_matches_the_stepwise_torch_path(monkeypatch):
+    import freetoken.speculative.dflash.model as dmodel
+
+    sel = _selector(4)
+    dev = torch.device("cuda")
+    for name in ("predecessor_codebook", "successor_codebook"):
+        setattr(sel, name, getattr(sel, name).to(dev, torch.bfloat16))
+    sel.hidden_projection.weight = sel.hidden_projection.weight.to(dev, torch.bfloat16)
+    torch.manual_seed(5)
+    hidden = torch.randn(2, 7, 64, device=dev, dtype=torch.bfloat16)
+    logits = torch.randn(2, 7, 50, device=dev, dtype=torch.bfloat16)
+    anchor = torch.tensor([3, 11], device=dev)
+    fused, _ = sel.select(hidden, logits, anchor, None)
+    monkeypatch.setattr(dmodel, "_fused_selector_ok", lambda hidden: False)
+    stepwise, _ = sel.select(hidden, logits, anchor, None)
+    assert torch.equal(fused.cpu(), stepwise.cpu())

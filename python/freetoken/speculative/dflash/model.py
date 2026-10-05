@@ -272,7 +272,7 @@ class _GroupedDynamicCausalConv(BaseOP):
 
     def _convolve(self, hidden, dynamic, base, block_len):
         if hidden.is_cuda:
-            from freetoken.kernel.triton.dflash_conv import grouped_dynamic_conv
+            from freetoken.kernel.triton.dflash_kernels import grouped_dynamic_conv
 
             return grouped_dynamic_conv(hidden.contiguous(), dynamic, base, self.group_size, block_len)
         return _grouped_dynamic_convolve(hidden, dynamic, base, self.group_size, block_len)
@@ -284,6 +284,10 @@ class _GroupedDynamicCausalConv(BaseOP):
 
     def finish(self, hidden: torch.Tensor, dynamic: torch.Tensor, block_len: int) -> torch.Tensor:
         return self._convolve(hidden, dynamic, self.base_kernel[1], block_len)
+
+
+def _fused_selector_ok(hidden: torch.Tensor) -> bool:
+    return hidden.is_cuda
 
 
 class _CandidateSelector(BaseOP):
@@ -313,8 +317,16 @@ class _CandidateSelector(BaseOP):
             hidden, logits = hidden.unsqueeze(0), logits.unsqueeze(0)
         unary, candidates = torch.topk(logits, self.top_k, dim=-1, sorted=False)  # [B, P, k]
         hidden = self.hidden_projection.forward(hidden)
-        successors = F.embedding(candidates, self.successor_codebook)  # [B, P, k, rank]
         predecessor = anchor_id[: hidden.shape[0]].to(candidates.dtype)  # [B]
+        if temperature is None and _fused_selector_ok(hidden):
+            from freetoken.kernel.triton.dflash_kernels import selector_greedy_paths
+
+            paths = selector_greedy_paths(
+                unary.contiguous(), candidates.contiguous(), hidden.contiguous(),
+                self.predecessor_codebook, self.successor_codebook, predecessor,
+            )
+            return (paths[0], None) if single else (paths, None)
+        successors = F.embedding(candidates, self.successor_codebook)  # [B, P, k, rank]
         temp = None if temperature is None else temperature.reshape(-1, 1)
         path, q_rows = [], []
         for position in range(hidden.shape[1]):
