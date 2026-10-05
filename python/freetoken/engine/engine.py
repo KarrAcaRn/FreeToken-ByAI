@@ -838,6 +838,8 @@ class Engine:
         # GDN targets: the layers a graph verify's commit replays, and its small device inputs
         self._dflash_gdn_layers = _dflash_gdn_layers(self.model) if self.dflash_worker is not None else []
         self._dflash_slot_buf = torch.zeros(1, dtype=torch.int32, device=self.device)
+        self._dflash_commit_graphs: dict = {}
+        self._dflash_commit_seen: set = set()
         self._dflash_cu_seqlens_cache: dict[int, torch.Tensor] = {}
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
@@ -1784,9 +1786,8 @@ class Engine:
                         for b, (out, _) in enumerate(results):
                             rows = slice(row_base[b], row_base[b] + verify_len)
                             commit_len = out.numel() - 1
-                            commit_graph_linear_state(
-                                self._dflash_gdn_layers, pool, self._dflash_slot_tensor(gdn_slots[b]),
-                                self._dflash_cu_seqlens(commit_len),
+                            self._dflash_commit_linear_state(
+                                pool, self._dflash_slot_tensor(gdn_slots[b]),
                                 (conv[rows], mixed[:, rows], ab[:, :, rows]), commit_len,
                             )
                     verified_with_graph = True
@@ -1884,6 +1885,30 @@ class Engine:
         self.dflash_worker.finish_request(req.uid, req.input_ids)
         if self._dflash_gate is not None:
             self._dflash_gate.finish_request()
+
+    def _dflash_commit_linear_state(self, pool, slot: torch.Tensor, snapshots, commit_len: int) -> None:
+        """commit_graph_linear_state through a CUDA graph: eagerly it is one small launch per
+        GDN layer, each waiting ~50 us on the host (~2.4 ms of an idle GPU per Qwen3.8-27B
+        verify). A layout's first commit runs eagerly (compiling the kernels), its second is
+        captured; the key holds every address the graph bakes in, so a rebuilt pool or
+        snapshot buffer gets a fresh graph."""
+        if commit_len <= 0:
+            return
+        cu_seqlens = self._dflash_cu_seqlens(commit_len)
+        args = (self._dflash_gdn_layers, pool, slot, cu_seqlens, snapshots, commit_len)
+        key = (commit_len, slot.data_ptr(), pool.conv_states.data_ptr(), pool.recurrent_states.data_ptr(),
+               *((t.data_ptr(), t.stride()) for t in snapshots))
+        graph = self._dflash_commit_graphs.get(key)
+        if graph is None:
+            if key not in self._dflash_commit_seen:
+                self._dflash_commit_seen.add(key)
+                commit_graph_linear_state(*args)
+                return
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+                commit_graph_linear_state(*args)
+            self._dflash_commit_graphs[key] = graph
+        graph.replay()
 
     def _dflash_slot_tensor(self, slot: int) -> torch.Tensor:
         t = self._dflash_slot_buf
