@@ -1437,7 +1437,8 @@
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
     ],
     "summary": "--moe-cache-auto ignored the KV pool's dummy page 0, risking boot OOM and under-delivering --kv-reserve-tokens",
-    "upstream": "closed"
+    "upstream": "closed",
+    "after_upstream_close": "kept (2026-10-05): closed by its author without merge or upstream replacement; the bug is still on upstream main. Listed under 'Our own additions' in the README."
   },
   "339": {
     "number": 339,
@@ -1454,7 +1455,8 @@
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
     ],
     "summary": "Triton varlen conv fallback did a D2H sync per prefill (illegal under capture); the host-known max is now passed in",
-    "upstream": "closed"
+    "upstream": "closed",
+    "after_upstream_close": "kept (2026-10-05): closed by its author without merge or upstream replacement; the bug is still on upstream main. Listed under 'Our own additions' in the README."
   },
   "338": {
     "number": 338,
@@ -1471,7 +1473,9 @@
       "dejay2 <218806300+dejay2@users.noreply.github.com>"
     ],
     "summary": "Fuses Flash-Next's PLE n-gram row-id hash (39 launches per layer) into one capture-safe Triton kernel",
-    "upstream": "closed"
+    "upstream": "closed",
+    "after_upstream_close": "dropped (2026-10-05, revert 052c932): closed by its author; the review thread measured no end-to-end gain (decode replays the hash inside the CUDA graph), not worth fork-only code on PLE paths upstream keeps reworking.",
+    "reverted": "052c932"
   },
   "327": {
     "number": 327,
@@ -1706,7 +1710,8 @@
       "sime2408 <simun.sunjic@gmail.com>"
     ],
     "summary": "A tokenizer/detokenizer dying at startup showed only as 'exited during load'; it now reports its error to the supervisor",
-    "upstream": "closed"
+    "upstream": "closed",
+    "after_upstream_close": "kept (2026-10-05): closed by its author without merge or upstream replacement; the bug is still on upstream main. Listed under 'Our own additions' in the README."
   },
   "267": {
     "number": 267,

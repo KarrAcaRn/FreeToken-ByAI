@@ -281,6 +281,24 @@ closed drop out of these tables; the JSON keeps their decisions.
   holds under ~15% of the experts (5%: 61 vs 50 tok/s; 20%: 64 vs 75; 92%: 103 vs 140), so a
   profile-picked hybrid now falls back to offload above that. On branch `fix/moe-hybrid-pick`,
   meant for an upstream pull request.
+- **Upstream pull requests we keep although their authors closed them** (closed without a
+  merge or a replacement upstream, so they no longer show in the tables above; the bugs are
+  still on upstream `main`):
+  - [#340](https://github.com/FlashML-org/FreeToken/pull/340) by dejay2: `--moe-cache-auto`
+    reserves the KV pool's dummy page 0. Without it the plan can hand that page's bytes to
+    expert slots (OOM at boot with large pages) and `--kv-reserve-tokens` delivers one page
+    too few; here Qwen3.6-35B-A3B with `--kv-reserve-tokens 32768` gets 32850 tokens.
+  - [#339](https://github.com/FlashML-org/FreeToken/pull/339) by dejay2: the Triton fallback
+    of the varlen GDN/KDA prefill conv no longer reads the longest request back from the GPU,
+    a sync that breaks CUDA-graph capture on every install without `sgl_kernel`. Confirmed by
+    two reviewers on RTX 4090s; capture tests included.
+  - [#269](https://github.com/FlashML-org/FreeToken/pull/269) by sime2408: a tokenizer or
+    detokenizer worker that dies at startup reports its error instead of only "exited during
+    load".
+  - Dropped again: [#338](https://github.com/FlashML-org/FreeToken/pull/338) (fused PLE n-gram
+    hash). The kernel is correct, but its own review thread measured no end-to-end gain, since
+    decode replays the hash inside the CUDA graph; not worth fork-only code on PLE paths that
+    upstream keeps reworking.
 - **Fixes found while reviewing, offered back upstream:**
   - dense Gemma-4 GGUF checkpoints load end to end (on top of
     [#359](https://github.com/FlashML-org/FreeToken/pull/359));
