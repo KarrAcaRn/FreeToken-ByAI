@@ -217,3 +217,18 @@ def test_flashinfer_draft_attention_matches_the_masked_sdpa(monkeypatch):
             m.setattr(dmodel, "_fi_draft_attention_ok", lambda head_dim: False)
             ref = model.forward(embeds, positions, [context])
         torch.testing.assert_close(fast, ref, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_fused_grouped_dynamic_conv_matches_the_torch_composition():
+    from freetoken.kernel.triton.dflash_conv import grouped_dynamic_conv
+
+    torch.manual_seed(3)
+    blocks, block_len, hidden_size, group, taps = 3, 8, 320, 16, 2
+    rows = blocks * block_len
+    hidden = torch.randn(rows, hidden_size, device="cuda", dtype=torch.bfloat16)
+    projected = torch.randn(rows, 2, taps, hidden_size // group, device="cuda", dtype=torch.bfloat16)
+    base = torch.randn(taps, hidden_size, device="cuda", dtype=torch.bfloat16)
+    ref = _grouped_dynamic_convolve(hidden, projected[:, 1], base, group, block_len)
+    got = grouped_dynamic_conv(hidden, projected[:, 1], base, group, block_len)
+    torch.testing.assert_close(got.float(), ref.float(), atol=3e-2, rtol=2e-2)

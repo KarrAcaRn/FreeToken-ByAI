@@ -270,13 +270,20 @@ class _GroupedDynamicCausalConv(BaseOP):
         self.kernel_projection = LinearReplicated(hidden_size, 2 * kernel_size * self.groups, has_bias=False)
         self.kernel_projection.weight = self.kernel_projection.weight.to(torch.bfloat16)
 
+    def _convolve(self, hidden, dynamic, base, block_len):
+        if hidden.is_cuda:
+            from freetoken.kernel.triton.dflash_conv import grouped_dynamic_conv
+
+            return grouped_dynamic_conv(hidden.contiguous(), dynamic, base, self.group_size, block_len)
+        return _grouped_dynamic_convolve(hidden, dynamic, base, self.group_size, block_len)
+
     def prepare(self, hidden: torch.Tensor, block_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         dynamic = self.kernel_projection.forward(hidden).view(-1, 2, self.kernel_size, self.groups)
-        out = _grouped_dynamic_convolve(hidden, dynamic[:, 0], self.base_kernel[0], self.group_size, block_len)
+        out = self._convolve(hidden, dynamic[:, 0], self.base_kernel[0], block_len)
         return out, dynamic[:, 1]
 
     def finish(self, hidden: torch.Tensor, dynamic: torch.Tensor, block_len: int) -> torch.Tensor:
-        return _grouped_dynamic_convolve(hidden, dynamic, self.base_kernel[1], self.group_size, block_len)
+        return self._convolve(hidden, dynamic, self.base_kernel[1], block_len)
 
 
 class _CandidateSelector(BaseOP):
