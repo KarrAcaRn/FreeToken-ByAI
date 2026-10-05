@@ -74,9 +74,47 @@ class TritonMetadata(BaseAttnMetadata):
     attn_lse: torch.Tensor | None = None
     num_kv_splits: torch.Tensor | None = None
     swa_indices: torch.Tensor | None = None
+    # host per-request query lengths when no request has a cached prefix (fresh prefill)
+    fresh_seqlens_q: List[int] | None = None
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
         return self.cu_seqlens_q_gpu[1 : 1 + bs] - 1
+
+
+# A fresh prefill (no cached prefix) attends only its own bf16 K/V, which FlashInfer's FA2
+# prefill runs ~2.4x faster than the triton extend kernel on sm_89 at head_dim 256 (its
+# tiles shrink to fit 99 KiB of shared memory). Same inputs: the extend kernel also reads
+# these rows unquantized.
+_FRESH_PREFILL_MIN_Q = 256
+
+
+def _fresh_prefill_ok(q: torch.Tensor, kv_heads: int, max_q_len: int) -> bool:
+    if max_q_len < _FRESH_PREFILL_MIN_Q or q.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if q.shape[-1] not in (64, 128, 256) or q.shape[1] % kv_heads:
+        return False
+    from freetoken.kernel import backend
+
+    return backend.is_flashinfer_installed()
+
+
+def _fresh_prefill_attention(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqlens: List[int], scale: float
+) -> torch.Tensor:
+    from flashinfer import single_prefill_with_kv_cache
+
+    if len(seqlens) == 1:
+        return single_prefill_with_kv_cache(q, k, v, causal=True, sm_scale=scale)
+    out = torch.empty_like(q)
+    start = 0
+    for n in seqlens:
+        if n:
+            out[start : start + n] = single_prefill_with_kv_cache(
+                q[start : start + n], k[start : start + n], v[start : start + n],
+                causal=True, sm_scale=scale,
+            )
+        start += n
+    return out
 
 
 class TritonAttentionBackend(BaseAttnBackend):
@@ -200,6 +238,17 @@ class TritonAttentionBackend(BaseAttnBackend):
                 v_block_scale=v_block_scale,
             )
         if (
+            metadata.fresh_seqlens_q is not None
+            and spec.sliding_window is None
+            and spec.sinks is None
+            and block_ends is None
+            and _fresh_prefill_ok(q, kv_heads, metadata.max_q_len)
+        ):
+            return _fresh_prefill_attention(
+                q, k.view(q.shape[0], kv_heads, head_dim), v.view(q.shape[0], kv_heads, head_dim),
+                metadata.fresh_seqlens_q, scale,
+            )
+        if (
             (not metadata.is_decode)
             and q.dtype in (torch.float16, torch.bfloat16)
             and (q.shape[-1] <= 256 or metadata.max_q_len >= self.prefill_tile_min_q)
@@ -296,6 +345,7 @@ class TritonAttentionBackend(BaseAttnBackend):
             prefix_lens=prefix_lens,
             max_q_len=max(seqlens_q),
             swa_indices=swa_indices,
+            fresh_seqlens_q=seqlens_q if not is_decode and all(l == 0 for l in cached_lens) else None,
         )
 
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:

@@ -1209,3 +1209,68 @@ def test_extend_paged_attention_decodes_fp8_scales(use_split_inputs: bool):
         None,
     )
     torch.testing.assert_close(actual.float(), expected.float(), atol=3e-2, rtol=3e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+def test_triton_backend_fresh_prefill_fast_path_matches_the_extend_kernel(monkeypatch):
+    """Requests without a cached prefix attend through FlashInfer's prefill; the result must
+    match the triton extend kernel the backend would otherwise run."""
+    pytest.importorskip("flashinfer")
+    import freetoken.attention.triton as triton_backend
+    from freetoken.attention import AttentionSpec
+
+    device = torch.device("cuda")
+    lens, heads, kv_heads, head_dim = [300, 517], 12, 2, 256
+    total = sum(lens)
+
+    class FakeKVCache:
+        def __init__(self):
+            self.device = device
+            self.k = torch.zeros(total, kv_heads, head_dim, device=device, dtype=torch.bfloat16)
+            self.v = torch.zeros_like(self.k)
+
+        def store_kv(self, k, v, out_loc, layer_id):
+            self.k[out_loc.to(torch.long)] = k.view(k.shape[0], kv_heads, -1)
+            self.v[out_loc.to(torch.long)] = v.view(v.shape[0], kv_heads, -1)
+
+        def k_cache(self, layer_id):
+            return self.k
+
+        def v_cache(self, layer_id):
+            return self.v
+
+        def k_scale(self, layer_id):
+            return None
+
+        def v_scale(self, layer_id):
+            return None
+
+    page_table = torch.zeros(2, max(lens), dtype=torch.int32, device=device)
+    page_table[0, : lens[0]] = torch.arange(lens[0], dtype=torch.int32)
+    page_table[1, : lens[1]] = torch.arange(lens[0], total, dtype=torch.int32)
+    ctx = SimpleNamespace(kv_cache=FakeKVCache(), page_table=page_table)
+    monkeypatch.setattr("freetoken.attention.triton.get_global_ctx", lambda: ctx)
+    batch = SimpleNamespace(
+        padded_reqs=[
+            SimpleNamespace(extend_len=n, device_len=n, cached_len=0, table_idx=i) for i, n in enumerate(lens)
+        ],
+        positions=torch.cat([torch.arange(n) for n in lens]).to(device),
+        out_loc=torch.arange(total, dtype=torch.int32, device=device),
+    )
+    torch.manual_seed(0)
+    q = torch.randn(total, heads, head_dim, device=device, dtype=torch.bfloat16)
+    k = torch.randn(total, kv_heads * head_dim, device=device, dtype=torch.bfloat16)
+    v = torch.randn(total, kv_heads * head_dim, device=device, dtype=torch.bfloat16)
+    spec = AttentionSpec(sliding_window=None, sm_scale=head_dim**-0.5)
+
+    backend = triton_backend.TritonAttentionBackend(SimpleNamespace())
+    backend.prepare_metadata(batch)
+    calls = []
+    real = triton_backend._fresh_prefill_attention
+    monkeypatch.setattr(triton_backend, "_fresh_prefill_attention", lambda *a: calls.append(1) or real(*a))
+    fast = backend.forward(q, k, v, layer_id=0, batch=batch, attn_spec=spec)
+    monkeypatch.setattr(triton_backend, "_fresh_prefill_ok", lambda *a: False)
+    ref = backend.forward(q, k, v, layer_id=0, batch=batch, attn_spec=spec)
+
+    assert calls == [1]
+    torch.testing.assert_close(fast.float(), ref.float(), atol=2e-2, rtol=2e-2)
