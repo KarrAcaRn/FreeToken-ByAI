@@ -224,3 +224,37 @@ def test_dsv4_fp32_wrapper_still_matches_its_reference():
     ref = F.linear(x.double(), w.double()).float()
     assert y.dtype == torch.float32
     assert (y - ref).abs().max().item() < 1e-3 * ref.abs().max().item()
+
+
+def test_online_fp8_is_only_ever_requested(nvidia_host):
+    """--online-quant fp8 changes the model's numerics: auto never picks it, a request does."""
+    from freetoken.layers.quantization.linear.unquantized import OnlineFp8LinearKernel
+
+    assert type(_select(151936)) is TritonGemvLinearKernel
+    assert type(_select(64)) is not OnlineFp8LinearKernel
+    assert type(_select(151936, "fp8")) is OnlineFp8LinearKernel
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("M", [1, 8, 300])
+def test_online_fp8_tracks_the_bf16_linear(M):
+    from types import SimpleNamespace
+
+    from freetoken.layers.quantization.linear.unquantized import OnlineFp8LinearKernel
+
+    torch.manual_seed(0)
+    kernel = OnlineFp8LinearKernel()
+    w = torch.randn(2048, 1024, device="cuda", dtype=BF16) * 0.05
+    gate = torch.randn(64, 1024, device="cuda", dtype=BF16) * 0.05
+    big = SimpleNamespace(weight=w.clone(), bias=None)
+    small = SimpleNamespace(weight=gate.clone(), bias=None)
+    kernel.finalize(big)
+    kernel.finalize(small)
+    assert big.weight.dtype == torch.float8_e4m3fn and big.online_fp8_scale.shape == (2048,)
+    assert small.weight.dtype == BF16  # routers and gates stay bf16
+
+    x = torch.randn(M, 1024, device="cuda", dtype=BF16)
+    ref = F.linear(x.float(), w.float())
+    rel = ((kernel.apply(big, x).float() - ref).norm() / ref.norm()).item()
+    assert rel < 3e-2, rel
+    assert torch.equal(kernel.apply(small, x), TritonGemvLinearKernel().apply(small, x))

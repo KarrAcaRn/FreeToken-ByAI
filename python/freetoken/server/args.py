@@ -804,6 +804,18 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--online-quant",
+        default="none",
+        choices=["none", "fp8"],
+        help=(
+            "Opt-in: quantize the checkpoint's bf16 linear weights (projections, an untied "
+            "lm_head; not routers or gates) to fp8 with one scale per output row at load. "
+            "Halves their bytes, so a bandwidth-bound decode runs faster, but the outputs "
+            "change slightly. Same as --quant-backend linear.none=fp8."
+        ),
+    )
+
+    parser.add_argument(
         "--ple-backend",
         default=ServerArgs.ple_backend,
         choices=["pinned", "disk"],
@@ -1117,6 +1129,9 @@ def parse_args(
             parser.error("--nvfp4-backend cannot be combined with --quant-backend; write --quant-backend moe.nvfp4=... instead")
         if entry:
             kwargs["quant_backend"] = entry
+
+    if kwargs.pop("online_quant") == "fp8":
+        kwargs["quant_backend"] = ",".join(x for x in (kwargs["quant_backend"], "linear.none=fp8") if x)
 
     if kwargs["distributed_port"] is None:
         kwargs["distributed_port"] = kwargs["server_port"] + 1

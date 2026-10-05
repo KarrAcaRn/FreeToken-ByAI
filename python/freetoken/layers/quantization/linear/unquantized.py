@@ -54,9 +54,45 @@ class TritonGemvLinearKernel(TorchLinearKernel):
         return super().linear(x, w, b)
 
 
+# Smaller outputs are routers and gate projections (MoE gate, GDN in_proj_ba): cheap to read
+# and precision-sensitive, so the opt-in fp8 kernel leaves them in bf16.
+ONLINE_FP8_MIN_OUT_FEATURES = 1024
+
+
+class OnlineFp8LinearKernel(TritonGemvLinearKernel):
+    """Opt-in (``--online-quant fp8``): a bf16 checkpoint's weight is quantized at load to e4m3
+    with one fp32 scale per output row and read through the W8A16 kernels, halving the bytes a
+    bandwidth-bound decode step streams. Changes the model's numerics, so never auto-picked."""
+
+    name = "fp8"
+
+    def unusable_reason(self, cfg: LinearConfig) -> str | None:
+        return None if torch.cuda.is_available() else "no CUDA device"
+
+    def worth_it(self, cfg: LinearConfig) -> bool:
+        return False
+
+    def finalize(self, layer: Any) -> None:
+        w = layer.weight
+        if (w.dim() != 2 or w.dtype not in (torch.bfloat16, torch.float16) or not w.is_cuda
+                or w.shape[0] < ONLINE_FP8_MIN_OUT_FEATURES):
+            return
+        scale = w.float().abs().amax(dim=1).clamp(min=1e-12) / torch.finfo(torch.float8_e4m3fn).max
+        layer.weight = (w.float() / scale[:, None]).to(torch.float8_e4m3fn)
+        layer.online_fp8_scale = scale.contiguous()
+
+    def apply(self, layer: Any, x: torch.Tensor) -> torch.Tensor:
+        scale = getattr(layer, "online_fp8_scale", None)
+        if scale is None:
+            return super().apply(layer, x)
+        from freetoken.kernel.triton.fp8_pertensor_linear import fp8_pertensor_linear
+
+        return fp8_pertensor_linear(x, layer.weight, scale, layer.bias)
+
+
 @register_method(QuantKind.NONE, LayerKind.LINEAR)
 class UnquantizedLinearMethod(LinearMethod):
-    candidates = (TritonGemvLinearKernel, TorchLinearKernel)
+    candidates = (TritonGemvLinearKernel, TorchLinearKernel, OnlineFp8LinearKernel)
 
     def create_weights(self, layer: Any) -> None:
         g = self.cfg

@@ -185,6 +185,25 @@ def _df11_estimate(model) -> Counter[str]:
     return found
 
 
+def _online_fp8_savings(model) -> Counter[str]:
+    """Per category, the bytes --online-quant fp8 frees once its layers finalize: the meta build
+    still holds their bf16 weights; at load they become e4m3 plus one fp32 scale per row."""
+    from freetoken.layers.quantization.linear.unquantized import (
+        ONLINE_FP8_MIN_OUT_FEATURES,
+        OnlineFp8LinearKernel,
+    )
+
+    saved: Counter[str] = Counter()
+    for path, o in _walk(model):
+        method = getattr(o, "quant_method", None)
+        w = getattr(o, "weight", None)
+        if (isinstance(getattr(method, "kernel", None), OnlineFp8LinearKernel) and isinstance(w, torch.Tensor)
+                and w.dim() == 2 and w.dtype in (torch.bfloat16, torch.float16)
+                and w.shape[0] >= ONLINE_FP8_MIN_OUT_FEATURES):
+            saved[tensor_category(f"{path}.weight")] += w.numel() * (w.element_size() - 1) - w.shape[0] * 4
+    return saved
+
+
 def resident_weights(model, config) -> WeightReport:
     """Per-category bytes the loaded model keeps on the GPU, from its meta-device build: the loader
     casts every checkpoint tensor into these parameters, so skipped tensors (a vision tower under
@@ -196,6 +215,7 @@ def resident_weights(model, config) -> WeightReport:
         gpu[tensor_category(name)] += _nbytes(t)
     df11 = _df11_estimate(model)
     gpu.update(df11)
+    gpu.subtract(_online_fp8_savings(model))
     report = WeightReport(gpu=dict(gpu))
     from freetoken.layers.embedding import host_movable_embeddings
 
