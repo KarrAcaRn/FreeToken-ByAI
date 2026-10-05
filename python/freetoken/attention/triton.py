@@ -135,6 +135,24 @@ def _fi_prefill_attention(
     return out
 
 
+# Split-k decode: a fixed 8 splits gave a bs=1 GQA decode 4 kv heads x 8 = 32 programs, ~290
+# GB/s over a 20k-token fp8 cache on a 128-SM RTX 4090. Enough splits for ~2 programs per SM
+# (empty splits exit at once) recover it: +7% decode tok/s at 20k context on Qwen3.8-27B.
+_MIN_KV_SPLITS = 8
+_MAX_KV_SPLITS = 32
+_KV_SPLIT_SCRATCH_CAP = 64 << 20
+
+
+def _decode_kv_splits(device: torch.device, num_kv_heads: int) -> int:
+    if num_kv_heads <= 0 or device.type != "cuda":
+        return _MIN_KV_SPLITS
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    splits = _MIN_KV_SPLITS
+    while splits < _MAX_KV_SPLITS and splits * num_kv_heads < 2 * sms:
+        splits *= 2
+    return splits
+
+
 class TritonAttentionBackend(BaseAttnBackend):
     def __init__(self, config: ModelConfig):
         self.config = config
@@ -145,7 +163,6 @@ class TritonAttentionBackend(BaseAttnBackend):
         self.dflash_verify_capture: dict[int, TritonMetadata] = {}
         self.capture_bs: List[int] = []
         self.max_graph_bs = 0
-        self.max_kv_splits = 8
         self.prefill_tile_min_q = 128
         self.num_q_heads = int(getattr(config, "num_qo_heads", 1))
         kv_groups = getattr(config, "kv_cache_group_specs", lambda: ())()
@@ -153,6 +170,10 @@ class TritonAttentionBackend(BaseAttnBackend):
             (group.head_dim for group in kv_groups),
             default=int(getattr(config, "head_dim", 1)),
         )
+        kv_heads = int(getattr(config, "num_kv_heads", 0) or 0) or max(
+            (group.num_kv_heads for group in kv_groups), default=0
+        )
+        self.max_kv_splits = _decode_kv_splits(self.device, kv_heads)
 
     def _ensure_decode_scratch(
         self,
@@ -370,6 +391,12 @@ class TritonAttentionBackend(BaseAttnBackend):
     def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
         assert self.capture is None, "Capture already initialized."
         max_bs = max(bs_list)
+        # large graph batches bring their own parallelism; keep their split scratch bounded
+        while self.max_kv_splits > _MIN_KV_SPLITS and (
+            max_bs * max(1, self.num_q_heads) * self.max_kv_splits * max(1, self.max_head_dim) * 4
+            > _KV_SPLIT_SCRATCH_CAP
+        ):
+            self.max_kv_splits //= 2
         self.capture = TritonCaptureData.create(
             max_bs,
             max_seq_len,
