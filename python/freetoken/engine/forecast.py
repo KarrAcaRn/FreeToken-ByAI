@@ -879,7 +879,11 @@ def forecast_inputs(config, model, free_before: int | None) -> ForecastInputs:
         max_slots = method.slot_limit() if method is not None else None
         mc = config.model_config
         if per_expert:
-            weights.host["experts"] = per_expert * mc.num_moe_layers * mc.num_experts
+            in_ram = mc.num_experts
+            # the disk tier pins only the first --expert-ram-experts of each layer
+            if getattr(config, "moe_disk_tier", "off") == "on" and 0 < config.expert_ram_experts < mc.num_experts:
+                in_ram = config.expert_ram_experts
+            weights.host["experts"] = per_expert * mc.num_moe_layers * in_ram
         else:
             weights.notes.append("expert bank layout unknown for this format: the GPU slot cache is not priced")
     return ForecastInputs(

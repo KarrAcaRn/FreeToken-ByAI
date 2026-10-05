@@ -384,3 +384,21 @@ def test_df11_placeholders_are_priced_from_the_weight_count():
     est = fc_mod._df11_estimate(holder)
     bits = fc_mod._DF11_BITS_PER_WEIGHT
     assert est == {"attention": int(128 * 256 * bits / 8), "embeddings": int(512 * 128 * bits / 8)}
+
+
+def test_host_ram_short_of_the_expert_banks_does_not_fit(tmp_path, monkeypatch):
+    import freetoken.memory
+
+    path = write_checkpoint(tmp_path / "tiny-moe", TINY_QWEN3_MOE,
+                            {"model.layers.0.mlp.experts.0.gate_proj.weight": ("BF16", [64, 128])})
+    banks = 2 * 8 * 3 * 64 * 128 * 2
+    monkeypatch.setattr(freetoken.memory, "available_host_memory", lambda: banks + 1)
+    assert _analyze(path).forecast.verdict == "fits"
+    monkeypatch.setattr(freetoken.memory, "available_host_memory", lambda: banks - 1)
+    r = _analyze(path)
+    assert r.forecast.verdict == "does not fit"
+    assert any(reason.startswith("host RAM") and "--moe-disk-tier on" in reason for reason in r.forecast.reasons)
+    # the disk tier pins only --expert-ram-experts of each layer
+    r = _analyze(path, "--moe-disk-tier", "on", "--expert-ram-experts", "2")
+    assert r.inputs.weights.host["experts"] == banks * 2 // 8
+    assert r.forecast.verdict == "fits"

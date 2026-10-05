@@ -203,6 +203,7 @@ def analyze(config, opts: argparse.Namespace) -> InfoReport:
         quant = {}
     fc = inputs.forecast()
     tips, combo = suggest_tips(inputs, fc)
+    _check_host_ram(config, inputs.weights.host, fc)
     report = InfoReport(config, gpu, inputs, fc, tips, combo, quant=quant)
     if found is not None:
         tensors, report.checkpoint_source = found
@@ -220,6 +221,22 @@ def analyze(config, opts: argparse.Namespace) -> InfoReport:
     if gpu.free_before is not None and gpu.source == "NVML":
         report.notes.append("Free memory is read now; other processes on the GPU change it.")
     return report
+
+
+def _check_host_ram(config, host: dict[str, int], fc) -> None:
+    """Refuse when the pinned host copies (offloaded experts, host embeddings, streamed vision blocks)
+    exceed the RAM this process can take: the load would fail there, whatever the GPU says."""
+    from freetoken.engine.forecast import _gib
+    from freetoken.memory import available_host_memory
+
+    need, avail = sum(host.values()), available_host_memory()
+    if not need or avail is None or need <= avail:
+        return
+    reason = f"host RAM: {_gib(need)} of pinned weights, only {_gib(avail)} available"
+    if host.get("experts") and getattr(config, "moe_disk_tier", "off") == "off":
+        reason += " (--moe-disk-tier on keeps experts beyond --expert-ram-experts on disk, native NVFP4 banks only)"
+    fc.verdict = "does not fit"
+    fc.reasons.append(reason)
 
 
 def header_inputs(config, tensors: dict[str, tuple[str, int]], free_before: int | None):
