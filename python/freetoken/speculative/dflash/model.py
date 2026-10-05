@@ -179,6 +179,8 @@ class _DFlashAttention(BaseOP):
         group_size = self.num_qo_heads // self.num_kv_heads
         block_len = hidden_states.shape[0] // len(context_kvs)
         scale = self.head_dim ** -0.5
+        if attn_masks is None:
+            return self.o_proj.forward(self._fi_attention(q, block_k, block_v, context_kvs, block_len, scale))
         outs = []
         for b, ((context_k, context_v), attn_mask) in enumerate(zip(context_kvs, attn_masks)):
             rows = slice(b * block_len, (b + 1) * block_len)
@@ -193,6 +195,30 @@ class _DFlashAttention(BaseOP):
             outs.append(attn.squeeze(0).transpose(0, 1))
         out = torch.cat(outs, dim=0).reshape(-1, self.qo_attn_dim)
         return self.o_proj.forward(out)
+
+
+    def fi_mask(self) -> tuple[bool, int]:
+        """(causal, window_left) of this layer's mask in FlashInfer's terms: queries sit at the
+        end of the keys, and a window w keeps keys with q_pos - k_pos < w."""
+        causal = self.layer_type == "sliding_attention" if self.is_causal is None else bool(self.is_causal)
+        window = self.sliding_window if self.layer_type == "sliding_attention" else None
+        return causal, (window - 1 if window is not None else -1)
+
+    def _fi_attention(self, q, block_k, block_v, context_kvs, block_len, scale):
+        """The SDPA loop's result without expanding K/V to every query head or building a
+        mask: FlashInfer reads the grouped heads directly."""
+        from flashinfer import single_prefill_with_kv_cache
+
+        causal, window_left = self.fi_mask()
+        outs = []
+        for b, (context_k, context_v) in enumerate(context_kvs):
+            rows = slice(b * block_len, (b + 1) * block_len)
+            outs.append(single_prefill_with_kv_cache(
+                q[rows], torch.cat([context_k, block_k[rows]]), torch.cat([context_v, block_v[rows]]),
+                causal=causal, sm_scale=scale, window_left=window_left,
+            ))
+        out = outs[0] if len(outs) == 1 else torch.cat(outs)
+        return out.reshape(-1, self.qo_attn_dim)
 
 
 class _Fp8RowLinear(BaseOP):
@@ -388,6 +414,12 @@ class _DFlashDecoderLayer(BaseOP):
         return hidden_states
 
 
+def _fi_draft_attention_ok(head_dim: int) -> bool:
+    from freetoken.kernel import backend
+
+    return head_dim in (64, 128, 256) and backend.is_flashinfer_installed()
+
+
 class DFlashDraftModel(BaseOP):
     """DFlash draft model: lightweight block-diffusion model for speculative decoding.
 
@@ -466,9 +498,13 @@ class DFlashDraftModel(BaseOP):
         # build each once instead of once per layer and block.
         masks: dict[tuple, torch.Tensor | None] = {}
         h = mask_embeds
+        use_fi = _fi_draft_attention_ok(self.layers.op_list[0].self_attn.head_dim)
         for i, layer in enumerate(self.layers.op_list):
             attn = layer.self_attn
             kvs = [cache[i] for cache in context_kv_cache]
+            if use_fi:
+                h = layer.forward(h, positions, kvs, None)
+                continue
             layer_masks = []
             for context_k, _ in kvs:
                 key = (context_k.shape[0], attn.layer_type, attn.is_causal, attn.sliding_window)

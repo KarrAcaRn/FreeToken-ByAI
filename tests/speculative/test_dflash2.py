@@ -193,3 +193,27 @@ def test_batched_context_store_matches_one_request_at_a_time():
         for (bk, bv), (sk, sv) in zip(batched.context.all_layer_kv(slot), single.context.all_layer_kv(slot)):
             torch.testing.assert_close(bk, sk, atol=2e-2, rtol=2e-2)
             torch.testing.assert_close(bv, sv, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_flashinfer_draft_attention_matches_the_masked_sdpa(monkeypatch):
+    """The draft attends through FlashInfer (grouped heads, window_left) instead of SDPA over
+    head-expanded K/V and an explicit mask; a sliding layer with a context longer than its
+    window and an empty context must both match."""
+    pytest.importorskip("flashinfer")
+    import freetoken.speculative.dflash.model as dmodel
+
+    dev = torch.device("cuda")
+    model, cfg = _random_draft(dev)
+    bs, kvh, hd = cfg.block_size, cfg.num_key_value_heads, cfg.head_dim
+    torch.manual_seed(2)
+    for n in (9, 0):
+        context = [(torch.randn(n, kvh, hd, device=dev, dtype=torch.bfloat16),
+                    torch.randn(n, kvh, hd, device=dev, dtype=torch.bfloat16)) for _ in range(2)]
+        embeds = torch.randn(bs, cfg.hidden_size, device=dev, dtype=torch.bfloat16)
+        positions = torch.arange(n, n + bs, device=dev, dtype=torch.int32)
+        fast = model.forward(embeds, positions, [context])
+        with monkeypatch.context() as m:
+            m.setattr(dmodel, "_fi_draft_attention_ok", lambda head_dim: False)
+            ref = model.forward(embeds, positions, [context])
+        torch.testing.assert_close(fast, ref, atol=2e-2, rtol=2e-2)
