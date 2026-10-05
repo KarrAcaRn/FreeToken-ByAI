@@ -93,6 +93,7 @@ def iter_nvfp4_expert_pieces(
     drop_page_cache: DropPageCache | None = None,
     primary: bool = True,
     skip_experts_from: int | None = None,
+    expert_order: list[list[int]] | None = None,
 ):
     """One piece per routed expert: ``gate`` / ``up`` / ``down`` codes plus their ``_scale``
     (fp8 block scales) and ``_global`` (the per-tensor scale, reciprocal for quant-side dialects,
@@ -115,23 +116,28 @@ def iter_nvfp4_expert_pieces(
     folder = download_hf_weight(model_path)
     weight_map = safetensors_weight_map(folder)
 
+    from freetoken.moe.expert_profile import new_of_old
+
+    renumber = new_of_old(expert_order) if expert_order is not None else None
     wanted: dict[str, tuple[int, int, str]] = {}
     for name in weight_map:
         match = spec.key_pattern.match(name)
         if match is None:
             continue
-        if skip_experts_from is not None and int(match.group("expert")) >= skip_experts_from:
-            continue  # disk-resident: never read
         bank_layer = _bank_layer(spec, int(match.group("layer")), config)
         if bank_layer is None:
             continue
+        # bank rows use the disk tier's renumbered ids (identity without a profile)
+        row = renumber[bank_layer][int(match.group("expert"))] if renumber is not None else int(match.group("expert"))
+        if skip_experts_from is not None and row >= skip_experts_from:
+            continue  # disk-resident: never read
         proj = match.group("proj")
         if proj not in spec.proj_to_role:
             raise ValueError(f"{spec.desc}: unknown NVFP4 expert projection {proj!r}")
         kind = _canon_kind(spec, match.group("kind"))
         if kind not in ("weight", "weight_scale", "weight_scale_2"):
             raise ValueError(f"{spec.desc}: unknown NVFP4 expert tensor kind {kind!r}")
-        wanted[name] = (bank_layer, int(match.group("expert")), spec.proj_to_role[proj] + _kind_suffix(kind))
+        wanted[name] = (bank_layer, row, spec.proj_to_role[proj] + _kind_suffix(kind))
     experts = min(skip_experts_from, config.num_experts) if skip_experts_from is not None else config.num_experts
     expected = _num_moe_layers(config) * experts * 9
     if len(wanted) != expected:

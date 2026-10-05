@@ -67,6 +67,8 @@ class EngineConfig:
     # native NVFP4 layout, gpu decode target, no prefill overlap, no cuda graphs.
     moe_disk_tier: str = "off"
     expert_ram_experts: int = 0
+    # --expert-profile: rank each layer's experts so the RAM prefix holds the hottest (moe/expert_profile.py)
+    expert_profile: str | None = None
     disk_fetch_workers: int = 8
     # skip the startup prefill warmup forwards; first requests then pay the kernel module loads (and the full JIT compile on a cold start)
     prefill_warmup: bool = True

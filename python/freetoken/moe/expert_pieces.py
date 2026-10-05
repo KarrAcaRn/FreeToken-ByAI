@@ -52,6 +52,7 @@ def nvfp4_expert_spec_of(model_path: str, config):
 def iter_expert_pieces(
     model_path: str, config, kind: QuantKind, *, parallel: bool = False, workers: int = 8,
     chunk: int = 8 << 20, skip_experts_from: int | None = None,
+    expert_order: list[list[int]] | None = None,
 ) -> Iterator[Piece]:
     """The pieces of ``model_path``'s routed experts, stored as ``kind``.
 
@@ -69,7 +70,7 @@ def iter_expert_pieces(
     if hook is not None:
         pieces = hook(model_path, config, kind, parallel=parallel, workers=workers, chunk=chunk)
         if pieces is not None:
-            if skip_experts_from is not None:
+            if skip_experts_from is not None or expert_order is not None:
                 raise NotImplementedError(
                     f"{spec.module} owns its expert reader; the disk-tier row skip is only "
                     "implemented in the shared NVFP4 reader")
@@ -84,7 +85,7 @@ def iter_expert_pieces(
 
         return iter_nvfp4_expert_pieces(
             model_path, config, spec_hook(model_path, config), parallel=parallel, workers=workers,
-            chunk=chunk, skip_experts_from=skip_experts_from,
+            chunk=chunk, skip_experts_from=skip_experts_from, expert_order=expert_order,
         )
     raise NotImplementedError(f"{spec.module} provides no expert reader for {kind!r} experts")
 

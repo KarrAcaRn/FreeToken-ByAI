@@ -47,6 +47,8 @@ class DiskTierSpec:
     served from disk by :class:`DiskTier`."""
 
     ram_experts: int
+    # per MoE layer, original expert ids in renumbered order (moe/expert_profile.py); None: identity
+    expert_order: list[list[int]] | None = None
 
 
 def release_bank_tails(banks_by_name: dict[str, list[HostBank]], num_experts: int,
@@ -188,7 +190,7 @@ class Nvfp4DiskIndex:
     per segment.
     """
 
-    def __init__(self, model_dir: str, config, spec) -> None:
+    def __init__(self, model_dir: str, config, spec, expert_order: list[list[int]] | None = None) -> None:
         from freetoken.models.nvfp4_banks import _num_moe_layers
         from freetoken.utils.hf import download_hf_weight
 
@@ -222,7 +224,9 @@ class Nvfp4DiskIndex:
             per_layer = []
             for layer in range(num_layers):
                 rows = bytearray()
-                for e in range(E):
+                for row_id in range(E):
+                    # rows are indexed by the (possibly renumbered) id the slot cache uses
+                    e = expert_order[layer][row_id] if expert_order is not None else row_id
                     for proj, kind, _, _ in _NVP4_BANK_SEGS[bank_idx]:
                         key = (layer, e, proj, kind)
                         entry = loc.get(key)

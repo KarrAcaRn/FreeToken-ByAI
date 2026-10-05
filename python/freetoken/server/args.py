@@ -926,6 +926,16 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--expert-profile",
+        default=None,
+        help=(
+            "With --moe-disk-tier on: an expert usage profile (Strata's STRP .bin or JSON "
+            "{\"layers\": [[ids, hottest first], ...]}). Each layer's experts are renumbered "
+            "by rank, so the --expert-ram-experts kept in RAM are the hottest ones instead of "
+            "the lowest ids, and fewer slot-cache misses go to disk."
+        ),
+    )
+    parser.add_argument(
         "--disk-fetch-workers",
         type=int,
         default=ServerArgs.disk_fetch_workers,

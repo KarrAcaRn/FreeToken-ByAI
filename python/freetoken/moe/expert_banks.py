@@ -53,6 +53,8 @@ class ExpertBanks:
     # disk-resident and fetched on slot-cache miss).
     disk_index: object | None = field(default=None)
     disk_ram_experts: int = 0
+    # the disk tier's per-layer expert renumbering (see moe/expert_profile.py); None: identity
+    disk_expert_order: list[list[int]] | None = None
     # Per layer (gate_up ggml type, down ggml type) for native mixed GGUF banks.
     gguf_quant_types: tuple[tuple[int, int], ...] | None = None
 
@@ -280,11 +282,12 @@ def _method_expert_banks(model_path, model_config, method, device, dummy, parall
         # the same rows.
         from freetoken.moe.disk_tier import Nvfp4DiskIndex
 
-        disk_index = Nvfp4DiskIndex(model_path, model_config, source_spec)
+        disk_index = Nvfp4DiskIndex(model_path, model_config, source_spec, disk_tier.expert_order)
 
     pieces = iter_expert_pieces(
         model_path, model_config, method.kind, parallel=parallel, workers=workers, chunk=chunk,
         skip_experts_from=disk_tier.ram_experts if disk_tier is not None else None,
+        expert_order=disk_tier.expert_order if disk_tier is not None else None,
     )
     banks = build_expert_banks(
         method, num_layers, pieces, device=device, layer_sink=layer_sink, resident=resident,
@@ -293,7 +296,8 @@ def _method_expert_banks(model_path, model_config, method, device, dummy, parall
     if disk_index is not None:
         import dataclasses
 
-        banks = dataclasses.replace(banks, disk_index=disk_index, disk_ram_experts=disk_tier.ram_experts)
+        banks = dataclasses.replace(banks, disk_index=disk_index, disk_ram_experts=disk_tier.ram_experts,
+                                    disk_expert_order=disk_tier.expert_order)
     return banks
 
 

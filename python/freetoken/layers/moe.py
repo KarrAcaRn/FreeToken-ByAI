@@ -276,6 +276,7 @@ class OffloadMoELayer(MoELayer):
         ids), so no ``ensure_experts``/``copy_missing`` here."""
         cache = self.offload_cache
         assert cache is not None
+        topk_ids = cache.remap_expert_ids(self.layer_id, topk_ids)
         if cache.is_cpu_layer(self.layer_id):
             executor = cache.cpu_executor
             assert executor is not None, "CPU MoE executor was not initialized"
@@ -359,6 +360,7 @@ class OffloadMoELayer(MoELayer):
         pass through unmapped."""
         cache = self.offload_cache
         assert cache is not None
+        topk_ids = cache.remap_expert_ids(self.layer_id, topk_ids)
         if cache.prefill_overlap:
             views = self._wait_prefill_overlap(cache)
             out = self._expert_gemm(

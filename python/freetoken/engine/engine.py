@@ -1130,7 +1130,12 @@ class Engine:
             if problems:
                 raise ValueError(
                     "--moe-disk-tier on: unmet preconditions:\n  - " + "\n  - ".join(problems))
-            disk_tier = DiskTierSpec(ram_experts=config.expert_ram_experts)
+            expert_order = None
+            if config.expert_profile:
+                from freetoken.moe.expert_profile import load_expert_order
+
+                expert_order = load_expert_order(config.expert_profile, config.model_config.num_moe_layers, E)
+            disk_tier = DiskTierSpec(ram_experts=config.expert_ram_experts, expert_order=expert_order)
         # Fast path: an FTW checkpoint loads its repacked banks directly.
         # Slow path: load_expert_banks auto-picks parallel vs serial baseline by
         # expert-tensor granularity. Both pin-after-fill.
@@ -1214,7 +1219,7 @@ class Engine:
         if banks.disk_index is not None:
             cache.attach_disk_tier(
                 banks.disk_index, banks.disk_ram_experts,
-                workers=config.disk_fetch_workers)
+                workers=config.disk_fetch_workers, expert_order=banks.disk_expert_order)
             logger.info_rank0(
                 f"disk tier: {banks.disk_ram_experts}/{config.model_config.num_experts} "
                 f"experts/layer pinned in RAM; the rest fetched from "

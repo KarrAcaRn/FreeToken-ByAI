@@ -189,6 +189,7 @@ class OffloadMoeCache:
             device=self.device,
         )
         self.usage = torch.zeros((self.cache_size,), dtype=torch.int64, device=self.device)
+        self.expert_remap: torch.Tensor | None = None
         self.step = torch.zeros((), dtype=torch.int64, device=self.device)
         self.active_mask = torch.zeros((self.num_experts,), dtype=torch.int32, device=self.device)
         # lru_ensure validates these against plan = min(batch * top_k, cache_size), so num_experts elements would under-size them
@@ -1064,7 +1065,14 @@ class OffloadMoeCache:
             "norm_entropy": norm_ent,
         }
 
-    def attach_disk_tier(self, index, ram_experts: int, workers: int = 8) -> None:
+    def remap_expert_ids(self, layer_id: int, topk_ids: torch.Tensor) -> torch.Tensor:
+        """Router expert ids -> the disk tier's renumbered ids (``--expert-profile``); as is without one."""
+        if self.expert_remap is None:
+            return topk_ids
+        return self.expert_remap[layer_id][topk_ids.long()].to(topk_ids.dtype)
+
+    def attach_disk_tier(self, index, ram_experts: int, workers: int = 8,
+                         expert_order: list[list[int]] | None = None) -> None:
         """Enable the NVMe tier: disk-resident slot-cache misses are fetched from the
         original checkpoint before the PCIe copy path (see moe/disk_tier.py)."""
         from freetoken.moe.disk_tier import DiskTier
@@ -1073,6 +1081,11 @@ class OffloadMoeCache:
         assert self.quant_format == "nvfp4", f"disk tier v0 supports native nvfp4 banks (got {self.quant_format!r})"
         assert not self.prefill_overlap, "disk tier v0 does not support prefill overlap"
         self._disk_tier = DiskTier(index, self, ram_experts, workers=workers)
+        if expert_order is not None:
+            from freetoken.moe.expert_profile import new_of_old
+
+            # [layer, original id] -> renumbered id, applied to the router's top-k (layers/moe.py)
+            self.expert_remap = torch.tensor(new_of_old(expert_order), dtype=torch.int32, device=self.device)
 
     def copy_missing(self) -> None:
         assert self.banks, "set_bank_sources must register the banks first"

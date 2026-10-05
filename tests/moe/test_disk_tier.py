@@ -350,3 +350,20 @@ def test_release_bank_tails_unaligned_row_boundary():
     bank2.tensor.fill_(7)
     release_bank_tails({"gate_up_scale": [bank2]}, E, 128)
     assert resident_pages(bank2.addr + 128 * 2048, bank2.nbytes - 128 * 2048) == 0
+
+
+def test_renumbered_index_fetches_the_original_expert(checkpoint):
+    """With --expert-profile the slot cache speaks renumbered ids: row n of a layer must
+    fetch the checkpoint expert the profile ranked n-th."""
+    path, config = checkpoint
+    order = [list(reversed(range(E))) for _ in range(L)]
+    index = Nvfp4DiskIndex(str(path), config, SPEC, expert_order=order)
+    cache = _fake_cache()
+    tier = DiskTier(index, cache, ram_experts=1)
+    for layer in range(L):
+        for new_id in range(E):
+            tier._fetch_expert(layer, new_id, 0)
+            expected = _expected_rows(layer, order[layer][new_id])
+            for bank_idx, (_host, gpu_cache) in enumerate(cache.banks):
+                got = gpu_cache[0].contiguous().view(torch.uint8).reshape(-1)
+                assert torch.equal(got, expected[bank_idx]), (bank_idx, layer, new_id)
