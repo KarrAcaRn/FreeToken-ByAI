@@ -265,3 +265,44 @@ def test_subnormal_and_sign_decode_exactly():
     # subnormals (exp == 0, m != 0) are the values the bit trick cannot produce
     sub = (codes & 0x78) == 0
     assert finite[sub].all() and (ref[sub].abs().max() < 2.0 ** -6)
+
+
+def test_fp8_block_kernel_packs_banks_the_cpu_executor_runs():
+    """cpu/hybrid select the block-fp8 kernel and its packed banks feed the CPU executor."""
+    from freetoken.layers.quantization.moe.base import MoEConfig
+    from freetoken.layers.quantization.moe.fp8_block import TritonFp8BlockMoEKernel
+    from freetoken.moe.cpu_executor import CpuMoeExecutor
+
+    E, H, I = 2, 256, 384
+    kernel = TritonFp8BlockMoEKernel()
+    cfg = MoEConfig(num_experts=E, hidden=H, intermediate=I, top_k=1, strategy="offload", decode_target="cpu")
+    assert kernel.unusable_reason(cfg) is None
+    torch.manual_seed(1)
+
+    def piece(rows, cols):
+        w = (torch.randn(E, rows, cols) * 6.0).to(torch.float8_e4m3fn)
+        return w, (0.01 + 0.02 * torch.rand(E, _nb(rows), _nb(cols))).to(torch.bfloat16)
+
+    pieces = {}
+    for role, rows, cols in (("gate", I, H), ("up", I, H), ("down", H, I)):
+        pieces[role], pieces[role + "_scale"] = piece(rows, cols)
+    banks = {n: torch.zeros(E, *spec.shape, dtype=spec.dtype) for n, spec in kernel.layout(cfg).items()}
+    kernel.pack(pieces, cfg, banks)
+    cache = SimpleNamespace(quant_format=kernel.cpu_format, bank_sources={n: [b] for n, b in banks.items()},
+                            num_layers=1, num_experts=E, decode_target="cpu", cpu_executor=None)
+    ex = CpuMoeExecutor(cache, top_k=1, activation="silu", apply_router_weight_on_input=False,
+                        num_threads=1, max_tokens=1, device=torch.device("cpu"))
+
+    hidden = torch.randn(1, H, dtype=torch.bfloat16)
+    io = ex._io_for(1)
+    io["x"].copy_(hidden)
+    io["ids"].fill_(E - 1)
+    io["w"].fill_(1.0)
+    ex._ext.run_task(ex._task_for(0, 1))
+    cpu_out = io["y"][0].to(torch.float64)
+
+    e = slice(E - 1, E)
+    gate_up = torch.cat([_reference_fp8_gemv(pieces[r][e], pieces[r + "_scale"][e], hidden[0]) for r in ("gate", "up")])
+    expected = _reference_fp8_gemv(pieces["down"][e], pieces["down_scale"][e], torch.nn.functional.silu(gate_up[:I]) * gate_up[I:])
+    rel = (cpu_out - expected).abs().max() / (expected.abs().max() + 1e-6)
+    assert rel < 5e-3, f"max relative error {rel.item()}"
