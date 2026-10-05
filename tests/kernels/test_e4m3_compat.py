@@ -482,3 +482,54 @@ if __name__ == "__main__":
         _emit_all(sys.argv[2])
     elif sys.argv[1] == "gate":
         _gate_main(int(sys.argv[2]))
+
+
+def _quantizer_cases():
+    from freetoken.kernel.triton import fp8_block_linear, fp8_pertensor_linear
+    from freetoken.kernel.triton.dsv4 import fp8_linear as dsv4
+
+    def static(x):
+        # One scale per call: whether a product lands on an fp16 tie depends on it, so try several.
+        base = x.abs().max().float() / 448.0
+        ys, refs = [], []
+        for k in range(8):
+            s = (base * (1 + k / 7)).reshape(())
+            ys.append(fp8_pertensor_linear._static_quant(x, s))
+            refs.append(x.float() * (1.0 / s))
+        return torch.cat(ys), torch.cat(refs)
+
+    def per_token_group(x):
+        y, s = fp8_block_linear.per_token_group_quant_fp8(x)
+        return y, (x.float().view(x.shape[0], -1, 128) / s[..., None]).view_as(x)
+
+    def ue8m0(x):
+        y, codes = dsv4.act_quant_fp8(x)
+        s = torch.exp2(codes.float() - 127)
+        return y, (x.float().view(x.shape[0], -1, 128) / s[..., None]).view_as(x)
+
+    def roundtrip(x):
+        y = dsv4.act_quant_fp8_roundtrip(x)
+        amax = x.float().view(x.shape[0], -1, 128).abs().amax(-1).clamp(min=1e-4)
+        s = torch.exp2(torch.ceil(torch.log2(amax / 448.0)))
+        ref = (x.float().view(x.shape[0], -1, 128) / s[..., None]).clamp(-448, 448)
+        return y, (ref.to(torch.float8_e4m3fn).float() * s[..., None]).view_as(x)
+
+    return {"static": static, "per_token_group": per_token_group, "ue8m0": ue8m0, "roundtrip": roundtrip}
+
+
+@pytest.mark.parametrize("name", ["static", "per_token_group", "ue8m0", "roundtrip"])
+def test_activation_quantizers_round_once(name):
+    """sm_89's native fp32 -> e4m3 goes through fp16 and double-rounds ~0.4% of values
+    (42.002 -> 42.0 -> 40, not 44); the quantizers must match torch's single rounding."""
+    torch.manual_seed(0)
+    # The ue8m0 scales are powers of two: a bf16 x / s is exact in fp16, only fp32 x can tie.
+    dtype = torch.float32 if name in ("ue8m0", "roundtrip") else torch.bfloat16
+    x = torch.randn(256, 1024, device="cuda", dtype=dtype) * 3
+    y, scaled = _quantizer_cases()[name](x)
+    if name == "roundtrip":
+        got, ref = y.float(), scaled.to(x.dtype).float()
+    else:
+        got = y.float()
+        ref = scaled.clamp(-448, 448).to(torch.float8_e4m3fn).float()
+    mismatch = (got != ref).float().mean().item()
+    assert mismatch < 1e-4, mismatch

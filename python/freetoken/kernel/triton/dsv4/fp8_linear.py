@@ -71,10 +71,10 @@ def _act_quant_fp8_kernel(
     e = _log2_ceil(amax * (1.0 / 448.0))                # [BLOCK_M]
     s = tl.exp2(e.to(tl.float32))
     y = tl.clamp(x / s[:, None], -448.0, 448.0)
+    # Rounded here even when native: sm_89's fp32 -> e4m3 goes through fp16 and double-rounds.
+    y = round_e4m3(y)  # e4m3-grid values into the wrapper's bf16 buffer when emulated
     if e4m3_native_cx():
         y = y.to(tl.float8e4nv)
-    else:
-        y = round_e4m3(y)  # e4m3-grid values into the wrapper's bf16 buffer
     tl.store(
         y_ptr + offs_m[:, None] * stride_ym + offs_k[None, :] * stride_yn,
         y, mask=m_mask[:, None],
@@ -130,8 +130,6 @@ def _act_quant_inplace_kernel(
     q = tl.clamp(x / s[:, None], FP8_MIN, FP8_MAX)
     if FP4:
         q = _round_fp4(q)
-    elif e4m3_native_cx():
-        q = q.to(tl.float8e4nv).to(tl.float32)
     else:
         q = round_e4m3(q)
     optrs = o_ptr + offs_m[:, None] * stride_om + offs_k[None, :] * stride_on
