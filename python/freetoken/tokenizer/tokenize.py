@@ -149,12 +149,18 @@ class TokenizeManager:
             if hoisted is None:
                 raise
             prompt = self._apply_template(hoisted, chat_template_kwargs)
-            if not self._logged_system_hoist:
-                self._logged_system_hoist = True
-                logger.info(
-                    "chat template rejected a system message after the first turn; "
-                    "merging system messages into one at the front"
-                )
+        else:
+            # Others (Qwen3-VL, gpt-oss) render only a leading system message and silently
+            # drop later ones; those instructions must reach the model too.
+            hoisted = _hoist_system_messages(messages) if _drops_a_system_message(messages, prompt) else None
+            if hoisted is not None:
+                prompt = self._apply_template(hoisted, chat_template_kwargs)
+        if hoisted is not None and not self._logged_system_hoist:
+            self._logged_system_hoist = True
+            logger.info(
+                "chat template rejected or dropped a system message after the first turn; "
+                "merging system messages into one at the front"
+            )
         assert isinstance(prompt, str)
         return prompt
 
@@ -218,6 +224,15 @@ class TokenizeManager:
         else:
             sanitized["reasoning_effort"] = mapped
         return sanitized
+
+
+def _drops_a_system_message(messages: list[dict[str, Any]], prompt: str) -> bool:
+    """Whether a text system message is missing from the rendered prompt."""
+    return any(
+        m.get("role") == "system" and isinstance(m.get("content"), str)
+        and m["content"].strip() and m["content"].strip() not in prompt
+        for m in messages
+    )
 
 
 def _hoist_system_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]] | None:

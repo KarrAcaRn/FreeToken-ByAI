@@ -326,7 +326,7 @@ def test_render_keeps_a_mid_conversation_system_message_the_template_accepts():
     class InPlace:
         def apply_chat_template(self, messages, **kwargs):
             self.messages = messages
-            return "rendered"
+            return "|".join(m["content"] for m in messages)
 
     tokenizer = InPlace()
     messages = [
@@ -335,6 +335,24 @@ def test_render_keeps_a_mid_conversation_system_message_the_template_accepts():
     ]
     _render(tokenizer, messages)
     assert tokenizer.messages == messages
+
+
+def test_render_hoists_a_system_message_the_template_silently_drops():
+    # Qwen3-VL and gpt-oss render only a leading system message and drop later ones.
+    class LeadingOnly:
+        def apply_chat_template(self, messages, **kwargs):
+            return "|".join(f"{m['role']}:{m['content']}" for i, m in enumerate(messages)
+                            if m["role"] != "system" or i == 0)
+
+    prompt = _render(
+        LeadingOnly(),
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "system", "content": "now answer in German"},
+            {"role": "user", "content": "q2"},
+        ],
+    )
+    assert prompt == "system:now answer in German|user:q1|user:q2"
 
 
 def test_render_reraises_a_template_error_unrelated_to_system_order():
