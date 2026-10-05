@@ -64,6 +64,22 @@ def test_harmony_non_stream_preserves_commentary_tool_block_verbatim():
     assert content.endswith("<|call|>")
 
 
+def test_harmony_role_header_recipient_reaches_the_tool_parser():
+    # Harmony also allows the recipient before the channel; gpt-oss's own template renders it so.
+    from freetoken.server.function_call_parser import FunctionCallParser
+
+    text = (
+        "<|channel|>analysis<|message|>need weather<|end|>"
+        '<|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{"city":"Paris"}<|call|>'
+    )
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}]
+    for chunks in ([text], [text[i:i + 7] for i in range(0, len(text), 7)]):
+        reasoning, content = _stream(ReasoningParser("gpt_oss"), chunks)
+        assert reasoning == "need weather"
+        calls = FunctionCallParser(tools, "gpt_oss").parse_non_stream(content).calls
+        assert [(c.name, c.parameters) for c in calls] == [("get_weather", '{"city": "Paris"}')]
+
+
 def test_harmony_non_stream_passthrough_when_no_channels():
     parser = ReasoningParser("gpt_oss")
     reasoning, content = parser.parse_non_stream("plain text, no channels")

@@ -66,6 +66,15 @@ HARMONY_BOUNDARY_TOKENS = (
 HARMONY_ALL_TOKENS = (HARMONY_CHANNEL, HARMONY_MESSAGE) + HARMONY_BOUNDARY_TOKENS
 
 
+# Harmony allows the recipient in the role header ("<|start|>assistant to=functions.x<|channel|>commentary")
+# as well as in the channel header; the tool path reads only the latter.
+_ROLE_HEADER_RECIPIENT = re.compile(r"to=(functions\.[^\s<]+)\s*<\|channel\|>commentary")
+
+
+def _recipient_into_channel(text: str) -> str:
+    return _ROLE_HEADER_RECIPIENT.sub(r"<|channel|>commentary to=\1", text)
+
+
 def _longest_harmony_partial_suffix(text: str) -> int:
     """Length of the longest suffix of ``text`` that is a *proper* prefix of any
     Harmony control token. Lets a marker split across stream chunks reassemble on
@@ -346,6 +355,7 @@ class GptOssHarmonyReasoningParser(BaseReasoningParser):
     _CLOSING_BOUNDARY_TOKENS = frozenset(("<|end|>", "<|return|>", "<|call|>"))
 
     def _scan(self, text: str, *, hold_partial: bool) -> tuple[str, str]:
+        text = _recipient_into_channel(text)
         reasoning: list[str] = []
         content: list[str] = []
         i = 0
