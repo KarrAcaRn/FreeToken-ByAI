@@ -139,6 +139,9 @@ def _fi_prefill_attention(
 # GB/s over a 20k-token fp8 cache on a 128-SM RTX 4090. Enough splits for ~2 programs per SM
 # (empty splits exit at once) recover it: +7% decode tok/s at 20k context on Qwen3.8-27B.
 _MIN_KV_SPLITS = 8
+# Short uniform extends (DFlash verify blocks, small radix-hit tails) take the split-k
+# verify kernel up to this many tokens per request.
+_VERIFY_MAX_Q = 16
 _MAX_KV_SPLITS = 32
 _KV_SPLIT_SCRATCH_CAP = 64 << 20
 
@@ -222,6 +225,7 @@ class TritonAttentionBackend(BaseAttnBackend):
             decode_paged_attention,
             extend_paged_attention,
             paged_attention,
+            verify_paged_attention,
         )
 
         metadata = batch.attn_metadata
@@ -275,6 +279,21 @@ class TritonAttentionBackend(BaseAttnBackend):
                 kv_quant=kv_quant,
                 k_block_scale=k_block_scale,
                 v_block_scale=v_block_scale,
+            )
+        if (
+            not metadata.is_decode
+            and metadata.max_q_len <= _VERIFY_MAX_Q
+            and q.shape[0] == (metadata.indptr.numel() - 1) * metadata.max_q_len
+            and kv_quant in ("none", "fp8")
+            and q.dtype in (torch.float16, torch.bfloat16)
+            and spec.sliding_window is None
+            and spec.sinks is None
+            and block_ends is None
+        ):
+            # every token of a short uniform extend (a DFlash verify block) is already stored
+            return verify_paged_attention(
+                q, k_cache, v_cache, metadata.indptr, indices,
+                metadata.max_q_len, scale, self.max_kv_splits, k_scale=k_scale, v_scale=v_scale,
             )
         if (
             metadata.prefill_host is not None

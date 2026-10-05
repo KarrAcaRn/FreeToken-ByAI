@@ -656,6 +656,168 @@ def decode_paged_attention(
     return o
 
 
+# ======================================================================================
+# Short uniform extends over a long cached prefix (DFlash target verify: Q tokens per
+# request, all already stored in the cache): flash-decoding with a (token, GQA head) row
+# tile. The extend kernel tiles queries, so Q = 8 left bs x heads programs each reading the
+# whole prefix (47% of a 15k-context Qwen3.8-27B DFlash step); here every program reads
+# its K/V slice once for all Q x GROUP rows and the splits fill the SMs.
+# ======================================================================================
+@triton.jit
+def _verify_stage1_kernel(
+    q_ptr, k_ptr, v_ptr, k_scale_ptr, v_scale_ptr, sm_scale,
+    indptr_ptr, indices_ptr, mid_o_ptr, mid_lse_ptr,
+    stride_qt, stride_qh, stride_ks, stride_kh, stride_vs, stride_vh, stride_kss, stride_vss,
+    stride_mid_ot, stride_mid_oh, stride_mid_os, stride_lse_t, stride_lse_h, stride_lse_s,
+    Q_LEN: tl.constexpr, GROUP: tl.constexpr, ROW_BLOCKS: tl.constexpr, NUM_SPLITS: tl.constexpr,
+    BLOCK_R: tl.constexpr, BLOCK_D: tl.constexpr, BLOCK_N: tl.constexpr, MIN_BLOCK_KV: tl.constexpr,
+    D: tl.constexpr, HAS_KV_SCALE: tl.constexpr,
+):
+    req = tl.program_id(0)
+    kv_head = tl.program_id(1) // ROW_BLOCKS
+    rows = (tl.program_id(1) % ROW_BLOCKS) * BLOCK_R + tl.arange(0, BLOCK_R)
+    split_id = tl.program_id(2)
+    t = rows // GROUP
+    mask_r = t < Q_LEN
+    q_head = kv_head * GROUP + rows % GROUP
+    tok = req * Q_LEN + t
+    offs_d = tl.arange(0, BLOCK_D)
+    mask_d = offs_d < D
+
+    kv_start = tl.load(indptr_ptr + req)
+    kv_len = tl.load(indptr_ptr + req + 1) - kv_start
+    # the request's Q tokens are its last Q cached rows: token t sees all but the later ones
+    row_end = kv_len - (Q_LEN - 1 - t)
+    effective_len = kv_len
+    per_split = tl.cdiv(tl.cdiv(effective_len, NUM_SPLITS), MIN_BLOCK_KV) * MIN_BLOCK_KV
+    split_start = per_split * split_id
+    split_end = tl.minimum(split_start + per_split, effective_len)
+
+    m_i = tl.zeros((BLOCK_R,), dtype=tl.float32) - float("inf")
+    l_i = tl.zeros((BLOCK_R,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_R, BLOCK_D), dtype=tl.float32)
+    if split_end > split_start:
+        q = tl.load(q_ptr + tok[:, None] * stride_qt + q_head[:, None] * stride_qh + offs_d[None, :],
+                    mask=mask_r[:, None] & mask_d[None, :], other=0.0)
+        if not HAS_KV_SCALE:
+            q = q.to(k_ptr.dtype.element_ty)
+        for start in tl.range(split_start, split_end, BLOCK_N):
+            offs_n = start + tl.arange(0, BLOCK_N)
+            mask_n = offs_n < split_end
+            slots = tl.load(indices_ptr + kv_start + offs_n, mask=mask_n, other=0)
+            k_ptrs = k_ptr + slots[None, :] * stride_ks + kv_head * stride_kh + offs_d[:, None]
+            v_ptrs = v_ptr + slots[:, None] * stride_vs + kv_head * stride_vh + offs_d[None, :]
+            if HAS_KV_SCALE:
+                s_k = _kv_dequant_scale(k_scale_ptr, slots, stride_kss, kv_head, mask_n)
+                s_v = _kv_dequant_scale(v_scale_ptr, slots, stride_vss, kv_head, mask_n)
+                k = _kv_load_s16(k_ptrs, mask_n[None, :] & mask_d[:, None]).to(q.dtype)
+                v = _kv_load_s16(v_ptrs, mask_n[:, None] & mask_d[None, :]).to(q.dtype)
+            else:
+                k = tl.load(k_ptrs, mask=mask_n[None, :] & mask_d[:, None], other=0.0)
+                v = tl.load(v_ptrs, mask=mask_n[:, None] & mask_d[None, :], other=0.0)
+            scores = tl.dot(q, k) * sm_scale
+            if HAS_KV_SCALE:
+                scores = scores * s_k[None, :]
+            visible = mask_r[:, None] & mask_n[None, :] & (offs_n[None, :] < row_end[:, None])
+            scores = tl.where(visible, scores, -float("inf"))
+            m_new = tl.maximum(tl.max(scores, axis=1), m_i)
+            # rows whose causal end lies before this tile see only -inf: keep them NaN-free
+            m_safe = tl.where(m_new == -float("inf"), 0.0, m_new)
+            alpha = tl.exp(m_i - m_safe)
+            p = tl.exp(scores - m_safe[:, None])
+            pv = (p * s_v[None, :]) if HAS_KV_SCALE else p
+            acc = acc * alpha[:, None] + tl.dot(pv.to(v.dtype), v)
+            l_i = l_i * alpha + tl.sum(p, axis=1)
+            m_i = m_new
+    has = l_i > 0
+    out = tl.where(has[:, None], acc / tl.where(has, l_i, 1.0)[:, None], 0.0)
+    tl.store(mid_o_ptr + tok[:, None] * stride_mid_ot + q_head[:, None] * stride_mid_oh
+             + split_id * stride_mid_os + offs_d[None, :], out, mask=mask_r[:, None] & mask_d[None, :])
+    lse = tl.where(has, m_i + tl.log(tl.where(has, l_i, 1.0)), -float("inf"))
+    tl.store(mid_lse_ptr + tok * stride_lse_t + q_head * stride_lse_h + split_id * stride_lse_s,
+             lse, mask=mask_r)
+
+
+@triton.jit
+def _verify_stage2_kernel(
+    mid_o_ptr, mid_lse_ptr, o_ptr,
+    stride_mid_ot, stride_mid_oh, stride_mid_os, stride_lse_t, stride_lse_h, stride_lse_s,
+    stride_ot, stride_oh,
+    NUM_SPLITS: tl.constexpr, BLOCK_D: tl.constexpr, D: tl.constexpr,
+):
+    tok = tl.program_id(0)
+    head = tl.program_id(1)
+    offs_d = tl.arange(0, BLOCK_D)
+    mask_d = offs_d < D
+    m_i = -float("inf")
+    l_i = 0.0
+    acc = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    for split_id in tl.static_range(NUM_SPLITS):
+        lse = tl.load(mid_lse_ptr + tok * stride_lse_t + head * stride_lse_h + split_id * stride_lse_s)
+        if lse > -float("inf"):
+            part = tl.load(mid_o_ptr + tok * stride_mid_ot + head * stride_mid_oh
+                           + split_id * stride_mid_os + offs_d, mask=mask_d, other=0.0)
+            m_new = tl.maximum(lse, m_i)
+            alpha = tl.exp(m_i - m_new)
+            beta = tl.exp(lse - m_new)
+            acc = acc * alpha + part * beta
+            l_i = l_i * alpha + beta
+            m_i = m_new
+    out = tl.where(l_i == 0.0, 0.0, acc / l_i)
+    tl.store(o_ptr + tok * stride_ot + head * stride_oh + offs_d, out.to(o_ptr.dtype.element_ty), mask=mask_d)
+
+
+def verify_paged_attention(
+    q: torch.Tensor,            # [bs * q_len, num_q_heads, head_dim], every token already in the cache
+    k_cache: torch.Tensor,      # [slots, num_kv_heads, head_dim] (16-bit, or fp8 codes with scales)
+    v_cache: torch.Tensor,
+    indptr: torch.Tensor,       # [bs + 1] cached rows per request (prefix + its q_len tokens)
+    indices: torch.Tensor,
+    q_len: int,
+    sm_scale: float,
+    num_splits: int,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Causal attention of ``q_len`` tokens per request over their whole cached context; the
+    tokens are each request's last ``q_len`` cached rows."""
+    T, num_q_heads, head_dim = q.shape
+    num_kv_heads = k_cache.shape[1]
+    bs = indptr.numel() - 1
+    assert T == bs * q_len and num_q_heads % num_kv_heads == 0
+    assert (k_scale is None) == (v_scale is None)
+    group = num_q_heads // num_kv_heads
+    rows = q_len * group
+    block_r = min(64, triton.next_power_of_2(rows))
+    row_blocks = triton.cdiv(rows, block_r)
+    block_d = triton.next_power_of_2(head_dim)
+    mid_o = torch.empty((T, num_q_heads, num_splits, head_dim), dtype=torch.float32, device=q.device)
+    mid_lse = torch.empty((T, num_q_heads, num_splits), dtype=torch.float32, device=q.device)
+    k_scale_arg = k_scale if k_scale is not None else k_cache
+    v_scale_arg = v_scale if v_scale is not None else v_cache
+    _verify_stage1_kernel[(bs, num_kv_heads * row_blocks, num_splits)](
+        q, k_cache, v_cache, k_scale_arg, v_scale_arg, sm_scale,
+        indptr, indices, mid_o, mid_lse,
+        q.stride(0), q.stride(1), k_cache.stride(0), k_cache.stride(1),
+        v_cache.stride(0), v_cache.stride(1), k_scale_arg.stride(0), v_scale_arg.stride(0),
+        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
+        mid_lse.stride(0), mid_lse.stride(1), mid_lse.stride(2),
+        Q_LEN=q_len, GROUP=group, ROW_BLOCKS=row_blocks, NUM_SPLITS=num_splits,
+        BLOCK_R=block_r, BLOCK_D=block_d, BLOCK_N=32, MIN_BLOCK_KV=_MIN_BLOCK_KV,
+        D=head_dim, HAS_KV_SCALE=k_scale is not None,
+        num_warps=4, num_stages=2,
+    )
+    o = torch.empty_like(q)
+    _verify_stage2_kernel[(T, num_q_heads)](
+        mid_o, mid_lse, o,
+        mid_o.stride(0), mid_o.stride(1), mid_o.stride(2),
+        mid_lse.stride(0), mid_lse.stride(1), mid_lse.stride(2),
+        o.stride(0), o.stride(1),
+        NUM_SPLITS=num_splits, BLOCK_D=block_d, D=head_dim, num_warps=4,
+    )
+    return o
+
+
 @triton.jit
 def _extend_attention_kernel(
     q_ptr,

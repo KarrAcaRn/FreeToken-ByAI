@@ -1348,3 +1348,43 @@ def test_triton_backend_prefixed_prefill_fast_path_matches_the_extend_kernel(mon
 
     assert calls == [1]
     torch.testing.assert_close(fast.float(), ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+@pytest.mark.parametrize("kv_quant", ["none", "fp8"])
+@pytest.mark.parametrize("q_len", [8, 16])
+def test_verify_paged_attention_matches_the_extend_kernel(kv_quant, q_len):
+    """DFlash verify blocks attend through split-k over the cache, one program per K/V slice
+    for every (token, GQA head) row; the extend kernel reading the same cached rows is the
+    reference (16 tokens x a group of 6 spans two row blocks)."""
+    from freetoken.kernel.triton.attention import extend_paged_attention, verify_paged_attention
+
+    torch.manual_seed(0)
+    heads, kv_heads, head_dim = 12, 2, 128
+    prefixes = [700, 37]
+    lens = [p + q_len for p in prefixes]
+    slots = sum(lens) + 3
+    rows_k = torch.randn(slots, kv_heads, head_dim, device="cuda")
+    rows_v = torch.randn(slots, kv_heads, head_dim, device="cuda")
+    if kv_quant == "fp8":
+        k_cache, v_cache, k_scale, v_scale = _fp8_cache(rows_k, rows_v)
+        k_rows, v_rows = _dequantized(k_cache, k_scale), _dequantized(v_cache, v_scale)
+    else:
+        k_cache, v_cache = rows_k.bfloat16(), rows_v.bfloat16()
+        k_scale = v_scale = None
+        k_rows, v_rows = k_cache, v_cache
+    indices = (torch.randperm(slots - 3, device="cuda") + 3).to(torch.int32)[: sum(lens)]
+    indptr = torch.tensor([0, lens[0], sum(lens)], dtype=torch.int32, device="cuda")
+    q = torch.randn(len(lens) * q_len, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    own = torch.cat([indices[indptr[b] + prefixes[b] : indptr[b + 1]] for b in range(2)]).long()
+
+    got = verify_paged_attention(q, k_cache, v_cache, indptr, indices, q_len, head_dim**-0.5, 8,
+                                 k_scale=k_scale, v_scale=v_scale)
+    ref = extend_paged_attention(
+        q, k_cache, v_cache,
+        torch.arange(0, 3 * q_len, q_len, dtype=torch.int32, device="cuda"), indptr, indices,
+        torch.tensor(prefixes, dtype=torch.int32, device="cuda"), q_len, head_dim**-0.5,
+        k_extend=k_rows[own].bfloat16(), v_extend=v_rows[own].bfloat16(),
+        k_scale=k_scale, v_scale=v_scale,
+    )
+    torch.testing.assert_close(got.float(), ref.float(), atol=2e-2, rtol=2e-2)
