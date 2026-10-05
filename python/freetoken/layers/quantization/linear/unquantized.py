@@ -77,9 +77,17 @@ class OnlineFp8LinearKernel(TritonGemvLinearKernel):
         if (w.dim() != 2 or w.dtype not in (torch.bfloat16, torch.float16) or not w.is_cuda
                 or w.shape[0] < ONLINE_FP8_MIN_OUT_FEATURES):
             return
-        scale = w.float().abs().amax(dim=1).clamp(min=1e-12) / torch.finfo(torch.float8_e4m3fn).max
-        layer.weight = (w.float() / scale[:, None]).to(torch.float8_e4m3fn)
-        layer.online_fp8_scale = scale.contiguous()
+        # row chunks bound the fp32 temporaries (a 248k-vocab lm_head is 5 GB in fp32)
+        q = torch.empty(w.shape, dtype=torch.float8_e4m3fn, device=w.device)
+        scale = torch.empty(w.shape[0], dtype=torch.float32, device=w.device)
+        rows = max(1, (64 << 20) // w.shape[1])
+        for r0 in range(0, w.shape[0], rows):
+            chunk = w[r0 : r0 + rows].float()
+            s = chunk.abs().amax(dim=1).clamp(min=1e-12) / torch.finfo(torch.float8_e4m3fn).max
+            q[r0 : r0 + rows] = (chunk / s[:, None]).to(torch.float8_e4m3fn)
+            scale[r0 : r0 + rows] = s
+        layer.weight = q
+        layer.online_fp8_scale = scale
 
     def apply(self, layer: Any, x: torch.Tensor) -> torch.Tensor:
         scale = getattr(layer, "online_fp8_scale", None)
