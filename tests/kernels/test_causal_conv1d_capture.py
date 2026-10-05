@@ -161,3 +161,32 @@ def test_prefill_fla_metadata_carries_the_host_known_longest_extend_len():
     fla = build_fla_metadata(batch, torch.device("cpu"))
 
     assert fla.max_seq_len == 9
+
+
+@requires_cuda
+def test_split_conv_matches_the_channels_first_conv():
+    """GDN prefill convolves the token-major qkvz slice straight into contiguous q/k/v; it must
+    equal the channels-first triton conv (same fp32 math) and leave the same conv states."""
+    from freetoken.kernel.triton.causal_conv1d_triton import (
+        causal_conv1d_varlen as triton_conv,
+        causal_conv1d_varlen_split,
+    )
+
+    torch.manual_seed(0)
+    lens, conv_dim, split = (37, 2, 300), 448, 128  # a 1-token-short request keeps state history
+    total = sum(lens)
+    qkvz = torch.randn(total, conv_dim + 96, device="cuda", dtype=torch.bfloat16)
+    x = qkvz[:, :conv_dim]
+    weight = torch.randn(conv_dim, 4, device="cuda", dtype=torch.bfloat16)
+    states = torch.randn(5, conv_dim, 3, device="cuda", dtype=torch.bfloat16)
+    cu = torch.tensor([0, *lens], dtype=torch.int32).cumsum(0).to(torch.int32).cuda()
+    idx = torch.tensor([3, 1, 4], dtype=torch.int32, device="cuda")
+    init = torch.tensor([True, True, False], device="cuda")
+
+    ref_states = states.clone()
+    ref = triton_conv(x.t().contiguous(), weight, ref_states, cu, idx, init, max_seq_len=max(lens)).t()
+    q, k, v = causal_conv1d_varlen_split(x, weight, states, cu, idx, init, split, max_seq_len=max(lens))
+
+    assert q.is_contiguous() and k.is_contiguous() and v.is_contiguous()
+    assert torch.equal(torch.cat([q, k, v], dim=1), ref)
+    assert torch.equal(states, ref_states)

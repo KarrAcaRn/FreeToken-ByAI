@@ -211,11 +211,19 @@ class Qwen3_5GatedDeltaNet(BaseOP):
                 disable_state_update=fla.dflash_disable_state_update,
             )
         else:
-            mixed = self._conv_prefill(
-                conv_in, pool, fla.cu_seqlens, fla.cache_indices, fla.has_initial_state,
-                fla.max_seq_len)
+            if self.key_dim % 64 == 0 and conv_in.stride(-1) == 1:
+                # token-major conv straight into contiguous q/k/v: no transposes, no copies
+                from freetoken.kernel.triton.causal_conv1d_triton import causal_conv1d_varlen_split
+
+                qf, kf, vf = causal_conv1d_varlen_split(
+                    conv_in, self._conv_weight(), pool.conv_states[li], fla.cu_seqlens,
+                    fla.cache_indices, fla.has_initial_state, self.key_dim, fla.max_seq_len)
+            else:
+                mixed = self._conv_prefill(
+                    conv_in, pool, fla.cu_seqlens, fla.cache_indices, fla.has_initial_state,
+                    fla.max_seq_len)
+                qf, kf, vf = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
             # fla chunk handles GQA in-kernel: q/k stay at num_k_heads, v at num_v_heads.
-            qf, kf, vf = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
             q = qf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
             k = kf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
             v = vf.reshape(1, total, self.num_v_heads, self.head_v_dim).to(dtype)

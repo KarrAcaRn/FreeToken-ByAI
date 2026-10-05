@@ -51,7 +51,7 @@ PAD_SLOT_ID = -1
 # seqlen and the x/o dim-strides equal the batch token count for the (dim, total)
 # layout -- they must stay runtime values (no constexpr, no int specialization) or
 # every distinct prompt length recompiles the kernel.
-@triton.jit(do_not_specialize=["seqlen", "stride_x_dim", "stride_o_dim"])
+@triton.jit(do_not_specialize=["seqlen", "stride_x_dim", "stride_o_dim", "total_tokens"])
 def _causal_conv1d_fwd_tiled_kernel(
     x_ptr,
     w_ptr,
@@ -86,7 +86,11 @@ def _causal_conv1d_fwd_tiled_kernel(
     NP2_STATELEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    total_tokens=0,
+    SPLIT_DIM: tl.constexpr = 0,
 ):
+    """SPLIT_DIM > 0 writes features [0, S), [S, 2S), [2S, dim) to three back-to-back
+    token-major buffers of ``total_tokens`` rows (GDN q | k | v), each contiguous."""
     conv_states_ptr = initial_states_ptr
     conv_state_indices_ptr = cache_indices_ptr
     stride_conv_state_seq = stride_istate_seq
@@ -191,11 +195,23 @@ def _causal_conv1d_fwd_tiled_kernel(
         # polynomial tl.exp) and matches the CUDA op's -use_fast_math __expf within tol.
         acc = acc / (1.0 + tl.exp2(-acc * 1.4426950408889634))
 
-    o_ptrs = (
-        o_ptr
-        + ((sequence_start_index + local_out) * stride_o_token)[:, None]
-        + feat_o[None, :]
-    )
+    if SPLIT_DIM > 0:
+        # BLOCK_N divides SPLIT_DIM, so a feature tile never straddles two parts.
+        f0 = tl.program_id(2) * BLOCK_N
+        start = tl.where(f0 >= 2 * SPLIT_DIM, 2 * SPLIT_DIM, tl.where(f0 >= SPLIT_DIM, SPLIT_DIM, 0))
+        width = tl.where(f0 >= 2 * SPLIT_DIM, dim - 2 * SPLIT_DIM, SPLIT_DIM)
+        o_ptrs = (
+            o_ptr
+            + start.to(tl.int64) * total_tokens
+            + ((sequence_start_index + local_out).to(tl.int64) * width)[:, None]
+            + (idx_feats - start)[None, :]
+        )
+    else:
+        o_ptrs = (
+            o_ptr
+            + ((sequence_start_index + local_out) * stride_o_token)[:, None]
+            + feat_o[None, :]
+        )
     mask_o = (local_out < seqlen)[:, None] & mfc
     tl.store(o_ptrs, acc, mask_o)
 
@@ -515,6 +531,66 @@ def causal_conv1d_varlen(
         num_stages=3,
     )
     return out
+
+
+def causal_conv1d_varlen_split(
+    x: torch.Tensor,            # [total_tokens, conv_dim] token-major, feature stride 1 (may be a column slice)
+    weight: torch.Tensor,       # [conv_dim, kernel]
+    conv_states: torch.Tensor,  # [num_slots, conv_dim, kernel-1] (in place)
+    cu_seqlens: torch.Tensor,   # [batch+1] int32
+    cache_indices: torch.Tensor,      # [batch] int32
+    has_initial_state: torch.Tensor,  # [batch] bool
+    split_dim: int,
+    max_seq_len: Optional[int] = None,
+    pad_slot_id: int = PAD_SLOT_ID,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """silu(causal conv) of a token-major ``x`` written as three contiguous token-major parts
+    ``[total, split_dim]``, ``[total, split_dim]``, ``[total, conv_dim - 2 * split_dim]``
+    (GDN q, k, v). Saves the channels-first transpose before the conv and the copies that
+    made q/k/v contiguous after it; same conv-state semantics as :func:`causal_conv1d_varlen`."""
+    assert x.stride(-1) == 1, x.stride()
+    total, dim = x.shape
+    _, width = weight.shape
+    assert 2 <= width <= 4, f"causal_conv1d triton supports width 2..4, got {width}"
+    block_n = 64
+    assert split_dim % block_n == 0 and dim > 2 * split_dim, (split_dim, dim)
+    cu_seqlens = cu_seqlens.to(torch.int32)
+    cache_indices = cache_indices.to(torch.int32)
+    state_len = width - 1
+    batch = cu_seqlens.numel() - 1
+    if max_seq_len is None:
+        max_seq_len = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+    assert max_seq_len <= 16 * 65535, "chunk prefill: single-call max_seq_len cap is ~1M tokens"
+
+    buf = torch.empty(total * dim, dtype=x.dtype, device=x.device)
+    grid = (batch, triton.cdiv(max_seq_len, 16), triton.cdiv(dim, block_n))
+    _causal_conv1d_fwd_tiled_kernel[grid](
+        x, weight, None, conv_states, cache_indices, has_initial_state, cu_seqlens, buf,
+        dim, total, conv_states.size(0),
+        0, 1, x.stride(0),
+        weight.stride(0), weight.stride(1),
+        conv_states.stride(0), conv_states.stride(1), conv_states.stride(2),
+        0, 0, 0,
+        pad_slot_id,
+        HAS_BIAS=False,
+        KERNEL_WIDTH=width,
+        SILU_ACTIVATION=True,
+        HAS_INITIAL_STATES=has_initial_state is not None,
+        HAS_CACHE=True,
+        IS_CONTINUOUS_BATCHING=True,
+        USE_PAD_SLOT=pad_slot_id is not None,
+        NP2_STATELEN=triton.next_power_of_2(state_len),
+        BLOCK_M=16,
+        BLOCK_N=block_n,
+        total_tokens=total,
+        SPLIT_DIM=split_dim,
+        num_warps=2,
+        num_stages=3,
+    )
+    q = buf[: total * split_dim].view(total, split_dim)
+    k = buf[total * split_dim : 2 * total * split_dim].view(total, split_dim)
+    v = buf[2 * total * split_dim :].view(total, dim - 2 * split_dim)
+    return q, k, v
 
 
 def causal_conv1d_decode(
