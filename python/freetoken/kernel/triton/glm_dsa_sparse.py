@@ -478,7 +478,10 @@ def glm_dsa_sparse_attn(
         cnt, stride_nb, stride_nm = idx, 0, 0
 
     # Packed gathers need additional layout conversions at the 512-wide latent size.
-    block_t = 16 if has_nvfp4 else BLOCK_T
+    # The fp32 tiles of an unquantized pool need ~100 KiB at BLOCK_T=32, just above
+    # the 99 KiB per block of consumer GPUs (sm_86/89/120).
+    small_smem = torch.cuda.get_device_properties(q.device).shared_memory_per_block_optin < 128 * 1024
+    block_t = 16 if has_nvfp4 or (kv_quant == "none" and small_smem) else BLOCK_T
     n_splits = _split_count(b, m, h, topk, q.device) if force_splits is None else force_splits
     if n_splits:
         mid_o = q.new_empty(b, m, h, n_splits, d_v, dtype=torch.float32)
