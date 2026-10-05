@@ -135,20 +135,28 @@ def test_flashinfer_dense_matches_the_sparse_path():
 
 @requires_cuda
 @pytest.mark.parametrize("cut", [1001, 4096, 4097], ids=["unaligned", "page-boundary", "boundary+1"])
-def test_chunked_prefill_matches_one_shot(cut: int):
-    """Cut points that are not multiples of index_ratio exercise the dual-source compress."""
+def test_chunked_prefill_matches_one_shot(cut: int, monkeypatch):
+    """Cut points that are not multiples of index_ratio exercise the dual-source compress.
+
+    The selection must be bit-identical. The output only within bf16 rounding: cuBLAS may
+    pick another algorithm for the shorter tail GEMM (it does on sm_89).
+    """
     config = parsed_config()
     fixture = Fixture(config, num_pages=512)
     attn = fixture.layer(QSA_LAYER)
     length = 5000
     x = _inputs(fixture, [length])[0]
+    seen = selection_spy(monkeypatch, fixture.backend)
 
     one_shot = attn.forward(x, fixture.batch([fixture.req(0, 0, length)], "prefill"))
+    one_shot_sel = seen["indices"][cut:]
     head = fixture.req(1, 0, cut)
     attn.forward(x[:cut], fixture.batch([head], "prefill"))
     tail = fixture.req(1, cut, length)
     got = attn.forward(x[cut:], fixture.batch([tail], "prefill"))
-    assert torch.equal(got, one_shot[cut:])
+    for row, (a, b) in enumerate(zip(seen["indices"], one_shot_sel)):
+        assert torch.equal(a[a >= 0].sort().values, b[b >= 0].sort().values), f"row {cut + row}"
+    torch.testing.assert_close(got.float(), one_shot[cut:].float(), rtol=1e-2, atol=1e-3)
 
 
 @requires_cuda
