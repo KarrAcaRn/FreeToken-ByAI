@@ -276,6 +276,61 @@ def _static_quant(a: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
     return out
 
 
+# Small-M W8A8 (decode, DFlash verify): the activation is quantized in-kernel with
+# _static_quant's exact rounding, and both e4m3 operands widen to bf16 losslessly, so the
+# products are exact and only the fp32 accumulation order differs from cuBLAS. One launch
+# covers every fused part (the per-row scale carries each part's scalar) and the activation
+# quant: on sm_89 cuBLAS reads attention q|k|v at ~760 GB/s as three GEMMs, this ~890.
+# One tile shape for every M up to the cap keeps a row's result independent of the batch.
+# Used where row-wise _scaled_mm is unavailable: there cuBLAS already ran per part and drifted
+# by an ulp across M, while a row-wise cuBLAS keeps one kernel for every batch size.
+_W8A8_SMALL_M = 16
+
+
+@triton.jit
+def _w8a8_small_m_kernel(
+    a_ptr, w_ptr, wscale_ptr, ascale_ptr, c_ptr, M, N, K,
+    stride_am, stride_ak, stride_wn, stride_wk, stride_cm, stride_cn,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, OUT: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    m_mask = offs_m < M
+    n_mask = offs_n < N
+    a_scale = tl.load(ascale_ptr).to(tl.float32)
+    inv = 1.0 / a_scale
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(tl.cdiv(K, BLOCK_K)):
+        kk = k * BLOCK_K + offs_k
+        a = tl.load(a_ptr + offs_m[:, None] * stride_am + kk[None, :] * stride_ak,
+                    mask=m_mask[:, None] & (kk[None, :] < K), other=0.0).to(tl.float32)
+        q = round_e4m3(tl.minimum(tl.maximum(a * inv, -448.0), 448.0)).to(tl.bfloat16)
+        w = tl.load(w_ptr + offs_n[:, None] * stride_wn + kk[None, :] * stride_wk,
+                    mask=n_mask[:, None] & (kk[None, :] < K), other=0.0).to(tl.bfloat16)
+        acc += tl.dot(q, tl.trans(w))
+    scale = tl.load(wscale_ptr + offs_n, mask=n_mask, other=0.0).to(tl.float32) * a_scale
+    tl.store(c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
+             (acc * scale[None, :]).to(OUT), mask=m_mask[:, None] & n_mask[None, :])
+
+
+def _w8a8_small_m(a: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor,
+                  input_scale: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    M, K = a.shape
+    N = weight.shape[0]
+    compute = out_dtype if out_dtype in _TL_DTYPE else torch.bfloat16
+    out = torch.empty((M, N), dtype=compute, device=a.device)
+    BLOCK_N = 32
+    _w8a8_small_m_kernel[(triton.cdiv(N, BLOCK_N),)](
+        a, weight, weight_scale, input_scale, out, M, N, K,
+        a.stride(0), a.stride(1), weight.stride(0), weight.stride(1), out.stride(0), out.stride(1),
+        BLOCK_M=_W8A8_SMALL_M, BLOCK_N=BLOCK_N, BLOCK_K=256, OUT=_TL_DTYPE[compute],
+        num_warps=4, num_stages=3,
+    )
+    return out
+
+
 def _scaled_mm(
     a: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor,
     input_scale: torch.Tensor, uniform_scale: bool, out_dtype: torch.dtype,
@@ -345,7 +400,9 @@ def fp8_pertensor_linear(
         segments = scale_segments if scale_segments is not None else weight_scale_segments(weight_scale)
         if not _segments_w8a8_ok(segments):
             w8a8 = False  # W8A16 below is exact for any per-row scale and never calls _scaled_mm
-    if w8a8:
+    if w8a8 and x.numel() // K <= _W8A8_SMALL_M and not rowwise_scaled_mm_ok():
+        out = _w8a8_small_m(x.reshape(-1, K), weight, weight_scale, input_scale, x.dtype).reshape(*lead, N)
+    elif w8a8:
         out = _scaled_mm(
             x.reshape(-1, K), weight, weight_scale, input_scale, uniform_scale, x.dtype,
             scale_segments=segments,

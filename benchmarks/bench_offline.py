@@ -31,6 +31,14 @@ _NATURAL = [
     "Solve step by step: a train leaves at 9:40 at 84 km/h, a second one at 10:05 at 102 km/h on the same track. When does the second catch up?",
     "Explain how a transformer language model generates text, for a curious high-school student, in about 400 words.",
     "Write a bash script that finds the 10 largest files under a directory, prints their sizes human-readable and handles spaces in names.",
+    "Implement binary search in C with tests for empty arrays, duplicates and missing keys.",
+    "Prove that the square root of 2 is irrational, step by step.",
+    "Summarize the causes and consequences of the French Revolution in five bullet points with one paragraph each.",
+    "Write a SQL schema for a library (books, members, loans) and three example queries with explanations.",
+    "Translate this to German and explain the grammar: 'If I had known you were coming, I would have baked a cake.'",
+    "Write a short science-fiction story about a lighthouse keeper on Europa.",
+    "Explain the difference between TCP and UDP with examples of when to use each.",
+    "Write a Rust function that parses a CSV line with quoted fields, plus unit tests.",
 ]
 
 
@@ -95,7 +103,7 @@ def main() -> None:
             print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=40))
 
     if args.natural:
-        rates = []
+        rates, tokens, seconds = [], 0, 0.0
         for p in _natural(llm, len(_NATURAL)):
             t1 = _timed(llm, [p], 1)
             sp = SamplingParams(temperature=0.0, max_tokens=args.decode + 1)
@@ -103,9 +111,12 @@ def main() -> None:
             t = time.perf_counter()
             n = len(llm.generate([p], sp)[0]["token_ids"])
             torch.cuda.synchronize()
-            rates.append((n - 1) / (time.perf_counter() - t - t1))
+            dt = time.perf_counter() - t - t1
+            rates.append((n - 1) / dt)
+            tokens, seconds = tokens + n - 1, seconds + dt
         out["natural_decode_tok_s"] = [round(r, 1) for r in rates]
         out["natural_decode_mean"] = round(statistics.mean(rates), 1)
+        out["natural_decode_total"] = round(tokens / seconds, 1)
         print("RESULT " + json.dumps(out))
         return
 

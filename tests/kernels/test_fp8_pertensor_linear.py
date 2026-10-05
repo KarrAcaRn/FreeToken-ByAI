@@ -102,11 +102,17 @@ def test_batch_size_does_not_change_the_numeric_scheme():
 
     batched = fp8_pertensor_linear(x, w8, scale, None, input_scale, False)
     alone = fp8_pertensor_linear(x[:1], w8, scale, None, input_scale, False)
+    # Row-wise cuBLAS, or the small-M triton W8A8 that replaces the per-part fallback up to
+    # M = 16: one kernel shape for both, bit-identical rows.
+    assert torch.equal(alone, batched[:1])
+
     if rowwise_scaled_mm_ok():
-        assert torch.equal(alone, batched[:1])
         return
-    # Per-part fallback (sm_89, torch < 2.12): cuBLASLt picks its tensor-wise kernel by M, so
-    # bs=1 may differ in the last bit; it must still be W8A8, far from the W8A16 result.
+    # Past M = 16 the per-part fallback (sm_89, torch < 2.12) runs one tensor-wise cuBLASLt GEMM
+    # per part, picked by M: bs=1 may differ in the last bit but must still be W8A8.
+    x = torch.randn(48, K, device=DEV, dtype=torch.bfloat16)
+    batched = fp8_pertensor_linear(x, w8, scale, None, input_scale, False)
+    alone = fp8_pertensor_linear(x[:1], w8, scale, None, input_scale, False)
     w8a16 = fp8_pertensor_linear(x[:1], w8, scale)
     torch.testing.assert_close(alone, batched[:1], rtol=2 ** -7, atol=1e-3)
     assert (alone != batched[:1]).sum() * 10 < (alone != w8a16).sum()
@@ -114,7 +120,7 @@ def test_batch_size_does_not_change_the_numeric_scheme():
 
 @pytest.mark.skipif(not e4m3_native(), reason="torch._scaled_mm needs sm_89+")
 @pytest.mark.parametrize("M", [1, 4, 64, 300])
-def test_per_part_path_matches_rowwise(M: int, monkeypatch):
+def test_per_part_path_matches_rowwise(M: int, monkeypatch):  # M <= 16 runs the small-M triton W8A8
     """Where row-wise ``_scaled_mm`` is unsafe a fused projection runs one tensor-wise GEMM per
     part instead. Same scheme, so the two paths agree up to accumulation order (~7e-4)."""
     import freetoken.kernel.triton.fp8_pertensor_linear as mod
