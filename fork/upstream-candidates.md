@@ -9,7 +9,7 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | Load dense Gemma-4 GGUFs end to end | 5b0cb77 (merge of #359), 7f2fc79 | Candidate, see below |
 | bench_serving: --api-key and the zero-hit cache report | b36d49d, 23d92b6 (on top of #341) | Candidate, see below |
 | Pure ASGI middlewares, so #222's non-streaming abort works | f8de64f (on top of #222) | Candidate, see below |
-| MoE offload: preload the expert slot cache, prefill hit-D2D by default | 2012f9e (branch `fix/moe-ttft`, from main) | Candidate, ready as a branch; see below |
+| MoE offload: preload the expert slot cache, prefill hit-D2D by default | f39f33a + 444eb32 (branch `fix/moe-ttft`, from main; rebased 2026-10-05) | Candidate, ready as a branch; see below |
 | Profile-picked hybrid falls back to offload for large expert caches; CPU pool leaves the engine a core | 74e0ece (branch `fix/moe-hybrid-pick`, from main) | Candidate, ready as a branch; see below |
 | Non-stream tool calls: the detector decides (Llama 3.2 bare-JSON calls) | 925e5f8 | Candidate, applies to upstream main as is; see below |
 | gpt-oss: tool recipient in the role header | 3b54232 | Candidate, applies to upstream main as is; see below |
