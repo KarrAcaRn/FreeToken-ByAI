@@ -224,8 +224,23 @@ would need a ~23 GB expert-major copy of the tail experts. Parked until new hard
 
 ## Not done: options that need a decision
 
-- **DFlash block size.** `--speculative-dflash-block-size 16` (drafter trained at 8):
-  code prompts +17-23%, prose slightly lower, 12-prompt total +1.6%. A usage hint, not a
-  code change.
+- **DFlash block size (settled 2026-10-07: the default stays the draft's 8).** The verify
+  forward is weight-bound and barely grows with its length (len 8 23.7 ms, len 16 25.4 ms),
+  so `--speculative-dflash-block-size 16` (drafter trained at 8) pays off only where the
+  drafter keeps matching past 7 tokens. Interleaved rounds on the 12 chat prompts (256
+  tokens each, gate on, 3 rounds, run-to-run spread ~0.1 tok/s): total 118.6 -> 118.7 tok/s,
+  i.e. no net gain. Per prompt: C binary search +13.8%, train math +12.3%, SQL schema
+  +12.2%, sqrt(2) proof +8.4%, Rust CSV +3.8%, TCP/UDP +2.2%, Python LRU cache +1.0%,
+  translation -2.2%, sci-fi story -4.4%, transformer explanation -4.6%, French Revolution
+  -7.3%, bash script -7.6%. Greedy output is identical to block 8 and reproducible. A usage
+  hint for highly structured output (C, SQL, worked math), not a default; the earlier
+  "code +17-23%" was too broad.
+- **Adaptive verify length (built, measured, dropped).** Per request, verify only as many of
+  16 drafts as pay off: acceptance as a censored-geometric MLE over recent cycles, cost =
+  measured cycle overhead + calibrated verify ms per length. The simulation promised +2.3%
+  over a fixed 16; measured it was ~+1% (within noise), and greedy output stopped being
+  reproducible: the chosen lengths follow wall-clock timing, and lengths such as 11 or 13
+  round near-ties differently (2 of 12 prompts changed from run to run). A deterministic
+  choice between 8 and 16 would simulate to +1-2% at best.
 - Smaller items: fla GDN chunk kernels are H100-tuned (~45 ms per 4k prefill, maybe ~1%);
   fusing silu*mul into the NVFP4 down GEMV (~0.7% decode); `in_proj_ba` bf16 GEMV (~1%).
