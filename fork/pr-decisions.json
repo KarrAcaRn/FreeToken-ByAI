@@ -2595,45 +2595,45 @@
   },
   "586": {
     "number": 586,
-    "title": "refactor(hf): merge an override into the section's own dict, with no fallback [draft]",
     "head_sha": "c242b1fa49f2",
-    "reviewed_at": "2026-10-04",
+    "reviewed_at": "2026-10-06",
+    "title": "refactor(hf): merge an override into the section's own dict, with no fallback [draft]",
     "decision": "deferred",
-    "reason": "Draft: drops the `or {}` fallback when merging an --hf-overrides section (our #573 code), which changes behaviour for sections transformers computes as properties. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "reason": "Draft. Two-line refactor of _with_overrides (follows #573): drop the empty-dict fallback that only a property-computed config section reaches, so such an override fails with a KeyError at the merge. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
     "commits": [],
-    "gpu_untested": true,
+    "gpu_untested": false,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
-    "summary": "Draft - revisit when ready"
+    "summary": "Draft - revisit when ready; config-override merge without the empty-dict fallback"
   },
   "583": {
     "number": 583,
-    "title": "docs(gpu): name the NVML free-memory read in gpu_select, and the platform the test fakes [draft]",
     "head_sha": "4f502c8a2ab6",
-    "reviewed_at": "2026-10-04",
+    "reviewed_at": "2026-10-06",
+    "title": "fix(engine): size memory pools against the VRAM other processes leave free on Windows [draft]",
     "decision": "deferred",
-    "reason": "Draft (Windows): sizes memory pools against the VRAM other processes leave free on Windows. Windows cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "reason": "Draft. Windows/WDDM only: take min(cudaMemGetInfo, NVML free) so pools do not overcommit beside a desktop; Linux path unchanged. Windows cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
-    "summary": "Draft - revisit when ready; Windows cannot be tested here"
+    "summary": "Draft - revisit when ready; Windows VRAM sizing via NVML, cannot test Windows here"
   },
   "582": {
     "number": 582,
-    "title": "test(quant): skip declined local checkpoints and label cache paths portably [draft]",
     "head_sha": "64827fd4daea",
-    "reviewed_at": "2026-10-04",
+    "reviewed_at": "2026-10-06",
+    "title": "test(quant): skip declined local checkpoints and label cache paths portably [draft]",
     "decision": "deferred",
-    "reason": "Draft: test-only tweak in tests/models/test_quant_config.py (skip declined local checkpoints, portable cache-path labels). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "reason": "Draft. test_quant_config skips a checkpoint whose scheme FreeToken declines (NotImplementedError) instead of failing, and labels cache paths portably (Windows). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
     "commits": [],
-    "gpu_untested": true,
+    "gpu_untested": false,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
-    "summary": "Draft - revisit when ready"
+    "summary": "Draft - revisit when ready; quant-config test skips declined schemes, portable labels"
   },
   "581": {
     "number": 581,
@@ -2805,18 +2805,18 @@
   },
   "618": {
     "number": 618,
+    "head_sha": "473a85a3b96f",
     "reviewed_at": "2026-10-06",
     "title": "feat(attention): hand-written GQA-fused extend kernel for pre-sm70 (1.8x)",
-    "head_sha": "473a85a3b96f",
     "decision": "deferred",
-    "revisit_with": 605,
-    "reason": "Stacked on the undecided #605 (its three pre-sm70 tiling commits are in this branch). A CUDA GQA-fused extend kernel for GROUP=8/D=256/fp16 on pre-Volta GPUs; sm_70+ untouched. Pre-sm70 cannot be tested on the RTX 4090 here; not judged on its merits yet.",
+    "revisit": "after-queue",
+    "reason": "Stacked on #605, which is now deferred (pre-sm70 only). A CUDA GQA-fused extend kernel for GROUP=8/D=256/fp16 on pre-Volta GPUs; sm_70+ untouched. Pre-sm70 cannot be tested on the RTX 4090 here; not judged on its merits yet. Revisit together with #605.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "wac <wac@wuancheng.com>"
     ],
-    "summary": "Pre-sm70 GQA-fused extend attention kernel; stacked on #605, revisit with it"
+    "summary": "Pre-sm70 GQA-fused extend attention kernel; stacked on #605, cannot test pre-Volta here"
   },
   "617": {
     "number": 617,
@@ -2951,5 +2951,19 @@
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
     "summary": "Draft - revisit when ready; the tqdm half is on next already, the ack-queue half is not"
+  },
+  "613": {
+    "number": 613,
+    "head_sha": "707fbd5fa072",
+    "reviewed_at": "2026-10-06",
+    "title": "fix(server)!: answer /health with 503 until the server accepts requests [draft]",
+    "decision": "deferred",
+    "reason": "Draft. /health would answer 503 unless serving (body unchanged), so readiness probes such as llama-swap wait for the model; in-repo consumers (daemon proxy, ft ctl, bench wait_ready) are adapted. Breaking for clients that poll /health for 200; our own serve helpers read the body's status, check them when revisiting. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "summary": "Draft - revisit when ready; /health 503 until serving (breaking for 200-polling clients)"
   }
 }
