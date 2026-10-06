@@ -22,7 +22,9 @@ class MiniMaxM2SparseMoeBlock(BaseOP):
         self.norm_topk_prob = config.norm_topk_prob
         self.gate = LinearReplicated(config.hidden_size, config.num_experts, has_bias=False)
         # DeepSeek-style selection bias; not an nn.Parameter in HF (a registered buffer).
-        self.e_score_correction_bias = torch.empty(config.num_experts)
+        # Kept fp32 like the checkpoint: a bf16 copy rounds near-equal biases into ties
+        # and changes the selected experts (upstream #609 for GLM-5.2).
+        self.e_score_correction_bias = torch.empty(config.num_experts, dtype=torch.float32)
         self.experts = make_moe_layer(
             config,
             layer_id=layer_id,
