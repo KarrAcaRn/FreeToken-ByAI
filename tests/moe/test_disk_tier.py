@@ -367,3 +367,18 @@ def test_renumbered_index_fetches_the_original_expert(checkpoint):
             for bank_idx, (_host, gpu_cache) in enumerate(cache.banks):
                 got = gpu_cache[0].contiguous().view(torch.uint8).reshape(-1)
                 assert torch.equal(got, expected[bank_idx]), (bank_idx, layer, new_id)
+
+
+def test_batched_fetch_chunks_through_both_arena_halves(checkpoint, monkeypatch):
+    """Every segment of a layer's disk misses is read at once into a pinned arena; more
+    misses than one half holds go in chunks, alternating halves."""
+    monkeypatch.setattr(DiskTier, "_ARENA_EXPERTS", 2)
+    cache = _fake_cache()
+    tier = _tier(checkpoint, cache, ram_experts=0)
+    layer, experts, slots = 1, [3, 0, 2, 1, 3], [7, 1, 2, 3, 4]
+    tier._fetch_batch(layer, experts, slots)
+    for e, slot in zip(experts, slots):
+        expected = _expected_rows(layer, e)
+        for bank_idx, (_host, gpu_cache) in enumerate(cache.banks):
+            assert torch.equal(gpu_cache[slot].contiguous().view(torch.uint8).reshape(-1), expected[bank_idx])
+    assert tier.stats()["experts_fetched"] == len(experts)

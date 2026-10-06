@@ -397,6 +397,71 @@ class DiskTier:
         self._fetches += 1
         self._fetch_bytes += sum(self._row_bytes)
 
+    # Batched fetch arena: experts per half; two halves alternate so the next layer's reads
+    # never wait on the H2D copies still draining the previous half.
+    _ARENA_EXPERTS = 32
+
+    def _arena_half(self, half: int):
+        arena = getattr(self, "_arena", None)
+        if arena is None:
+            per_expert = sum(
+                sum((nb + 2 * _ALIGN) for _s, _o, nb in self._index.row_segments(b, 0, 0))
+                for b in range(len(self._banks)))
+            size = ((per_expert * self._ARENA_EXPERTS + _ALIGN - 1) // _ALIGN) * _ALIGN
+            arena = self._arena = []
+            for _ in range(2):
+                buf = HostBank((size,), torch.uint8)
+                buf.pin()
+                ev = torch.cuda.Event() if torch.cuda.is_available() else None
+                arena.append([buf, ev])
+        return arena[half]
+
+    def _read_into(self, item) -> None:
+        addr, shard_idx, a0, slen = item
+        fd, _direct = self._fd(shard_idx)
+        mv = (ctypes.c_char * slen).from_address(addr)
+        os.preadv(fd, [mv], a0)
+
+    def _fetch_batch(self, layer: int, experts: list[int], slots: list[int]) -> None:
+        """Fetch several experts into their slots: every segment of every expert is read at
+        once (the per-read latency of a network or flash device is paid ~once per layer, not
+        once per segment), then the rows are H2D-copied on the current stream, so the GEMM that
+        follows needs no extra sync."""
+        half = getattr(self, "_arena_next", 0)
+        for c0 in range(0, len(experts), self._ARENA_EXPERTS):
+            buf, ev = self._arena_half(half)
+            if ev is not None:
+                ev.synchronize()  # this half's previous copies have landed
+            reads, writes, pos = [], [], 0
+            for e, slot in zip(experts[c0:c0 + self._ARENA_EXPERTS], slots[c0:c0 + self._ARENA_EXPERTS]):
+                for bank_idx, (_host_layer, gpu_cache) in enumerate(self._banks):
+                    segs = self._index.row_segments(bank_idx, layer, e)
+                    for (d0, d1), (shard_idx, off, nbytes) in zip(self._dst_slices[bank_idx], segs):
+                        _fd, direct = self._fd(shard_idx)
+                        if direct:
+                            a0 = off & ~(_ALIGN - 1)
+                            slen = (off + nbytes - a0 + _ALIGN - 1) & ~(_ALIGN - 1)
+                        else:
+                            a0, slen = off, nbytes
+                        reads.append((buf.addr + pos, shard_idx, a0, slen))
+                        writes.append((bank_idx, gpu_cache[slot], d0, d1, pos + off - a0, nbytes))
+                        pos += (slen + _ALIGN - 1) & ~(_ALIGN - 1)
+            for f in [self._pool.submit(self._read_into, r) for r in reads]:
+                f.result()
+            for bank_idx, row, d0, d1, start, nbytes in writes:
+                if bank_idx in (2, 5):
+                    # per-expert fp32 global scale, broadcast as fp16 across the row (see _fetch_expert_inner)
+                    row[d0:d1].fill_(buf.tensor[start:start + 4].view(torch.float32)[0].to(torch.float16))
+                    continue
+                dst = row[d0:d1]
+                dst.copy_(buf.tensor[start:start + nbytes].view(dst.dtype).view(dst.shape), non_blocking=True)
+            if ev is not None:
+                ev.record()
+            self._fetches += min(self._ARENA_EXPERTS, len(experts) - c0)
+            self._fetch_bytes += sum(self._row_bytes) * min(self._ARENA_EXPERTS, len(experts) - c0)
+            half ^= 1
+        self._arena_next = half
+
     def _sync_fetches(self) -> None:
         """Wait for the pool threads' async H2D copies to land.
 
@@ -640,13 +705,8 @@ class DiskTier:
         # cache.step was already incremented by the kernel; assign the 0-d tensor
         # device-side (same dtype/device as usage) instead of .item()-ing it, which
         # would sync the stream once per layer on the prefill/decode path.
-        futures = [
-            self._pool.submit(self._fetch_expert, layer_id, int(e), int(e))
-            for e in disk.tolist()
-        ]
-        for f in futures:
-            f.result()
-        self._sync_fetches()
+        disk_ids = disk.tolist()
+        self._fetch_batch(layer_id, disk_ids, disk_ids)
         if os.environ.get("FT_DISK_TIER_VERIFY") and layer_id in (0, 20) and disk.numel() > 0:
             limit = disk.numel() if layer_id == 0 else 6  # layer 0: ALL experts (race hunt)
             for e in disk.tolist()[:limit]:
@@ -671,13 +731,7 @@ class DiskTier:
                   f"src_head={src[:4].tolist()}", flush=True)
         if not disk:
             return
-        futures = [
-            self._pool.submit(self._fetch_expert, layer_id, int(src[i]), int(slots[i]))
-            for i in disk
-        ]
-        for f in futures:
-            f.result()
-        self._sync_fetches()
+        self._fetch_batch(layer_id, [int(src[i]) for i in disk], [int(slots[i]) for i in disk])
         if (os.environ.get("FT_DISK_TIER_VERIFY") and layer_id == 0
                 and self._decode_verify_steps < 3):
             self._decode_verify_steps += 1
