@@ -2880,5 +2880,76 @@
     ],
     "summary": "GLM-5.2 router selection bias stays fp32 (bf16 rounding tied experts and changed the top-k)",
     "fixup": "Same fix for MiniMax-M2 (F32 bias in the checkpoint was cast to bf16), with a regression test"
+  },
+  "605": {
+    "number": 605,
+    "head_sha": "c5b91744a7e3",
+    "reviewed_at": "2026-10-06",
+    "title": "perf(pre-sm70): pipeline the block-fp8 GEMMs and halve the extend-attention K/V re-reads on Pascal",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Pre-sm70 launch configs for the block-fp8 dense/MoE GEMMs and extend attention (6.6x prefill on a GTX 1080 Ti). Also derives the per-128 scale indices from the tile sizes in all three kernels, which the PR says reduces to the old indices at sm70+ defaults; to check on the 4090 when revisited. The gain is pre-Volta only, which cannot be tested here; not judged on its merits yet. #618 stacks on it.",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "wac <wac@wuancheng.com>"
+    ],
+    "summary": "Pre-sm70 block-fp8 GEMM / extend-attention tiling (6.6x prefill on GP102); cannot test pre-Volta here"
+  },
+  "604": {
+    "number": 604,
+    "head_sha": "65907c8bc2c1",
+    "reviewed_at": "2026-10-06",
+    "title": "fix(server): soft-accept OpenAI response_format json_object/json_schema",
+    "decision": "rejected",
+    "reason": "Accepts json_object/json_schema with HTTP 200 but enforces nothing (the final commit dropped even the system hint), so a strict json_schema is silently ignored and clients get unchecked output under a contract that promises valid JSON. A clear 400 is the honest answer until there is real constrained decoding. Also deletes the blank lines before chat_request_to_genspec.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Siarhei Berdachuk <berdachuk@berdaflex.com>"
+    ],
+    "summary": "Would accept response_format JSON modes without enforcing them; a 400 stays until real constrained decoding"
+  },
+  "616": {
+    "number": 616,
+    "head_sha": "62e8ff7b099c",
+    "reviewed_at": "2026-10-06",
+    "title": "fix(server): name the lifecycle stage in every API's 503 [draft]",
+    "decision": "deferred",
+    "reason": "Draft. next already shares one gate across the four APIs (#191, 3970669) and names 'failed' correctly; the remaining gap it would close is 'stopping', which next still reports as a cache rebuild. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "summary": "Draft - revisit when ready; next's shared gate (#191) still calls 'stopping' a rebuild"
+  },
+  "615": {
+    "number": 615,
+    "head_sha": "df2550a14e11",
+    "reviewed_at": "2026-10-06",
+    "title": "fix(engine): start a single rank without a rendezvous port [draft]",
+    "decision": "deferred",
+    "reason": "Draft. A single rank would form its gloo group over a temporary FileStore instead of a TCP rendezvous, so a busy --port+1 / 2333 no longer fails the load (#301). next (with #461's loopback bind and --dist-port) still binds a port for one rank, so it is not covered. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "summary": "Draft - revisit when ready; single rank without a TCP rendezvous port"
+  },
+  "614": {
+    "number": 614,
+    "head_sha": "a8498c7e96e2",
+    "reviewed_at": "2026-10-06",
+    "title": "fix(server): leak no semaphores when a signal stops the server [draft]",
+    "decision": "deferred",
+    "reason": "Draft. Of its two halves, next already gives the scheduler worker a thread-level tqdm lock (ff58945); the other half, releasing the startup ack queue once the backend is ready, is not covered. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "summary": "Draft - revisit when ready; the tqdm half is on next already, the ack-queue half is not"
   }
 }
