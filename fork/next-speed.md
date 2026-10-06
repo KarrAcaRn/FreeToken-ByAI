@@ -204,6 +204,24 @@ switches it off. Batching does not help either (`--max-running-requests 5
 --cuda-graph-max-bs 5`): one request alone 12.6 tok/s, five at once 11.4 tok/s in total,
 because the union of routed experts grows with the batch. A 4k-token prefill runs at 190 tok/s.
 
+Where the time goes now (per-step timing, 300 tokens, adaptive gate off):
+
+| | step (median) | tokens/step | ms/token | disk experts/step |
+|---|---|---|---|---|
+| plain | 46.5 ms | 1 | 58 | 8.0 |
+| DFlash block 3 | 132 ms (verify 126) | 1.85 | 85 | 25.2 |
+
+About 1.7% of the routed experts come from disk either way, so a verify block reads ~3x
+the experts of a token. In plain decode the disk takes ~25 of 62 ms per token: a layer with
+one disk miss waits 2.9 ms, with two 4.8 ms. The latency is small (a 4 KB read 0.4 ms);
+the cost is that one expert's 2.4 MB (3x800 KB weights, 3x100 KB scales, each block
+contiguous in its layer's shard) sits in one or two 4 MB ceph objects, i.e. on one OSD:
+~3 ms, while ceph serves ~2.1 GB/s in aggregate. Chunked parallel reads of the same range
+barely help (3.1 -> 2.8 ms), and our cephfs key may not set striped file layouts. A
+simulated software striping (each expert as 8x300 KB pieces in 8 different objects, 16
+threads) reads one expert in 1.9 ms and two in 3.1 ms, an estimated 8-10% decode gain; it
+would need a ~23 GB expert-major copy of the tail experts. Parked until new hardware.
+
 ## Not done: options that need a decision
 
 - **DFlash block size.** `--speculative-dflash-block-size 16` (drafter trained at 8):
