@@ -119,7 +119,7 @@ disk tier, the checkpoint on cephfs (no local NVMe):
 
     ft serve --model RadixArk/Qwen3.8-Flash-Next-NVFP4 --text-model-only --max-running-requests 1 \
       --kv-cache-dtype fp8 --moe-disk-tier on --expert-ram-experts 160 --ple-backend disk \
-      --disable-moe-prefill-overlap --cuda-graph-max-bs 0 --online-quant fp8 \
+      --disable-moe-prefill-overlap --disk-tier-graph --cuda-graph-max-bs 1 --online-quant fp8 \
       --expert-profile flash-next-profile.json   # scripts/record_expert_profile.py
 
 Where a decode token went (2.4 tok/s, 128 RAM experts by id): 417 ms per token, 287 ms of it in
@@ -134,6 +134,17 @@ the activated ones miss it.
 | 128 ranked by Strata's profile | 80.9 | 2.69 |
 | 128 ranked by our own coding-prompt profile | 69.8 | 2.99 |
 | 160 ranked (RAM limit: ~2 GB left) | 58.2 | 3.20-3.28 |
+| + all of a layer's disk segments read at once | 58.3 | 4.14 |
+| + `--disk-tier-graph --cuda-graph-max-bs 1` | 58.3 | **4.99** |
+
+After the disk wait, the rest of a token was host work, not data: the GPU ran 31 ms of the
+~460 ms (profiled), PCIe copies ~20 ms; the host issued ~760 memcpys, ~530 launches and
+~1100 syncs per token. Three fixes, each with greedy output identical to the reference:
+the prefill copies only the routed RAM experts (it streamed the whole RAM prefix, ~400 MB
+per layer); a layer's disk misses read all their segments at once (an expert's 9 tensors
+lie scattered in the shard, and the 7 reads used to go one after another); and
+`--disk-tier-graph` moves the per-layer host fetch behind a stream-memop flag handshake with
+a coordinator thread, so the decode runs as a CUDA graph.
 
 Measured and dropped: router lookahead prefetch (next layer's router on this layer's MoE
 input, Strata's `RouterLookahead`): recall 34%, precision 31% on Flash-Next, and on ceph the
