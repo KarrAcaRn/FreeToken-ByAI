@@ -1072,7 +1072,7 @@ class OffloadMoeCache:
         return self.expert_remap[layer_id][topk_ids.long()].to(topk_ids.dtype)
 
     def attach_disk_tier(self, index, ram_experts: int, workers: int = 8,
-                         expert_order: list[list[int]] | None = None) -> None:
+                         expert_order: list[list[int]] | None = None, graph_max_misses: int = 0) -> None:
         """Enable the NVMe tier: disk-resident slot-cache misses are fetched from the
         original checkpoint before the PCIe copy path (see moe/disk_tier.py)."""
         from freetoken.moe.disk_tier import DiskTier
@@ -1081,6 +1081,11 @@ class OffloadMoeCache:
         assert self.quant_format == "nvfp4", f"disk tier v0 supports native nvfp4 banks (got {self.quant_format!r})"
         assert not self.prefill_overlap, "disk tier v0 does not support prefill overlap"
         self._disk_tier = DiskTier(index, self, ram_experts, workers=workers)
+        if graph_max_misses:
+            from freetoken.moe.disk_tier_graph import DiskTierGraphFetch
+
+            self._disk_tier.graph = DiskTierGraphFetch(
+                self._disk_tier, self, self.num_layers, graph_max_misses, self._disk_tier._pool)
         if expert_order is not None:
             from freetoken.moe.expert_profile import new_of_old
 
@@ -1093,8 +1098,10 @@ class OffloadMoeCache:
         assert layer_id is not None, "no staged misses (ensure_experts/materialize_layer first)"
         if self._disk_tier is not None:
             # Fetch this layer's disk-resident misses into their slots, then shrink the
-            # miss list to the RAM-resident remainder for the PCIe copy below.
-            self._disk_tier.fetch_pending(self, layer_id)
+            # miss list to the RAM-resident remainder for the PCIe copy below (the graph
+            # fetch did both on the device already).
+            if self._disk_tier.graph is None:
+                self._disk_tier.fetch_pending(self, layer_id)
         elif layer_id in self._unpinned_layers:
             if not self._pending_whole_layer:
                 raise RuntimeError(

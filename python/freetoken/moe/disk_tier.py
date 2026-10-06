@@ -292,6 +292,8 @@ class DiskTier:
         self._fds: dict[int, tuple[int, bool]] = {}
         self._fetches = 0
         self._fetch_bytes = 0
+        # --disk-tier-graph: the capturable decode fetch (moe/disk_tier_graph.py), else None
+        self.graph = None
         self._decode_verify_steps = 0
         self._map_verify_steps = 0
         self._cache = cache

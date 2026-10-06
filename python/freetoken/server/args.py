@@ -936,6 +936,15 @@ def parse_args(
         ),
     )
     parser.add_argument(
+        "--disk-tier-graph",
+        action="store_true",
+        help=(
+            "With --moe-disk-tier on: fetch decode misses through a CUDA-graph-capturable flag "
+            "handshake with a host coordinator instead of a host sync per MoE layer, which "
+            "lets decode run as CUDA graphs (no --cuda-graph-max-bs 0 needed)."
+        ),
+    )
+    parser.add_argument(
         "--disk-fetch-workers",
         type=int,
         default=ServerArgs.disk_fetch_workers,

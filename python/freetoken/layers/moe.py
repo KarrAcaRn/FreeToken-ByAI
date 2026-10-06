@@ -284,6 +284,8 @@ class OffloadMoELayer(MoELayer):
         if cache.decode_target == "hybrid":
             return self._decode_hybrid(cache, hidden_states, topk_weights, topk_ids)
         cache.ensure_experts(self.layer_id, topk_ids)
+        if cache.disk_tier_enabled and cache._disk_tier.graph is not None:
+            cache._disk_tier.graph.fetch(self.layer_id)
         cache.copy_missing()
         if (cache.disk_tier_enabled and self.layer_id == 0
                 and os.environ.get("FT_DISK_TIER_VERIFY")):

@@ -1124,7 +1124,7 @@ class Engine:
                     "--moe-disk-tier v0 requires the gpu decode path (--moe-strategy offload)")
             if config.moe_prefill_overlap:
                 problems.append("--moe-disk-tier v0 requires --disable-moe-prefill-overlap")
-            if config.cuda_graph_max_bs is None or config.cuda_graph_max_bs >= 1:
+            if not config.disk_tier_graph and (config.cuda_graph_max_bs is None or config.cuda_graph_max_bs >= 1):
                 problems.append(
                     "--moe-disk-tier v0 requires --cuda-graph-max-bs 0 (cuda graphs disabled)")
             if problems:
@@ -1219,7 +1219,9 @@ class Engine:
         if banks.disk_index is not None:
             cache.attach_disk_tier(
                 banks.disk_index, banks.disk_ram_experts,
-                workers=config.disk_fetch_workers, expert_order=banks.disk_expert_order)
+                workers=config.disk_fetch_workers, expert_order=banks.disk_expert_order,
+                graph_max_misses=(config.model_config.num_experts_per_tok * config.max_running_req
+                                  if config.disk_tier_graph else 0))
             logger.info_rank0(
                 f"disk tier: {banks.disk_ram_experts}/{config.model_config.num_experts} "
                 f"experts/layer pinned in RAM; the rest fetched from "
