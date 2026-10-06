@@ -155,6 +155,35 @@ Bigger levers left, both larger projects: 2-3 bit experts (Strata's Q2/IQ2 GGUFs
 would fit RAM + VRAM and drop the disk from decode) and Flash-Next's MTP head for speculative
 decoding (Strata claims 1.6-1.8x).
 
+### DFlash on Flash-Next (`PixelML/Qwen3.8-Flash-Next-NVFP4-DFlash`)
+
+The DeepSpec drafter (5 layers, 1 GB bf16) runs through the DFlash path:
+`--speculative-algorithm dflash --speculative-draft-model-path
+PixelML/Qwen3.8-Flash-Next-NVFP4-DFlash --speculative-dflash-block-size 3`. It needed the
+flat DSpark config and its query-zero shift, hidden-state taps in qwen4_exp (the HC-contracted
+block input of the next layer), QSA verify graphs, a verify mode for the PLE conv history and
+n-gram context (committed after the verify like the GDN states), disk-PLE staging for the
+verify graph, and verify blocks routed through the decode slot cache. Greedy output equals
+plain decode (blocks 2 and 6 byte-identical; block 3 differs in one comment word, a near-tie).
+
+Same coding prompt, 160 RAM experts, `--disk-tier-graph`, adaptive gate off:
+
+| Block (drafts) | tokens/cycle | acceptance | experts/layer (active, missed) | decode tok/s |
+|---|---|---|---|---|
+| plain | 1 | - | 12.5, 3.0 | 4.99 |
+| 2 (1) | 1.88 | 88% | - | 4.25 |
+| 3 (2) | 2.71 | 86% | 19.4, 5.7 | 4.71-4.81 |
+| 6 (5) | 4.11 | 62% | 25.9, 8.1 | 4.21 |
+
+The drafter predicts well, but here a verify costs like its experts: a cycle at block 3 is
+551 ms, 545 of it the verify replay (the draft 3 ms, context store 3 ms, GDN commit 1 ms),
+and every extra token in the block brings new experts to read from ceph. With the defaults
+the adaptive gate measures this and switches speculation off. The verify graph itself takes
+~19 ms of GPU time (len 6, experts resident), so with the experts in RAM (or a disk that
+serves many small reads in parallel) the same acceptance would be a 2-4x decode gain. More
+CPU threads for the reads do not help on 8 vCPUs (48 workers: plain 4.46, block 3 4.17);
+batching an expert's scattered segments through io_uring is the open lever.
+
 ## Not done: options that need a decision
 
 - **DFlash block size.** `--speculative-dflash-block-size 16` (drafter trained at 8):

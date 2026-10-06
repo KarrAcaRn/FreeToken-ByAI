@@ -188,6 +188,8 @@ class DFlashWorker:
     def _draft_input_embeds(self, base_tokens: torch.Tensor) -> torch.Tensor:
         """[B * query_rows, hidden]: each block is its anchor's embedding, then mask tokens."""
         scale = float(getattr(self.config, "input_embedding_scale", 1.0))
+        if self.query_rows == 1:  # a single DSpark query row: the anchor alone
+            return self.target_embed.forward(base_tokens) * scale
         if self._mask_embeds is None:
             mask_ids = torch.full(
                 (self.query_rows - 1,), self.mask_token_id, dtype=torch.int32, device=self.device
