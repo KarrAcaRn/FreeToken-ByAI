@@ -112,7 +112,7 @@ but this is a numerics change, hence opt-in.
 Qwen3.8-27B-NVFP4 has no large bf16 linears (its projections are fp8, its lm_head NVFP4), so
 the option does nothing there.
 
-## Qwen3.8-Flash-Next on 24 GB VRAM + 30 GB RAM
+## Qwen3.8-Flash-Next on 24 GB VRAM + 30 GB RAM (64 GB results below)
 
 `RadixArk/Qwen3.8-Flash-Next-NVFP4` (126 GB: ~68 GB experts, 47.7 GB PLE table) runs with the
 disk tier, the checkpoint on cephfs (no local NVMe):
@@ -183,6 +183,26 @@ the adaptive gate measures this and switches speculation off. The verify graph i
 serves many small reads in parallel) the same acceptance would be a 2-4x decode gain. More
 CPU threads for the reads do not help on 8 vCPUs (48 workers: plain 4.46, block 3 4.17);
 batching an expert's scattered segments through io_uring is the open lever.
+
+### After the RAM upgrade (64 GB, 2026-10-06)
+
+Same recipe, profile re-recorded on the coding prompts (the top 320 experts per layer take
+98.6% of the decode routing), 400 generated tokens:
+
+| Config | decode tok/s |
+|---|---|
+| plain, 160 RAM experts (30 GB box) | 4.99 |
+| plain, 320 RAM experts | **18.6-20.7** |
+| DFlash block 3, 320 RAM experts | 11.7-14.7 |
+| DFlash block 6, 320 RAM experts | 9.7-10.0 |
+| 400 RAM experts | OOM kill (49.5 GB anon RSS) |
+
+320 is the practical limit for 64 GB. With the disk mostly out of decode, plain is 4x
+faster, and DFlash now loses. Not profiled yet; the likely cause is that a verify block still pulls more experts from RAM to VRAM than
+one token does, and that costs more than the accepted drafts save. The adaptive gate
+switches it off. Batching does not help either (`--max-running-requests 5
+--cuda-graph-max-bs 5`): one request alone 12.6 tok/s, five at once 11.4 tok/s in total,
+because the union of routed experts grows with the batch. A 4k-token prefill runs at 190 tok/s.
 
 ## Not done: options that need a decision
 
