@@ -74,6 +74,7 @@ class ServerArgs(SchedulerConfig):
     # prefix-cache hit) alongside usage. Off by default: it is a non-standard field on
     # every protocol we speak.
     enable_metrics_report: bool = False
+    anthropic_inline_system: str = "auto"
     # Comma-separated hostname allowlist for client-supplied image URLs; empty admits any domain.
     allowed_media_domains: str = ""
     # Directory file:// image refs may be read from; empty rejects local files.
@@ -696,6 +697,14 @@ def parse_args(
             "Non-standard on every protocol, hence opt-in. Under concurrency the spans are "
             "this request's share of shared batches, not isolated engine throughput."
         ),
+    )
+
+    parser.add_argument(
+        "--anthropic-inline-system",
+        choices=("auto", "preserve", "fold"),
+        default=ServerArgs.anthropic_inline_system,
+        help="Preserve inline system instructions when supported by the renderer, "
+        "or fold them into nearby user/tool content without hoisting the prompt prefix.",
     )
 
     parser.add_argument(
