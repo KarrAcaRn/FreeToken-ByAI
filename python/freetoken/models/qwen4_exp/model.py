@@ -81,13 +81,18 @@ class Qwen4ExpDecoderLayer(BaseOP):
 
     @nvtx_annotate("Layer_{}", layer_id_field="_layer_id")
     def forward(
-        self, hidden: torch.Tensor, batch: Batch, normed: torch.Tensor | None = None
+        self, hidden: torch.Tensor, batch: Batch, normed: torch.Tensor | None = None,
+        taps: List[torch.Tensor] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor | None]:
+        """``taps``: append this layer's attention block input, the previous layer's output
+        contracted to native width (the hidden state a DFlash drafter reads for it)."""
         if self.ple is not None:
             assert normed is None, "a PLE layer must norm R + ple(R) itself"
             hidden = hidden + self.ple.forward(hidden, batch)
         attn_hc, mlp_hc = self.attn_hyper_connection, self.mlp_hyper_connection
         block_input, inject = attn_hc.mix(hidden, normed)
+        if taps is not None:
+            taps.append(block_input)
         if self._is_linear:
             block_output = self.linear_attn.forward(block_input)
         else:
@@ -131,7 +136,14 @@ class Qwen4ExpModel(BaseOP):
         """The PLE layers in decoder order -- the seam the loader attaches table backends to."""
         return list(self._ple)
 
-    def forward(self, input_ids: torch.Tensor, batch: Batch) -> torch.Tensor:
+    def forward(
+        self, input_ids: torch.Tensor, batch: Batch | None = None, *, return_hidden_layers: set[int] | None = None
+    ) -> torch.Tensor | Tuple[torch.Tensor, List[torch.Tensor]]:
+        """``return_hidden_layers``: also return the outputs of these layers, each contracted to
+        native width by the next mixer's gate (DFlash taps; the last layer's goes through the
+        final mixer)."""
+        if batch is None:
+            batch = get_global_ctx().batch
         hidden = embed_input_ids(self.embed_tokens, input_ids, batch)
         hidden = hidden.repeat(1, self.hc_count)
         meta = None
@@ -142,13 +154,20 @@ class Qwen4ExpModel(BaseOP):
             for ple in self._ple:  # gather the pinned-host PLE rows while the early layers run
                 ple.start_prefetch(batch, meta)
         normed = None
-        for layer in self.layers.op_list:
-            hidden, normed = layer.forward(hidden, batch, normed)
+        taps: List[torch.Tensor] | None = [] if return_hidden_layers else None
+        for i, layer in enumerate(self.layers.op_list):
+            tap = taps if taps is not None and i - 1 in return_hidden_layers else None
+            hidden, normed = layer.forward(hidden, batch, normed, tap)
         if meta is not None:
             # single writer: the layers only read the context, so a second PLE layer's
             # prefetch sees the un-rolled window
             commit_ngram_context(meta, getattr(batch, "fla_metadata", None))
-        return self.hyper_connection_mixer.mix(hidden, normed)[0]
+        out = self.hyper_connection_mixer.mix(hidden, normed)[0]
+        if taps is None:
+            return out
+        if len(self.layers.op_list) - 1 in return_hidden_layers:
+            taps.append(out)
+        return out, taps
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
@@ -164,6 +183,19 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             prefix="lm_head",
         )
         super().__init__()
+
+    def prime_graph_replay(self) -> None:
+        table = getattr(self, "_ple_table", None)
+        if hasattr(table, "prime_graph_replay"):
+            table.prime_graph_replay()
+
+    def dflash_commit_slot_states(
+        self, slot: int, block_rows: int, rows: slice, commit_len: int, tokens: torch.Tensor
+    ) -> None:
+        """After a DFlash graph verify: advance the PLE slot states over the kept tokens
+        (the GDN states are committed by the engine)."""
+        for ple in self.model.ple_layers:
+            ple.dflash_commit(slot, block_rows, rows, commit_len, tokens)
 
     def load_host_tables(self, engine_config) -> int:
         """Attach the PLE n-gram table (pinned checkpoint bank, or zeros for dummy weights); returns the pinned host bytes the engine reserves from its pin budget."""
@@ -240,9 +272,15 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             ple.ple_embedding.attach_table(uva)
         return table.bank.nbytes + (table.scale_bank.nbytes if table.scale_bank is not None else 0)
 
-    def forward(self) -> torch.Tensor:
+    def forward(
+        self, *, return_hidden_layers: set[int] | None = None
+    ) -> torch.Tensor | Tuple[torch.Tensor, List[torch.Tensor]]:
         batch = get_global_ctx().batch
-        return self.lm_head.forward(self.model.forward(batch.input_ids, batch))
+        output = self.model.forward(batch.input_ids, batch, return_hidden_layers=return_hidden_layers)
+        if isinstance(output, tuple):
+            hidden, hidden_states = output
+            return self.lm_head.forward(hidden), hidden_states
+        return self.lm_head.forward(output)
 
 
 class Qwen4ExpForConditionalGeneration(QwenVLVisionMixin, Qwen4ExpForCausalLM):

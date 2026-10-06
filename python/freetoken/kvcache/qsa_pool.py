@@ -45,6 +45,15 @@ class QSAKVCache(MHAKVCache):
     layer's order in the attention backend, same convention as BSAKVCache/DSAKVCache.
     """
 
+    @staticmethod
+    def spec_tokens_for(config) -> int:
+        """Verify-block tokens past the anchor the ring must hold (0 without speculation).
+        A DFlash block size left to the draft checkpoint is bounded by 16 here: the ring
+        rows cost a few KB per request."""
+        if getattr(config, "speculative_algorithm", None) != "dflash":
+            return 0
+        return max(16, getattr(config, "speculative_dflash_block_size", None) or 0)
+
     @classmethod
     def ring_capacity_for(cls, index_ratio: int, num_speculative_tokens: int = 0) -> int:
         """Ring depth: one row per pending position, keyed ``position % capacity``; spec decode widens by the draft depth (vLLM sizing)."""
@@ -191,7 +200,8 @@ class QSAKVCache(MHAKVCache):
             if spec.attn_type is AttnType.QSA:
                 # One index-key row = all index layers at one position.
                 row = spec.index_head_dim * spec.num_index_layers * _INDEX_DTYPE_BYTES
-                fixed += num_req_slots * row * (cls.ring_capacity_for(spec.index_ratio) + 1)
+                fixed += num_req_slots * row * (
+                    cls.ring_capacity_for(spec.index_ratio, cls.spec_tokens_for(config)) + 1)
                 if config.model_config.model_is_mrope:
                     per_token += _ROPE_POS_BYTES
         return per_token * config.page_size, fixed, config.page_size, 0

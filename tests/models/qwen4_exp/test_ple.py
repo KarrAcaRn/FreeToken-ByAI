@@ -699,3 +699,46 @@ def test_decode_graph_replay_matches_eager():
     graph.replay()
     torch.cuda.synchronize()
     assert torch.equal(static_out, replayed)
+
+
+@pytest.mark.parametrize("commit_len", [1, 3, 6])
+def test_dflash_verify_commit_equals_a_plain_prefill(commit_len):
+    """A verify block leaves the slot states alone; committing its first commit_len tokens
+    equals a plain prefill of exactly those tokens (conv history and n-gram context)."""
+    import freetoken.core as core
+    from dataclasses import replace
+
+    from freetoken.core import Context, set_global_ctx
+
+    torch.manual_seed(19)
+    config = _config()
+    args = config.qwen4_args
+    layer = _make_layer(config)
+    pool = _state_pool(config)
+    core._GLOBAL_CTX = None
+    set_global_ctx(Context(page_size=64, linear_state_pool=pool))
+    slot = 2
+    slab = pool.slot_state("ple_conv", args.ple_layer_ids[0])
+    context = pool.slot_state("ple_ngram_ctx")
+    prefix, block = _no_eos_tokens(5), _no_eos_tokens(6, start=40)
+    prefix_meta = _meta([prefix], [[EOS, EOS]], slots=[slot])
+    layer.forward(torch.randn(len(prefix), args.ple_state_width), None, meta=prefix_meta, conv_states=slab)
+    commit_ngram_context(prefix_meta, None, context)
+    before = slab[slot].clone(), context[slot].clone()
+
+    R = torch.randn(len(block), args.ple_state_width)
+    ctx = [prefix[-2:]]
+    verify_meta = replace(_meta([block], ctx, slots=[slot]), verify=True)
+    got = layer.forward(R, None, meta=verify_meta, conv_states=slab)
+    commit_ngram_context(verify_meta, None, context)
+    assert torch.equal(slab[slot], before[0]) and torch.equal(context[slot], before[1])
+    layer.dflash_commit(slot, len(block), slice(0, len(block)), commit_len, torch.tensor(block))
+
+    ref_slab, ref_context = slab.clone(), context.clone()
+    ref_slab[slot], ref_context[slot] = before
+    ref_meta = _meta([block[:commit_len]], ctx, slots=[slot])
+    want = layer.forward(R[:commit_len], None, meta=ref_meta, conv_states=ref_slab)
+    commit_ngram_context(ref_meta, None, ref_context)
+    assert torch.allclose(got[:commit_len], want, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(slab[slot], ref_slab[slot], rtol=1e-5, atol=1e-6)
+    assert torch.equal(context[slot], ref_context[slot])

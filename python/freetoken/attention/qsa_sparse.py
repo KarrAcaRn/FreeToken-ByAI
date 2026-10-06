@@ -551,9 +551,52 @@ class QSASparseAttnBackend(BaseAttnBackend):
         assert batch.active_table_idx is not None, "decode batch is missing its page-table rows"
         self._stage_decode(md, batch.padded_size, batch.active_table_idx.to(torch.int64))
 
+    # ----- CUDA graph (DFlash target verify) ------------------------------------------------
+    dflash_verify_max_bs = 1
+
+    def init_dflash_target_verify_capture_graph(
+        self, max_seq_len: int, shapes: List[tuple[int, int]]
+    ) -> None:
+        """Static ragged metadata per (bs, verify_len): every request verifies verify_len
+        tokens, so the token map and the indptr are constants; the per-request rows are
+        staged before each replay. The scratch comes from the graph pool."""
+        dev = self.device
+        pages = -(-get_global_ctx().page_table.shape[1] // self.page_size)
+        self._verify_md: dict[tuple[int, int], QSASparseMetadata] = {}
+        for bs, n in shapes:
+            indptr = torch.arange(0, (bs + 1) * n, n, dtype=torch.int32)
+            self._verify_md[bs, n] = QSASparseMetadata(
+                is_decode=False,
+                last_indices=(indptr[1:] - 1).to(dev),
+                qo_indptr_cpu=indptr.pin_memory(),
+                kv_len_cpu=torch.full((bs,), n, **_CPU_PINNED),
+                token_to_req=torch.arange(bs, dtype=torch.int32, device=dev).repeat_interleave(n),
+                cu_seqlens=indptr.to(dev),
+                seq_lens=torch.full((bs,), n, dtype=torch.int32, device=dev),
+                ring_slots=torch.zeros(bs, dtype=torch.int32, device=dev),
+                block_table=torch.zeros((bs, pages), dtype=torch.int32, device=dev),
+            )
+
+    def prepare_for_dflash_target_verify_capture(self, batch: Batch, verify_len: int) -> None:
+        md = self._verify_md[batch.size, verify_len]
+        md.ring_slots.fill_(batch.padded_reqs[0].table_idx)
+        md.block_table.copy_(self._block_table(md.ring_slots.to(torch.int64)))
+        md.cmp_rows = None
+        batch.attn_metadata = md
+
+    def prepare_for_dflash_target_verify_replay(self, batch: Batch, verify_len: int) -> None:
+        live = batch.attn_metadata
+        assert isinstance(live, QSASparseMetadata) and not live.is_decode
+        md = self._verify_md[batch.size, verify_len]
+        md.seq_lens.copy_(live.seq_lens)
+        md.ring_slots.copy_(live.ring_slots)
+        md.block_table.copy_(live.block_table)
+        batch.attn_metadata = md
+
     def reset_capture(self) -> None:
         super().reset_capture()
         self._graph = {}
+        self._verify_md = {}
 
 
 __all__ = ["QSASparseAttnBackend", "QSASparseMetadata"]

@@ -183,6 +183,9 @@ class Batch:
     # the prefix-cache hit -- matching SGLang's #new-token / #cached-token. Set by the
     # PrefillManager; 0 on decode batches.
     log_new_tokens: int = field(default=0, init=False)
+    # DFlash verify: a short prefill-phase block whose offloaded MoE layers take the decode
+    # slot cache (hits stay resident) instead of streaming every routed expert in
+    moe_decode_path: bool = field(default=False, init=False)
     log_cached_tokens: int = field(default=0, init=False)
     # (uid, complete prompt length, prefix-cache hit) for requests entering their first
     # prepared prefill batch. The scheduler turns these into PromptAdmittedMsg only AFTER

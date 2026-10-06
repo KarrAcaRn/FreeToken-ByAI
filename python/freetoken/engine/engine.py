@@ -1220,7 +1220,9 @@ class Engine:
             cache.attach_disk_tier(
                 banks.disk_index, banks.disk_ram_experts,
                 workers=config.disk_fetch_workers, expert_order=banks.disk_expert_order,
+                # a DFlash verify routes its whole block through the decode slot cache
                 graph_max_misses=(config.model_config.num_experts_per_tok * config.max_running_req
+                                  * (self.dflash_worker.block_size if self.dflash_worker else 1)
                                   if config.disk_tier_graph else 0))
             logger.info_rank0(
                 f"disk tier: {banks.disk_ram_experts}/{config.model_config.num_experts} "
@@ -1752,6 +1754,7 @@ class Engine:
                 r.append_host(drafts_cpu[b])  # the anchor is input_ids' last token already
                 r.device_len = old_cached[b] + verify_len
             batch.phase = "prefill"
+            batch.moe_decode_path = self.moe_offload_cache is not None
             batch.padded_reqs = reqs
             batch.input_ids = verify_input.view(-1)
             batch.positions = torch.cat([
@@ -1770,7 +1773,7 @@ class Engine:
                 batch, verify_len
             ) and self.graph_runner.can_return_hidden_layers(worker.target_layer_ids):
                 try:
-                    with self.ctx.forward_batch(batch):
+                    with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, True):
                         result = self.graph_runner.replay_dflash_target_verify(
                             batch,
                             verify_len,
@@ -1790,6 +1793,7 @@ class Engine:
                     if pool is not None:
                         # the graph verify left the slots untouched: advance each over its kept tokens
                         conv, mixed, ab = result[2]
+                        commit_slot_states = getattr(self.model, "dflash_commit_slot_states", None)
                         for b, (out, _) in enumerate(results):
                             rows = slice(row_base[b], row_base[b] + verify_len)
                             commit_len = out.numel() - 1
@@ -1797,6 +1801,9 @@ class Engine:
                                 pool, self._dflash_slot_tensor(gdn_slots[b]),
                                 (conv[rows], mixed[:, rows], ab[:, :, rows]), commit_len,
                             )
+                            if commit_slot_states is not None:
+                                commit_slot_states(gdn_slots[b], n_req * verify_len, rows, commit_len,
+                                                   verify_input[b])
                     verified_with_graph = True
                 except RuntimeError as exc:
                     if n_req > 1:

@@ -209,8 +209,17 @@ class DiskRowTable:
             ))
             for req in batch.padded_reqs
         ]
-        self.fill(runs, graph=False)
+        # a DFlash graph verify: a multi-token block whose tokens are all on the host already
+        self.fill(runs, graph=use_graph)
         return None
+
+    def prime_graph_replay(self) -> None:
+        """Release the next captured lookup without a fill (timing replays of capture inputs)."""
+        if self._wait_sync:
+            from freetoken.kernel.row_store import signal
+
+            self._graph_consumed.synchronize()
+            signal(self._flag)
 
     @contextmanager
     def forward_host_ctx(self, batch: Batch, use_graph: bool):

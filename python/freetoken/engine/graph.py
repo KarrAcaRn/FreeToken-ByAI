@@ -316,6 +316,9 @@ class GraphRunner:
         # verify len -> plain decode time / verify time, for the adaptive gate's baseline
         self.dflash_plain_over_verify: Dict[int, float] = {}
         self._plain_decode_ms: float | None = None
+        # a model whose graphs wait on a host fill (disk PLE) releases that wait for the
+        # timing replays, which run on the capture inputs with no fill
+        self._prime_replay = getattr(model, "prime_graph_replay", None)
         self._capture_graphs(max_seq_len, vocab_size, model)
 
     def _reset_moe_offload_cache(self) -> None:
@@ -477,11 +480,15 @@ class GraphRunner:
 
     def _time_replay(self, graph: torch.cuda.CUDAGraph, iters: int = 10) -> float:
         """Median ms of a captured graph replayed on its own (dummy) capture inputs."""
+        prime = self._prime_replay or (lambda: None)
+        prime()
         graph.replay()  # warm
+        self.stream.synchronize()  # a primed wait must be consumed before the next prime
         times = []
         for _ in range(iters):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
+            prime()
             start.record(self.stream)
             graph.replay()
             end.record(self.stream)

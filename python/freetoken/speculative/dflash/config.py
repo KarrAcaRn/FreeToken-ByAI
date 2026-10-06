@@ -44,6 +44,9 @@ class DFlashConfig:
     conv_group_size: int | None = None
     selector_rank: int | None = None
     selector_top_k: int | None = None
+    # DeepSpec "DSpark" drafters (PixelML, flat config): the anchor row predicts the next
+    # token too, so K query rows (anchor + K-1 masks) give K drafts; z-lab drops row 0.
+    query_zero_predicts_next: bool = False
 
     @property
     def is_dflash2(self) -> bool:
@@ -76,6 +79,15 @@ class DFlashConfig:
         else:
             cfg = hf_config.to_dict() if hasattr(hf_config, 'to_dict') else vars(hf_config)
         dflash_cfg = cfg.get("dflash_config", {})
+        dspark = "Qwen3DSparkModel" in (cfg.get("architectures") or []) or "markov_rank" in cfg
+        if dspark:
+            # block_size there counts query rows; ours is the verify block (anchor + drafts)
+            dflash_cfg = {
+                "block_size": cfg.get("block_size", 7) + 1,
+                "mask_token_id": cfg.get("mask_token_id", 248077),
+                "target_layer_ids": cfg.get("target_layer_ids"),
+                **dflash_cfg,
+            }
         layer_types = cfg.get("layer_types", [])
         rope_params = cfg.get("rope_parameters", {})
         target_layer_ids = dflash_cfg.get("target_layer_ids")
@@ -108,4 +120,5 @@ class DFlashConfig:
             conv_group_size=dflash_cfg.get("conv_group_size"),
             selector_rank=dflash_cfg.get("selector_rank"),
             selector_top_k=dflash_cfg.get("selector_top_k"),
+            query_zero_predicts_next=dspark,
         )

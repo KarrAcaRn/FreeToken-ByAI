@@ -40,6 +40,10 @@ class DFlashWorker:
             self.config.block_size = block_size
 
         self.block_size = self.config.block_size
+        # draft query rows per block: z-lab's block includes the anchor row it then drops;
+        # a DSpark drafter (query_zero_predicts_next) reads drafts from every row
+        self._shift = 0 if self.config.query_zero_predicts_next else 1
+        self.query_rows = self.block_size - 1 + self._shift
         self.mask_token_id = self.config.mask_token_id
         self.target_layer_ids = set(self.config.target_layer_ids)
         self.device = device
@@ -78,7 +82,7 @@ class DFlashWorker:
         self._free_slots = list(range(num_context_slots))
         self._mask_embeds: torch.Tensor | None = None
         self._draft_input_storage: torch.Tensor | None = None
-        self._position_offsets = torch.arange(self.block_size, dtype=torch.int32, device=device)
+        self._position_offsets = torch.arange(self.query_rows, dtype=torch.int32, device=device)
         # The verify graphs keep, per verified token, its logits, the hidden states the draft
         # reads and (GDN targets) the conv state and recurrence inputs the commit replays. Hold
         # that memory now, before the KV pool is sized; the graph capture takes it over.
@@ -182,24 +186,25 @@ class DFlashWorker:
         return logits
 
     def _draft_input_embeds(self, base_tokens: torch.Tensor) -> torch.Tensor:
-        """[B * block_size, hidden]: each block is its anchor's embedding, then mask tokens."""
+        """[B * query_rows, hidden]: each block is its anchor's embedding, then mask tokens."""
         scale = float(getattr(self.config, "input_embedding_scale", 1.0))
         if self._mask_embeds is None:
             mask_ids = torch.full(
-                (self.block_size - 1,), self.mask_token_id, dtype=torch.int32, device=self.device
+                (self.query_rows - 1,), self.mask_token_id, dtype=torch.int32, device=self.device
             )
             self._mask_embeds = (self.target_embed.forward(mask_ids) * scale).detach()
         n = base_tokens.numel()
         storage = self._draft_input_storage
-        if storage is None or storage.shape[0] < n * self.block_size:
+        rows = self.query_rows
+        if storage is None or storage.shape[0] < n * rows:
             hidden = self._mask_embeds.shape[1]
             storage = torch.empty(
-                (n * self.block_size, hidden), dtype=self._mask_embeds.dtype, device=self.device
+                (n * rows, hidden), dtype=self._mask_embeds.dtype, device=self.device
             )
-            storage.view(n, self.block_size, hidden)[:, 1:].copy_(self._mask_embeds)
+            storage.view(n, rows, hidden)[:, 1:].copy_(self._mask_embeds)
             self._draft_input_storage = storage
-        embeds = storage[: n * self.block_size]
-        embeds.view(n, self.block_size, -1)[:, 0].copy_(self.target_embed.forward(base_tokens) * scale)
+        embeds = storage[: n * rows]
+        embeds.view(n, rows, -1)[:, 0].copy_(self.target_embed.forward(base_tokens) * scale)
         return embeds
 
     def draft(
@@ -221,8 +226,9 @@ class DFlashWorker:
         pos = (self._position_offsets[None, :] + torch.tensor(
             positions, dtype=torch.int32, device=self.device)[:, None]).reshape(-1)
         hidden = self.draft_model.forward(embeds, pos, [self.context.all_layer_kv(s) for s in slots])
-        # position 0 of each block is the anchor; 1..bs-1 are the candidates
-        hidden = hidden.view(n, bs, -1)[:, 1:]
+        # z-lab: row 0 is the anchor, rows 1..bs-1 the candidates; DSpark: row j predicts
+        # the token after anchor + j, so every row is a candidate
+        hidden = hidden.view(n, self.query_rows, -1)[:, self._shift:]
         logits = self.draft_logits(hidden.reshape(n * (bs - 1), -1)).view(n, bs - 1, -1)
         rows = [request_sampling_args(sampling_args, b) for b in range(n)]
         sampled = [r is not None and r.temperatures is not None for r in rows]
