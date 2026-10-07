@@ -274,6 +274,21 @@ def test_runtime_identity_route_is_loopback_only_and_fails_closed_when_unbound()
     assert missing.json() == {"error": "runtime identity is not bound"}
 
 
+def test_runtime_identity_still_requires_the_api_key_on_loopback(monkeypatch):
+    from freetoken.server import api_server
+
+    state = _state()
+    state.runtime_identity = build_runtime_identity_snapshot(state, [])
+    monkeypatch.setattr(api_server, "_GLOBAL_STATE", state)
+    monkeypatch.setattr(api_server, "_API_KEY", "sekrit")
+    client = TestClient(api_server.app, client=("127.0.0.1", 50000))
+
+    assert client.get("/v1/runtime/identity").status_code == 401
+    ok = client.get("/v1/runtime/identity", headers={"Authorization": "Bearer sekrit"})
+    assert ok.status_code == 200
+    assert ok.json()["correlation"]["launch_nonce"] == "runtime_nonce_123456"
+
+
 def test_loopback_proxy_preserves_remote_client_for_admin_authorization():
     state = FrontendManager(
         config=SimpleNamespace(served_model_name="model-a", launch_nonce=None),
@@ -402,6 +417,9 @@ def test_run_api_server_binds_identity_after_worker_spawn(monkeypatch):
         server_host="127.0.0.1",
         server_port=1919,
         cors_origins="",
+        api_key=None,
+        ssl_certfile="/certs/server.pem",
+        ssl_keyfile="/certs/server.key",
         zmq_frontend_addr="inproc://frontend",
         zmq_tokenizer_addr="inproc://tokenizer",
         frontend_create_tokenizer_link=True,
@@ -428,5 +446,7 @@ def test_run_api_server_binds_identity_after_worker_spawn(monkeypatch):
         assert observed["uvicorn_kwargs"]["forwarded_allow_ips"] == list(
             api_server._TRUSTED_PROXY_HOSTS
         )
+        assert observed["uvicorn_kwargs"]["ssl_certfile"] == "/certs/server.pem"
+        assert observed["uvicorn_kwargs"]["ssl_keyfile"] == "/certs/server.key"
     finally:
         api_server._GLOBAL_STATE = prior

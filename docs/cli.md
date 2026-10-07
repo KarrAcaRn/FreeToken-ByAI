@@ -46,7 +46,7 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--dist-port` | `--port` + 1 | Internal TP rendezvous port (loopback-only regardless of `--host`) |
 | `--ssl-certfile` | disabled | PEM certificate chain for HTTPS; requires `--ssl-keyfile` |
 | `--ssl-keyfile` | disabled | PEM private key for HTTPS; requires `--ssl-certfile` |
-| `--launch-nonce` | unset | Optional non-secret local-supervisor correlation token, echoed only by loopback `/v1/runtime/identity` |
+| `--launch-nonce` | unset | Optional non-secret local-supervisor correlation token, echoed only by loopback `/v1/runtime/identity` (which also requires `--api-key` when set) |
 | `--gpu` | GPU 0 | GPU to run on: a UUID from `nvidia-smi -L` or an `nvidia-smi` index; see [below](#choosing-a-gpu) |
 | `--max-running-requests` | 4 | Max concurrently running requests |
 | `--max-output-tokens` | 32768 | Default output budget for requests that omit one |
