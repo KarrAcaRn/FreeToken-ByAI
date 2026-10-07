@@ -162,6 +162,13 @@ def _fake_cache():
     return cache
 
 
+@pytest.fixture(autouse=True)
+def _unpinned_without_cuda(monkeypatch):
+    # The batched-fetch arena pins its halves (cudaHostRegister); on CPU the reads work unpinned.
+    if not torch.cuda.is_available():
+        monkeypatch.setattr(HostBank, "pin", lambda self, *a, **k: None)
+
+
 def _tier(checkpoint, cache, ram_experts=2):
     index = _index(checkpoint)
     tier = DiskTier(index, cache, ram_experts=ram_experts, workers=2)
