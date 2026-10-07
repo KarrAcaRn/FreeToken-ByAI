@@ -57,6 +57,16 @@ def _e2m1_byte_f16_x2pow_neg14(packed):
 
 
 @triton.jit
+def _e2m1_code_f32(code):
+    """One e2m1 code (int32, 0..15) -> its fp32 value, by bit placement instead of a LUT gather:
+    sign -> fp16 bit 15, exponent|mantissa -> bits 11..9 gives value * 2^-14 (exp 0 lands on the
+    fp16 subnormals), exact. A gather from a global LUT made triton 3.8 shuffle the pointer tile
+    through shared memory on every code (2x slower decode GEMV on sm_89)."""
+    bits = ((code & 0x8) << 12) | ((code & 0x7) << 9)
+    return bits.to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32) * 16384.0
+
+
+@triton.jit
 def _decode_nvfp4_moe_kernel(
     a_ptr,             # [M, K] activations (compute dtype)
     packed_ptr,        # [S, N, K // 2] uint8
@@ -151,7 +161,6 @@ def _decode_nvfp4_marlin_kernel(
     c_ptr,             # [M, TOP_K, N] output (compute dtype)
     topk_weights_ptr,  # [M, TOP_K] fp32
     topk_ids_ptr,      # [M, TOP_K] int32 -> cache slot
-    lut_ptr,           # [16] fp32
     total_routes,
     N,
     K,
@@ -222,7 +231,7 @@ def _decode_nvfp4_marlin_kernel(
         acc_w = tl.zeros((BLOCK_SIZE_KW, BLOCK_SIZE_N), dtype=tl.float32)
         for j in tl.static_range(8):
             code = (word >> (4 * j)) & 0xF
-            b = tl.load(lut_ptr + code)
+            b = _e2m1_code_f32(code)
             a_j = tl.load(a_base + (kbase + j) * stride_ak, mask=w_mask, other=0.0).to(tl.float32)
             acc_w += a_j[:, None] * b
         partial += acc_w * scale
