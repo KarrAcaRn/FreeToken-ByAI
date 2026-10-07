@@ -35,7 +35,7 @@ classifiers = [
 # resolve, tight enough to bar a silent breaking bump). These ranges are the contract;
 # there is no lockfile.
 dependencies = [
-    "apache-tvm-ffi==0.1.13.post3", # pin it
+    "apache-tvm-ffi==0.1.14.post1", # pin it
     "einops>=0.8,<1",
     "fastapi>=0.115,<1",
     # slot_cache: the device-side LRU admission kernel behind the MoE expert cache.
@@ -44,8 +44,8 @@ dependencies = [
     "huggingface_hub>=1.5,<2",
     "msgpack>=1.1,<2",
     "modelscope>=1.37,<2",
-    # ceiling: numba (via flashlib) needs numpy<2.5
-    "numpy>=2.0,<2.5",
+    # ceiling: numba (via flashlib) needs numpy<2.6
+    "numpy>=2.0,<2.6",
     "openai>=2.0,<3",
     "partial-json-parser>=0.2,<1",
     "pillow>=10,<13",
@@ -79,7 +79,7 @@ dev = ["pytest>=6.0"]
 # Native fused-kernel packages. Without them the runtime falls back to the pure-Triton
 # kernels in freetoken.kernel.triton (and the 'triton' attention backend). Install
 # `freetoken[accel]` for the full native fast path.
-fi = ["flashinfer-python[cu13]==0.6.18.post1"]
+fi = ["flashinfer-python[cu13]==0.7.0.post1"]
 # renamed from sgl-kernel at 0.4; still imports as `sgl_kernel`, so never co-install both
 sgl = ["sglang-kernel==0.4.9"]
 accel = ["freetoken[fi,sgl]"]
