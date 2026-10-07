@@ -63,6 +63,8 @@ class Req:
     mm_items: list | None = None
     mrope_positions_full: torch.Tensor | None = None  # [3, prompt_len] int32, CPU
     mrope_delta: int = 0
+    # The whole prompt's length; 0 = this request's input_ids (a ChunkedReq's end at its chunk).
+    prompt_len: int = 0
 
     # --- hybrid-radix (GDN linear-state) per-request slots; None for non-hybrid models or
     # until allocated from LinearStatePool. Set by the scheduler (P2). ---
@@ -100,10 +102,9 @@ class Req:
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
         self.device_len = len(self.input_ids)
-        # Generated tokens live at token_pool[table_idx, prompt_len:device_len]. A ChunkedReq
-        # sees only a prompt prefix here, but it is never sampled, so no penalty reads it.
-        self.prompt_len = self.device_len
         self.max_device_len = len(self.input_ids) + self.output_len
+        # Generated tokens live at token_pool[table_idx, prompt_len:device_len] (penalties).
+        self.prompt_len = self.prompt_len or self.device_len
         assert 0 <= self.cached_len < self.device_len <= self.max_device_len
         self._alloc_ids_buf()
 
