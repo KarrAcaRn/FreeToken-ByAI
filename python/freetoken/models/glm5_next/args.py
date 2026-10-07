@@ -120,7 +120,10 @@ def load_args(hf_config: Any) -> Glm5NextArgs:
     text = _get(hf_config, "text_config", hf_config)
 
     num_layers = int(text.num_hidden_layers)
-    layer_types = tuple(_get(text, "layer_types", ()) or ())
+    # transformers >= 5.19 remaps deepseek_sparse_attention to indexed_attention on load
+    layer_types = tuple(
+        DSA_LAYER if t == "indexed_attention" else t for t in (_get(text, "layer_types", ()) or ())
+    )
     if not layer_types:
         raise ValueError("glm5_next config is missing layer_types")
     if len(layer_types) != num_layers:

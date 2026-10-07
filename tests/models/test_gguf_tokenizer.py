@@ -80,10 +80,7 @@ def test_gguf_user_defined_tokens_preserve_atomic_vocab_ids(monkeypatch):
     def fake_convert_gguf_tokenizer(_arch, _tok_dict):
         return backend, {}
 
-    monkeypatch.setattr(
-        "transformers.integrations.ggml.convert_gguf_tokenizer",
-        fake_convert_gguf_tokenizer,
-    )
+    monkeypatch.setattr(gguf_tokenizer, "_convert_gguf_tokenizer", fake_convert_gguf_tokenizer)
 
     tokenizer = gguf_tokenizer.load_gguf_tokenizer("synthetic.gguf")
 

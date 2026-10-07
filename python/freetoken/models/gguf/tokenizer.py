@@ -14,23 +14,39 @@ from tokenizers import AddedToken
 
 from .reader import gguf_architecture, load_gguf_metadata
 
-# GGUF architecture -> transformers GGUF tokenizer-converter key.
+# GGUF architecture -> converter key of transformers < 5.19 (integrations.ggml); the
+# integrations.gguf converter of 5.19+ takes the GGUF architecture as is.
 _TOKENIZER_ARCH = {"gemma4": "gemma4_text"}
+
+
+def _convert_gguf_tokenizer(arch: str, tok_dict: dict):
+    """``tok_dict``: the ``tokenizer.ggml.*`` metadata with that prefix stripped."""
+    try:
+        from transformers.integrations.gguf import GGUF_TOKENIZER_MAPPING, convert_gguf_tokenizer
+    except ImportError:
+        from transformers.integrations.ggml import convert_gguf_tokenizer
+
+        return convert_gguf_tokenizer(_TOKENIZER_ARCH.get(arch, arch), tok_dict)
+    # 5.19+ reads transformers' own names for these keys (ggml.model -> tokenizer_type, ...)
+    renamed = {
+        name: tok_dict[key[len("ggml."):]]
+        for key, name in GGUF_TOKENIZER_MAPPING["tokenizer"].items()
+        if key.startswith("ggml.") and key[len("ggml."):] in tok_dict
+    }
+    return convert_gguf_tokenizer(arch, renamed)
 
 
 def load_gguf_tokenizer(model_path: str):
     from transformers import PreTrainedTokenizerFast
-    from transformers.integrations.ggml import convert_gguf_tokenizer
 
     meta = load_gguf_metadata(model_path)
     arch = gguf_architecture(model_path)
-    conv_arch = _TOKENIZER_ARCH.get(arch, arch)
     tok_dict: dict[str, Any] = {
         k[len("tokenizer.ggml.") :]: v
         for k, v in meta.items()
         if k.startswith("tokenizer.ggml.")
     }
-    fast, _extra = convert_gguf_tokenizer(conv_arch, tok_dict)
+    fast, _extra = _convert_gguf_tokenizer(arch, tok_dict)
 
     tokens = tok_dict["tokens"]
 
