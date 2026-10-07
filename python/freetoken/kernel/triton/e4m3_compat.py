@@ -169,6 +169,16 @@ def e4m3_u8_to_f16_x128(v):
 
 
 @jit
+def e2m1_code_f32(code):
+    """One e2m1 (FP4) code, int32 0..15, -> its fp32 value. Bit placement instead of a LUT
+    gather: sign -> fp16 bit 15, exponent|mantissa -> bits 11..9 is the value x 2^-14 (exp 0
+    lands on the fp16 subnormals), exact. A gather from a global LUT made triton 3.8 shuffle
+    the pointer tile through shared memory on every code (2x slower decode GEMV on sm_89)."""
+    bits = ((code & 0x8) << 12) | ((code & 0x7) << 9)
+    return bits.to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32) * 16384.0
+
+
+@jit
 def e4m3_to_f16_x128(raw):
     """An e4m3 value as a branched kernel loads it (fp8 on sm_89+, its uint8 bits
     before) -> fp16 pre-scaled by 128, the same value on both."""

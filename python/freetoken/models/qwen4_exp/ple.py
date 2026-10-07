@@ -161,14 +161,7 @@ class PinnedUVATable:
         self._device = device or torch.device("cuda", torch.cuda.current_device())
         # WDDM maps registered host memory at a different device address; on Linux/UVA this is data_ptr
         self._table_ptr = device_ptr(weight)
-        if scales is not None:
-            from freetoken.kernel.triton.nvfp4_dequant import _e2m1_lut
-
-            self._scales_ptr: int | None = device_ptr(scales)
-            self._lut = _e2m1_lut(self._device.index)
-        else:
-            self._scales_ptr = None
-            self._lut = None
+        self._scales_ptr: int | None = device_ptr(scales) if scales is not None else None
         self._stream = torch.cuda.Stream(device=self._device) if prefetch else None
         self._staging: torch.Tensor | None = None
         self._graph_staging: dict[int, torch.Tensor] = {}
@@ -201,7 +194,6 @@ class PinnedUVATable:
             self.scale,
             self._is_fp8,
             self._scales_ptr,
-            self._lut,
         )
 
     def prefetch(self, row_ids: torch.Tensor) -> None:

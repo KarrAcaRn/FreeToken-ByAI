@@ -18,27 +18,13 @@ more precise than the reference's FP8-activation path.
 
 from __future__ import annotations
 
-import functools
 
 import torch
 import triton
 import triton.language as tl
 
 from freetoken.kernel.triton.dsv4.fp8_linear import _log2_ceil
-from freetoken.kernel.triton.e4m3_compat import e4m3_native_cx, round_e4m3
-
-_E2M1_VALUES = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
-]
-
-
-@functools.lru_cache(maxsize=None)
-def _e2m1_lut(device_index: int) -> torch.Tensor:
-    return torch.tensor(
-        _E2M1_VALUES, dtype=torch.float32, device=torch.device("cuda", device_index)
-    )
-
+from freetoken.kernel.triton.e4m3_compat import e2m1_code_f32, e4m3_native_cx, round_e4m3
 
 @triton.jit
 def _decode_dsfp4_moe_kernel(
@@ -48,7 +34,6 @@ def _decode_dsfp4_moe_kernel(
     c_ptr,             # [M, TOP_K, N] output (compute dtype)
     topk_weights_ptr,  # [M, TOP_K] fp32
     topk_ids_ptr,      # [M, TOP_K] int32 -> cache slot
-    lut_ptr,           # [16] fp32
     total_routes,
     N,
     K,
@@ -99,8 +84,8 @@ def _decode_dsfp4_moe_kernel(
         byte_idx = kb_start * BLOCK_SIZE_KB + offs_kb
         p_ptrs = packed_slot + offs_n[:, None] * stride_pn + byte_idx[None, :] * stride_pkb
         bytes_ = tl.load(p_ptrs, mask=n_mask[:, None], other=0).to(tl.int32)
-        b_lo = tl.load(lut_ptr + (bytes_ & 0xF))
-        b_hi = tl.load(lut_ptr + ((bytes_ >> 4) & 0xF))
+        b_lo = e2m1_code_f32(bytes_ & 0xF)
+        b_hi = e2m1_code_f32((bytes_ >> 4) & 0xF)
 
         # One exp2 per (n, 16-byte scale block) instead of per element (the scale is
         # constant over each 16-byte run): ~16x fewer SFU ops -> ~1.6x throughput.
@@ -322,5 +307,4 @@ __all__ = [
     "_prefill_dsfp4_moe_kernel",
     "_swiglu_kernel",
     "fused_swiglu",
-    "_e2m1_lut",
 ]

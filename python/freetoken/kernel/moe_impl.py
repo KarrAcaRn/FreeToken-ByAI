@@ -433,21 +433,6 @@ def gpt_oss_fused_routing(
     return topk_weights, topk_ids
 
 
-_FP4_LUT_FLOATS = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
-]
-_fp4_lut_cache: Dict[Any, "torch.Tensor"] = {}
-
-
-def get_fp4_lut(device: "torch.device") -> torch.Tensor:
-    cached = _fp4_lut_cache.get(device)
-    if cached is None:
-        cached = torch.tensor(_FP4_LUT_FLOATS, dtype=torch.float32, device=device)
-        _fp4_lut_cache[device] = cached
-    return cached
-
-
 def mxfp4_splitk_gemv_triton(
     x: torch.Tensor,
     w_blocks_t: torch.Tensor,
@@ -483,11 +468,10 @@ def mxfp4_splitk_gemv_triton(
     bias_stride = bias.stride(0) if has_bias else 0
     k_groups = K // 32
     kgps = triton.cdiv(k_groups, num_splits)
-    lut = get_fp4_lut(x.device)
 
     grid = (triton.cdiv(N, block_n), routes * num_splits)
     mxfp4_splitk_gemv_kernel[grid](
-        x, w_blocks_t, w_scales_t, bias_arg, expert_ids, partial, lut, N, K,
+        x, w_blocks_t, w_scales_t, bias_arg, expert_ids, partial, N, K,
         stride_xe, w_blocks_t.stride(0), w_blocks_t.stride(1),
         w_scales_t.stride(0), w_scales_t.stride(1), bias_stride, N,
         HAS_BIAS=has_bias, BLOCK_N=block_n,  # type: ignore

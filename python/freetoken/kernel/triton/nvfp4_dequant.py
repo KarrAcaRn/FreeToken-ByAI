@@ -1,26 +1,11 @@
 from __future__ import annotations
 
-import functools
 
 import torch
 import triton
 import triton.language as tl
 
-from freetoken.kernel.triton.e4m3_compat import e4m3_kernel_view, e4m3_native_cx, e4m3_u8_to_f32
-
-# E2M1 (NVFP4) value table indexed by the 4-bit code.
-_E2M1_VALUES = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
-]
-
-
-@functools.lru_cache(maxsize=None)
-def _e2m1_lut(device_index: int) -> torch.Tensor:
-    return torch.tensor(
-        _E2M1_VALUES, dtype=torch.float32, device=torch.device("cuda", device_index)
-    )
-
+from freetoken.kernel.triton.e4m3_compat import e2m1_code_f32, e4m3_kernel_view, e4m3_native_cx, e4m3_u8_to_f32
 
 @triton.jit
 def _dequant_nvfp4_kernel(
@@ -29,7 +14,6 @@ def _dequant_nvfp4_kernel(
     global_ptr,      # [S, OUT] fp16 per-output-row global scale (weight_scale_2)
     slots_ptr,       # [N] int32 -> cache slot for each output expert
     out_ptr,         # [N, OUT, IN] compute dtype
-    lut_ptr,         # [16] float32 E2M1 values
     OUT: tl.constexpr,
     IN: tl.constexpr,
     IN_PACKED: tl.constexpr,   # IN // 2
@@ -60,8 +44,8 @@ def _dequant_nvfp4_kernel(
 
     lo = bytes_ & 0xF
     hi = (bytes_ >> 4) & 0xF
-    val_lo = tl.load(lut_ptr + lo)
-    val_hi = tl.load(lut_ptr + hi)
+    val_lo = e2m1_code_f32(lo)
+    val_hi = e2m1_code_f32(hi)
 
     # The two nibbles in a byte (elements 2b, 2b+1) always share one 16-wide block.
     scale_idx = byte_off // 8
@@ -120,7 +104,6 @@ def dequant_nvfp4(
         global_cache,
         slots,
         out,
-        _e2m1_lut(packed_cache.device.index),
         OUT=OUT,
         IN=IN,
         IN_PACKED=IN_PACKED,

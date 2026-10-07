@@ -19,7 +19,6 @@ from freetoken.kernel.triton.e4m3_compat import e4m3_kernel_view
 from freetoken.kernel.triton.nvfp4_fused_moe import (
     _decode_nvfp4_marlin_kernel,
     _decode_nvfp4_moe_kernel,
-    _e2m1_lut,
     _prefill_nvfp4_moe_kernel,
 )
 from freetoken.layers import gated_act_and_mul
@@ -73,7 +72,6 @@ def _decode_gemm(
     grid = (total_routes, triton.cdiv(N, _DECODE_BLOCK_N))
     _decode_nvfp4_moe_kernel[grid](
         a, packed, scale, glob, c, topk_weights, topk_ids,
-        _e2m1_lut(a.device.index),
         total_routes, N, K,
         a.stride(0), a.stride(1),
         packed.stride(0), packed.stride(1), packed.stride(2),
