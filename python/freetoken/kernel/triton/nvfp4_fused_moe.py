@@ -27,43 +27,20 @@ one contiguous tile, split into the even and odd k the two nibbles of a byte mul
 
 from __future__ import annotations
 
-import functools
 
-import torch
 import triton
 import triton.language as tl
 
-from freetoken.kernel.triton.e4m3_compat import e4m3_native_cx, e4m3_to_f16_x128, e4m3_u8_to_f32
+from freetoken.kernel.triton.e4m3_compat import (
+    e2m1_code_f32, e4m3_native_cx, e4m3_to_f16_x128, e4m3_u8_to_f32,
+)
 from freetoken.kernel.triton.nvfp4_linear import _nvfp4_pair_f16
-
-_E2M1_VALUES = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
-]
-
-
-@functools.lru_cache(maxsize=None)
-def _e2m1_lut(device_index: int) -> torch.Tensor:
-    return torch.tensor(
-        _E2M1_VALUES, dtype=torch.float32, device=torch.device("cuda", device_index)
-    )
-
 
 @triton.jit
 def _e2m1_byte_f16_x2pow_neg14(packed):
     """The two e2m1 codes of each byte (int32, low nibble first) -> (lo, hi) fp16 = value * 2^-14:
     ``_nvfp4_pair_f16`` once the high nibble also sits at bits [19:16]."""
     return _nvfp4_pair_f16(packed | (packed << 12))
-
-
-@triton.jit
-def _e2m1_code_f32(code):
-    """One e2m1 code (int32, 0..15) -> its fp32 value, by bit placement instead of a LUT gather:
-    sign -> fp16 bit 15, exponent|mantissa -> bits 11..9 gives value * 2^-14 (exp 0 lands on the
-    fp16 subnormals), exact. A gather from a global LUT made triton 3.8 shuffle the pointer tile
-    through shared memory on every code (2x slower decode GEMV on sm_89)."""
-    bits = ((code & 0x8) << 12) | ((code & 0x7) << 9)
-    return bits.to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32) * 16384.0
 
 
 @triton.jit
@@ -75,7 +52,6 @@ def _decode_nvfp4_moe_kernel(
     c_ptr,             # [M, TOP_K, N] output (compute dtype)
     topk_weights_ptr,  # [M, TOP_K] fp32
     topk_ids_ptr,      # [M, TOP_K] int32 -> cache slot
-    lut_ptr,           # [16] fp32
     total_routes,
     N,
     K,
@@ -123,8 +99,8 @@ def _decode_nvfp4_moe_kernel(
         ).to(tl.int32)
         lo = bytes_ & 0xF
         hi = (bytes_ >> 4) & 0xF
-        b_lo = tl.load(lut_ptr + lo)
-        b_hi = tl.load(lut_ptr + hi)
+        b_lo = e2m1_code_f32(lo)
+        b_hi = e2m1_code_f32(hi)
 
         sblk = byte_idx // 8
         s_ptrs = scale_slot + offs_n[None, :] * stride_sn + sblk[:, None] * stride_sblk
@@ -231,7 +207,7 @@ def _decode_nvfp4_marlin_kernel(
         acc_w = tl.zeros((BLOCK_SIZE_KW, BLOCK_SIZE_N), dtype=tl.float32)
         for j in tl.static_range(8):
             code = (word >> (4 * j)) & 0xF
-            b = _e2m1_code_f32(code)
+            b = e2m1_code_f32(code)
             a_j = tl.load(a_base + (kbase + j) * stride_ak, mask=w_mask, other=0.0).to(tl.float32)
             acc_w += a_j[:, None] * b
         partial += acc_w * scale
@@ -352,5 +328,4 @@ __all__ = [
     "_decode_nvfp4_moe_kernel",
     "_decode_nvfp4_marlin_kernel",
     "_prefill_nvfp4_moe_kernel",
-    "_e2m1_lut",
 ]

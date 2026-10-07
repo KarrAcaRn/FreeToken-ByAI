@@ -8,7 +8,7 @@ host memory and the GPU dereferences it in place over PCIe -- at its host VA on 
 the mapped device address on WDDM (``kernel/pinned.device_ptr``). One program per requested
 row: read the row, widen to fp32, apply the per-tensor scale, store bf16. NVFP4 checkpoints
 pack the same rows two codes per byte with one fp8 block scale per 16 elements; that path
-unpacks through the E2M1 LUT and applies block scale * global scale.
+decodes the e2m1 codes by bit placement and applies block scale * global scale.
 
 Ids outside the table store zeros.
 """
@@ -19,7 +19,7 @@ import torch
 import triton
 import triton.language as tl
 
-from freetoken.kernel.triton.e4m3_compat import e4m3_native_cx, e4m3_u8_to_f32
+from freetoken.kernel.triton.e4m3_compat import e2m1_code_f32, e4m3_native_cx, e4m3_u8_to_f32
 
 # Latency-bound over PCIe, so keep the block small and let many of them be in flight.
 _NUM_WARPS = 1
@@ -33,7 +33,6 @@ def _ple_gather_kernel(
     scale,
     num_rows,
     scale_ptr,
-    lut_ptr,
     num_groups,
     EMB_DIM: tl.constexpr,
     IS_FP8: tl.constexpr,
@@ -60,8 +59,8 @@ def _ple_gather_kernel(
             sb = scale_ptr.to(tl.int64).to(tl.pointer_type(tl.uint8))
             blk = e4m3_u8_to_f32(tl.load(sb + idx * num_groups + offs_b // 8, mask=mask_b, other=0))
         g = blk * scale
-        lo = tl.where(in_range, tl.load(lut_ptr + (packed & 0xF)) * g, 0.0)
-        hi = tl.where(in_range, tl.load(lut_ptr + ((packed >> 4) & 0xF)) * g, 0.0)
+        lo = tl.where(in_range, e2m1_code_f32(packed & 0xF) * g, 0.0)
+        hi = tl.where(in_range, e2m1_code_f32((packed >> 4) & 0xF) * g, 0.0)
         out_base = out_ptr + row.to(tl.int64) * EMB_DIM
         tl.store(out_base + 2 * offs_b, lo.to(out_ptr.dtype.element_ty), mask=mask_b)
         tl.store(out_base + 2 * offs_b + 1, hi.to(out_ptr.dtype.element_ty), mask=mask_b)
@@ -97,7 +96,6 @@ def ple_gather_rows(
     scale: float = 1.0,
     is_fp8: bool = True,
     scales_ptr: int | None = None,
-    lut: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Gather ``row_ids`` from the host-resident table at ``table_ptr`` into ``out``.
 
@@ -106,12 +104,11 @@ def ple_gather_rows(
     (``kernel/pinned.device_ptr``), not necessarily the host ``data_ptr``.
 
     With ``scales_ptr`` (device-addressable fp8 block-scale bank, ``[num_rows,
-    embed_dim // 16]``) and a device ``lut`` of the 16 E2M1 values, the packed table at
+    embed_dim // 16]``), the packed table at
     ``table_ptr`` is read as NVFP4 and ``scale`` is its per-tensor global scale.
     """
     n = row_ids.numel()
     assert out.shape == (n, embed_dim) and out.is_contiguous(), out.shape
-    assert (scales_ptr is None) == (lut is None), "NVFP4 gather needs both scales and lut"
     if n:
         _ple_gather_kernel[(n,)](
             table_ptr,
@@ -121,7 +118,6 @@ def ple_gather_rows(
             num_rows,
             # constexpr-false arguments still need a plausibly typed operand; unused there
             scales_ptr if scales_ptr is not None else 0,
-            lut if lut is not None else row_ids,
             embed_dim // 16,
             EMB_DIM=embed_dim,
             IS_FP8=is_fp8 and scales_ptr is None,  # the NVFP4 branch supersedes fp8

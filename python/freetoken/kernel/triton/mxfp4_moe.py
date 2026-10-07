@@ -1,19 +1,16 @@
 import triton
 import triton.language as tl
 
+from freetoken.kernel.triton.e4m3_compat import e2m1_code_f32
+
 
 # ── Split-K expert GEMV (transposed weight layout [E, K_bytes, N]) ──────────
 # The MXFP4 MoE decode/prefill at small token counts is a memory-bound GEMV per
 # (route, expert); splitting the K
 # reduction across NUM_K_SPLITS programs gives the occupancy needed at M=1, and
 # storing the weights with N innermost (stride 1) makes the per-program load
-# coalesced. fp4 values come from a 16-entry LUT; the e8m0 scale is built by
+# coalesced. fp4 values are decoded by bit placement (e2m1_code_f32); the e8m0 scale is built by
 # placing the exponent into the float32 exponent field (no SFU exp2).
-
-
-@triton.jit
-def _fp4_table_lut(nibble, lut_ptr):
-    return tl.load(lut_ptr + nibble)
 
 
 @triton.jit
@@ -30,7 +27,6 @@ def mxfp4_splitk_gemv_kernel(
     bias_ptr,
     expert_ids_ptr,
     out_ptr,
-    lut_ptr,
     N,
     K: tl.constexpr,
     stride_xe,
@@ -75,8 +71,8 @@ def mxfp4_splitk_gemv_kernel(
             hi = (w_byte >> 4) & 0x0F
             x_lo = tl.load(x_ptr + x_base + kg * 32 + kk * 2).to(tl.float32)
             x_hi = tl.load(x_ptr + x_base + kg * 32 + kk * 2 + 1).to(tl.float32)
-            acc += _fp4_table_lut(lo, lut_ptr) * scale_f * x_lo
-            acc += _fp4_table_lut(hi, lut_ptr) * scale_f * x_hi
+            acc += e2m1_code_f32(lo) * scale_f * x_lo
+            acc += e2m1_code_f32(hi) * scale_f * x_hi
 
     if HAS_BIAS and pid_k == 0:
         acc += tl.load(
@@ -110,19 +106,6 @@ def mxfp4_splitk_reduce_kernel(
     if HAS_EXPERT_WTS:
         acc *= ewt
     tl.store(out_ptr + pid_e * N + offs_n, acc.to(tl.bfloat16), mask=mask_n)
-
-
-@triton.jit
-def _dequant_fp4_lut(nibble):
-    sign_bit = (nibble >> 3) & 1
-    exp_bits = (nibble >> 1) & 3
-    man_bit = nibble & 1
-
-    is_subnormal = exp_bits == 0
-    mantissa = 1.0 + man_bit.to(tl.float32) * 0.5
-    exponent = tl.exp2((exp_bits - 1).to(tl.float32))
-    value = tl.where(is_subnormal, man_bit.to(tl.float32) * 0.5, mantissa * exponent)
-    return tl.where(sign_bit != 0, -value, value)
 
 
 @triton.jit
@@ -219,7 +202,7 @@ def mxfp4_fused_moe_kernel(
             other=127,
         )
         scale = tl.exp2(scale_u8.to(tl.float32) - 127.0)
-        b = (_dequant_fp4_lut(nibble) * scale).to(compute_type)
+        b = (e2m1_code_f32(nibble) * scale).to(compute_type)
 
         accumulator += tl.dot(a, b)
         a_ptrs += BLOCK_SIZE_K * stride_ak
