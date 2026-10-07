@@ -185,6 +185,7 @@ def iter_expert_pieces(model_path: str, config, kind: QuantKind, *, parallel: bo
     from freetoken.models.weight import iter_expert_tensors_parallel
     from freetoken.moe.expert_pieces import per_expert_pieces
 
+    model_path = download_hf_weight(model_path)
     args = load_args(model_path, max_batch_size=1)
     L, E = args.n_layers, args.n_routed_experts
 
