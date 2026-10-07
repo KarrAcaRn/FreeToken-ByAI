@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -50,6 +51,9 @@ class ServerArgs(SchedulerConfig):
     # a turn cannot also kill the engine — see server/launch.py:_detach_process_group.
     shell_mode: bool = False
     served_model_name: str | None = None
+    # Optional, non-secret correlation token supplied by a process supervisor. The runtime
+    # identity endpoint echoes only this validated token, never argv or environment contents.
+    launch_nonce: str | None = None
     tool_call_parser: str = "llama3"
     # Reasoning parser that splits <think> reasoning from content for OpenAI
     # responses. None disables it (default for models without a reasoning protocol).
@@ -179,6 +183,17 @@ def parse_args(
         if not 0 <= n <= 65535:
             raise argparse.ArgumentTypeError("must be between 0 and 65535")
         return n
+
+    def _launch_nonce(value: str) -> str:
+        # Deliberately narrower than arbitrary CLI text: this value is returned by a read-only
+        # control endpoint and may be compared byte-for-byte by a local process supervisor.
+        if not 16 <= len(value) <= 128:
+            raise argparse.ArgumentTypeError("must contain 16 to 128 characters")
+        if re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+            raise argparse.ArgumentTypeError(
+                "must use only ASCII letters, digits, '_' or '-'"
+            )
+        return value
 
     def _lazy_gpu_arg(value: str) -> tuple[str, ...]:
         from freetoken.gpu_select import gpu_arg
@@ -448,6 +463,16 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--launch-nonce",
+        type=_launch_nonce,
+        default=ServerArgs.launch_nonce,
+        help=(
+            "Optional non-secret supervisor correlation token (16-128 URL-safe characters) "
+            "reported by /v1/runtime/identity."
+        ),
+    )
+
+    parser.add_argument(
         "--dist-port",
         type=_valid_port,
         dest="distributed_port",
@@ -494,8 +519,12 @@ def parse_args(
         "--max-extend-length",
         type=int,
         dest="max_extend_tokens",
-        default=ServerArgs.max_extend_tokens,
-        help="Chunk Prefill maximum chunk size in tokens.",
+        default=None,
+        help=(
+            "Chunk Prefill maximum chunk size in tokens (default "
+            f"{ServerArgs.max_extend_tokens}). An explicit value is honored even by models "
+            "that default to single-pass prefill (DSV4)."
+        ),
     )
 
     parser.add_argument(
@@ -1153,6 +1182,10 @@ def parse_args(
     if kwargs["max_running_req"] is None:
         # speculation is fastest, and keeps the most context, for one request at a time
         kwargs["max_running_req"] = 1 if kwargs.get("speculative_algorithm") else ServerArgs.max_running_req
+    kwargs["max_extend_tokens_explicit"] = kwargs["max_extend_tokens"] is not None
+    if kwargs["max_extend_tokens"] is None:
+        kwargs["max_extend_tokens"] = ServerArgs.max_extend_tokens
+
     run_shell |= kwargs.pop("shell_mode")
     kwargs["shell_mode"] = run_shell
     if bool(kwargs["ssl_certfile"]) != bool(kwargs["ssl_keyfile"]):

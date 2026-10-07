@@ -237,6 +237,9 @@ def test_openai_gate_message_is_loading_aware():
     assert b"rebuild" in rebuild.body.lower()
     failed = maintenance_gate(SimpleNamespace(maintenance_state="failed"))
     assert failed is not None and failed.status_code == 503
+    stopping = maintenance_gate(SimpleNamespace(maintenance_state="stopping"))
+    assert stopping is not None and stopping.status_code == 503
+    assert b"stopping" in stopping.body.lower()
     # A state object without the attribute defaults to serving (defensive, never blocks).
     assert maintenance_gate(SimpleNamespace()) is None
 

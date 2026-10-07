@@ -1220,16 +1220,16 @@
     "number": 413,
     "title": "fix(models): support llm-compressor NVFP4 MoE export variants",
     "head_sha": "f8d6a56b360c",
-    "reviewed_at": "2026-10-03",
-    "decision": "deferred",
-    "reason": "Adds detection and loaders for llm-compressor Qwen3.5-MoE NVFP4 export variants (per-expert vs stacked experts, GDN left bf16/fp8, format-only configs, NVFP4 lm_head/embed, single-file checkpoints). Some gaps are still real on main (its tests show format-only configs detected as 'none' and compressed-tensors block-fp8 refused), but the PR predates the QuantConfig refactor (#418/#438) and conflicts in all six code files, so it needs a reimplementation on the new layers, verified against a real export. Revisit together with the MoE test model choice (a Qwen3.5/3.6-MoE NVFP4 export would make it directly testable).",
+    "reviewed_at": "2026-10-07",
+    "decision": "superseded",
+    "reason": "Written before #438's QuantConfig reader, which answers the same questions per module (scheme_for_name, nvfp4_expert_spec). next already loads the standard llm-compressor exports the PR targets: checked with real config/safetensors headers of AEON-7/Qwen3.6-35B-A3B-heretic-NVFP4, sakamakismile/KAT-Coder-V2.5-Dev-NVFP4, Ttimms/KAT-Coder-V2.5-Dev-REAP-50-NVFP4A16 (scheme scan + all expert tensors matched). Only doth4580/...-NVFP4-MIXED (format-only config with a custom recipe string, stacked experts, NVFP4 embed) is missing; next refuses it at load instead of serving wrong weights. That part would be own work, GPU-verified with the real checkpoint.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "Stephen J. Thompson <stephen@digitalgraveyard.info>"
     ],
-    "revisit": "after-queue",
-    "summary": "Needs reimplementation on the QuantConfig layers (#418/#438, conflicts in all files); needs a real export to test"
+    "summary": "Covered by #438's QuantConfig reader for standard llm-compressor NVFP4 exports (checked on 3 real checkpoints' headers)",
+    "superseded_by": 438
   },
   "412": {
     "number": 412,
@@ -1251,16 +1251,16 @@
     "number": 406,
     "title": "docs(models): qualify full GLM-5.3 on H200 Serverless",
     "head_sha": "d01f3147cb2f",
-    "reviewed_at": "2026-10-03",
+    "reviewed_at": "2026-10-07",
     "decision": "deferred",
-    "reason": "Documents full GLM-5.3 on the existing glm_moe_dsa path with a community NVFP4 conversion (LibertAIDAI/GLM-5.3-NVFP4), renames the AOT entry to it with the NVIDIA/zai 5.2 names as aliases, adds a config test and ~900 lines of raw H200 benchmark JSON. Not judged on its merits yet: the model cannot run or be verified here. Revisit after the queue.",
+    "reason": "next already maps GLM-5.3 onto glm_moe_dsa (the PR's parse_config test passes on next). The rest is a third-party H200 qualification (docs, ~900 lines of raw benchmark JSON) and renaming the primary AOT entry to a community NVFP4 conversion with the NVIDIA/zai names as aliases - upstream's naming call, nothing to verify here. Not judged on its merits beyond that.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "Earl Co <info@earlco.in>"
     ],
-    "revisit": "after-queue",
-    "summary": "GLM-5.3 too large for this machine"
+    "summary": "GLM-5.3 too large for this machine",
+    "revisit": "after-queue"
   },
   "405": {
     "number": 405,
@@ -1727,16 +1727,20 @@
     "number": 267,
     "title": "Add loopback runtime process identity endpoint",
     "head_sha": "71fd695fd169",
-    "reviewed_at": "2026-10-04",
-    "decision": "feature",
-    "reason": "Feature (user's call, 2026-10-04), not a rejection: --launch-nonce plus a loopback-only /v1/runtime/identity that reports PID/PGID/start time of the frontend and every worker, so an external process supervisor can match the server it launched. Well tested (432-line test file). Nothing in this fork consumes it yet; adopt when a supervisor/launcher needs it, or take it through the upstream sync if upstream merges it. Touches api_server.py / control_api.py / args.py, so expect conflicts with next.",
-    "commits": [],
-    "gpu_untested": false,
+    "reviewed_at": "2026-10-07",
+    "decision": "adopted-with-fixups",
+    "reason": "Kept as a feature earlier, adopted now: loopback-only /v1/runtime/identity + --launch-nonce, lifecycle lock so a late ready/rebuild reply cannot overwrite stopping/failed. Loopback check holds with --host 0.0.0.0; uvicorn trusts X-Forwarded-For only from loopback (a remote proxy set via FORWARDED_ALLOW_IPS is no longer trusted - fails safe). Behind next's --api-key middleware. Merge keeps next's TLS in _run_uvicorn. CPU suite green; no live server run (no GPU).",
+    "commits": [
+      "50c3c86",
+      "dab442c",
+      "57f250b"
+    ],
+    "gpu_untested": true,
     "authors": [
       "HaileyStorm <HaileyCollet@gmail.com>"
     ],
-    "revisit": "after-queue",
-    "summary": "Sound, unused in this fork for now; adopt when needed"
+    "summary": "Loopback /v1/runtime/identity + --launch-nonce so a supervisor can match the server and workers it launched",
+    "fixup": "Merge keeps TLS/--api-key; 503 gate names 'stopping'; tests for api-key on the route and TLS forwarding"
   },
   "266": {
     "number": 266,
@@ -1885,17 +1889,19 @@
   "241": {
     "number": 241,
     "title": "rocm: fix native extensions, kernel JIT builds, and Triton PTX fallbacks for gfx1150",
-    "head_sha": "76a759b02798",
-    "reviewed_at": "2026-10-04",
-    "decision": "deferred",
-    "reason": "ROCm fixes for gfx1150 (native extensions, kernel JIT builds, Triton PTX fallbacks). Not judged on its merits yet: ROCm cannot be run or verified here. Note it also edits shared CUDA headers (utils.cuh, fast_index_copy.cuh, gguf dispatch.h), so the CUDA side must be re-tested when it comes back. Revisit after the queue with the other ROCm PRs (#217, #260, #535, #317).",
-    "commits": [],
+    "head_sha": "f372c0d58e8e",
+    "reviewed_at": "2026-10-07",
+    "decision": "adopted-with-fixups",
+    "reason": "Rebased to 45 lines, all ROCm-gated. Its gguf shuffle-mask and hipcc-flag parts are already on next in our own form (c362171, the #587 reimplementation), so the merge keeps next's; it adds the hipify .gitignore entries and pads the decode BLOCK_H to 16 on ROCm (RDNA WMMA has no smaller tile; the extra lanes are masked by mask_h). CUDA path unchanged; CPU suite green. ROCm not runnable here.",
+    "commits": [
+      "8ec7388"
+    ],
     "gpu_untested": true,
     "authors": [
       "skywalk1411 <61213518+skywalk1411@users.noreply.github.com>"
     ],
-    "revisit": "after-queue",
-    "summary": "ROCm - cannot be tested here; also edits shared CUDA headers, revisit with the other ROCm PRs"
+    "summary": "ROCm: decode attention pads BLOCK_H to 16 for RDNA WMMA, hipify outputs ignored (gguf parts already on next)",
+    "fixup": "Merge keeps next's ROCm gguf shuffles/flags (c362171) instead of the PR's 64-bit-mask variant"
   },
   "231": {
     "number": 231,
@@ -2344,7 +2350,7 @@
     "head_sha": "466dee73b0d3",
     "reviewed_at": "2026-10-04",
     "decision": "deferred",
-    "reason": "DSV4 chunked-prefill limits and SWA pool derivation across rebuilds (850 lines). Not judged on its merits yet: DeepSeek-V4 cannot run here. Revisit after the queue together with #105.",
+    "reason": "DSV4 chunked-prefill limits and SWA pool derivation across rebuilds (850 lines). Not judged on its merits yet: DeepSeek-V4 cannot run here. Revisit after the queue together with #105. 2026-10-07: #105 adopted (honors an explicit --max-prefill-length, default unchanged); #116 would drop the override entirely and derive SWA capacity - needs a DSV4 run.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
@@ -2389,16 +2395,19 @@
     "number": 105,
     "title": "fix(dsv4): honor an explicit --max-prefill-length instead of silently forcing single-pass prefill",
     "head_sha": "ca941486e598",
-    "reviewed_at": "2026-10-04",
-    "decision": "deferred",
-    "reason": "DSV4's config adjustment overrides an explicit --max-prefill-length and forces single-pass prefill. Not judged on its merits yet: DeepSeek-V4 cannot run here. Revisit after the queue together with #116.",
-    "commits": [],
+    "reviewed_at": "2026-10-07",
+    "decision": "adopted-with-fixups",
+    "reason": "Still on next: _adjust_dsv4_config widens max_extend_tokens to max_seq_len even when the user passed --max-prefill-length, the only lever against single-pass prefill transients. Default behaviour unchanged; upstream's own V4.1 port keeps max_extend_tokens for the same reason. PR had no test: ours covers parse_args (explicit under both spellings) and the DSV4 adjust; 3/6 fail before. #116 (drops the override entirely + SWA derivation) stays deferred.",
+    "commits": [
+      "a1ff43e",
+      "dda0174"
+    ],
     "gpu_untested": true,
     "authors": [
       "avlp12 <alisvolatprop12@proton.me>"
     ],
-    "revisit": "after-queue",
-    "summary": "DeepSeek-V4 too large for this machine; revisit with #116"
+    "summary": "DeepSeek-V4 honors an explicit --max-prefill-length instead of forcing single-pass prefill",
+    "fixup": "Tests for the explicit flag (both spellings) and the DSV4 config adjust"
   },
   "104": {
     "number": 104,
@@ -2556,16 +2565,19 @@
     "number": 30,
     "title": "fix(deepseek_v4): resolve HF repo ids to local cache when serving",
     "head_sha": "3e030966e7d5",
-    "reviewed_at": "2026-10-04",
-    "decision": "deferred",
-    "reason": "DSV4's loader checked config/index files with raw os.path.join(model_path, ...), which fails when --model is a bare HF repo id; resolves it to the cache snapshot. Not judged on its merits yet: DeepSeek-V4 cannot run here. Revisit after the queue with the other DSV4 PRs (#105, #116).",
-    "commits": [],
+    "reviewed_at": "2026-10-07",
+    "decision": "adopted-with-fixups",
+    "reason": "Still broken on next: DSV4's _config_path joined a bare HF repo id like a directory. hf_hub_download per candidate file is right (the args JSON is not a weight file). Next had replaced the DS-FP4 bank loaders with iter_expert_pieces, so the follow-up resolves the repo id there too. New CPU test against an offline hub cache fails before (2/4) and passes after. No DSV4 run (model too large, no GPU).",
+    "commits": [
+      "741db5b",
+      "d9490b9"
+    ],
     "gpu_untested": true,
     "authors": [
       "James Palmer <james.pa@outlook.com>"
     ],
-    "revisit": "after-queue",
-    "summary": "DeepSeek-V4 too large for this machine; revisit with #105 and #116"
+    "summary": "DeepSeek-V4 serves from a bare HF repo id (args JSON and expert banks resolved via the hub cache)",
+    "fixup": "Repo-id resolve also in next's iter_expert_pieces; offline-cache test for _config_path"
   },
   "24": {
     "number": 24,
