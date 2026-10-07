@@ -39,6 +39,10 @@ class EngineConfig:
     # --embed-device: "cpu" keeps the untied input-embedding table in pinned host RAM, read by
     # the GPU in place over PCIe (a few rows per decode step); its VRAM goes to the KV pool.
     embed_device: str = "gpu"
+    # --dense-offload-layers: decoder layers (dense models) whose weights live in pinned host RAM
+    # and stream in over PCIe every forward; "0" off, "N" a count, "auto" the fewest layers that
+    # let the KV pool reach kv_reserve_tokens. Trades decode speed for context.
+    dense_offload_layers: str = "0"
     # DeepSeek-V4.1 Decoder SWA Bounded Replay: "bounded" (default) runs the decoder layers on each
     # prompt's last window; "exact" runs them on every token.
     swa_decoder_replay: str = "bounded"

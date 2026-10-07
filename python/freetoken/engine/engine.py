@@ -721,6 +721,11 @@ class Engine:
                 f"target_layers={sorted(self.dflash_worker.target_layer_ids)}"
             )
 
+        # after the draft, so --dense-offload-layers auto sizes against what is really left
+        self.dense_offloader = None
+        if config.dense_offload_layers not in ("0", 0, "", None):
+            embed_host_bytes += self._offload_dense_layers(config, init_free_memory)
+
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
         # Pool-budget baseline for the desktop cache sliders: free VRAM after the weights are
@@ -972,6 +977,50 @@ class Engine:
         finalize_quant(self.model)
         if resident:
             self._load_resident_experts(config, resident)
+
+    def _offload_dense_layers(self, config: EngineConfig, init_free_memory: int) -> int:
+        """--dense-offload-layers: move decoder layers to pinned host RAM (``dense_offload``);
+        returns the pinned bytes."""
+        from .dense_offload import (
+            DenseLayerOffloader, auto_count, decoder_layers, layer_bytes, parse_count, pick_layers,
+        )
+
+        if config.tp_info.size > 1:
+            raise ValueError("--dense-offload-layers supports a single GPU only")
+        if list(iter_moe_layers(self.model)):
+            raise ValueError("--dense-offload-layers is for dense models; MoE models offload experts instead")
+        if hasattr(self.model, "prepare_for_runtime"):
+            raise ValueError(
+                f"--dense-offload-layers: {type(self.model).__name__} repacks weights after the load"
+            )
+        layers = decoder_layers(self.model)
+        count = parse_count(config.dense_offload_layers)
+        if count is None:
+            sizes = layer_bytes(layers, self.device)
+            free_now = self._sync_get_memory()[1]
+
+            def fits(freed: int) -> bool:
+                budget = _startup_kv_budget(config.memory_ratio, init_free_memory, free_now + freed)
+                pages = self._pool_cls.plan_num_pages(config, budget - state_pool_bytes(config))
+                return pages * config.page_size >= config.kv_reserve_tokens
+
+            count = auto_count(sizes, fits)
+            if count == 0:
+                logger.info_rank0(
+                    f"--dense-offload-layers auto: --kv-reserve-tokens {config.kv_reserve_tokens} "
+                    "fits without offloading"
+                )
+                return 0
+        ids = pick_layers(len(layers), count)
+        before = self._sync_get_memory()[1]
+        self.dense_offloader = DenseLayerOffloader(layers, ids, self.device)
+        freed = self._sync_get_memory()[1] - before
+        logger.info_rank0(
+            f"--dense-offload-layers: {len(ids)} of {len(layers)} layers in pinned host RAM "
+            f"({mem_GB(self.dense_offloader.host_bytes)}; layers {ids}), "
+            f"{mem_GB(self.dense_offloader.device_bytes)} staging, {mem_GB(freed)} VRAM freed"
+        )
+        return self.dense_offloader.host_bytes
 
     def _move_embeddings_to_host(self) -> int:
         from freetoken.layers.embedding import move_input_embeddings_to_host

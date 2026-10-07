@@ -87,6 +87,7 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--skip-preflight` | off | Load the weights even when the pre-load memory forecast says the configuration cannot fit; see [ft info](#ft-info) |
 | `--num-pages` / `--num-tokens` | auto | KV capacity override in pages / tokens (mutually exclusive; auto sizes from VRAM left after weights and MoE cache) |
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
+| `--dense-offload-layers` | 0 | `N` or `auto`: dense models keep N decoder layers in pinned host RAM and stream them over PCIe every forward; the freed VRAM goes to the KV cache. `auto` offloads the fewest layers that reach `--kv-reserve-tokens`. Costs decode speed (each offloaded layer crosses PCIe once per token); long prefills hide most of the copies. Single GPU, dense models only |
 | `--embed-device` | gpu | `cpu` keeps the input-embedding table in pinned host RAM; the GPU reads the looked-up rows over PCIe, and the freed VRAM goes to the KV cache (2.37 GiB on Qwen3.8-27B). Decode reads one row per token, so speed is unchanged. A table tied to the LM head stays on the GPU |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
 | `--kv-cache-dtype` | bf16 | `bf16`, `fp8`, or `nvfp4` (see [NVFP4 KV cache](#nvfp4-kv-cache)): FP8 stores the KV cache as e4m3 codes plus one fp32 scale per (token, kv head), roughly doubling the tokens that fit in the same VRAM; see [FP8 KV cache](#fp8-kv-cache) |

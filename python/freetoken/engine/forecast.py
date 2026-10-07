@@ -53,6 +53,7 @@ CATEGORY_LABELS = {
     "mtp": "MTP / draft heads",
     "draft": "speculative draft model",
     "verify_states": "speculative verify GDN states",
+    "dense_staging": "dense-offload staging buffers",
     "other": "norms / other",
     "rope": "rope tables",
 }
@@ -164,6 +165,9 @@ class WeightReport:
     vision_gpu_if_host: int | None = None
     # input-embedding bytes --embed-device cpu moves to pinned host RAM (0: tied or none)
     embed_host_movable: int = 0
+    # per decoder layer, the bytes per category --dense-offload-layers would move (empty: MoE or
+    # no plain decoder stack)
+    dense_layers: list[Counter[str]] = field(default_factory=list)
 
     @property
     def gpu_total(self) -> int:
@@ -209,6 +213,7 @@ def resident_weights(model, config) -> WeightReport:
     rope = _eager_tensor_bytes(model)
     if rope:
         report.gpu["rope"] = rope
+    report.dense_layers = _dense_layer_bytes(model, state)
     vision = report.gpu.get("vision", 0)
     if vision and config.active_encoders:
         streamed, staging = _streamed_encoder_bytes(model, state)
@@ -218,6 +223,38 @@ def resident_weights(model, config) -> WeightReport:
                 report.gpu["vision"] = report.vision_gpu_if_host
                 report.host["vision"] = streamed
     return report
+
+
+def _dense_layer_bytes(model, state: dict[str, torch.Tensor]) -> list[Counter[str]]:
+    """Per decoder layer of a dense model, its bytes per category (what --dense-offload-layers moves)."""
+    from freetoken.engine.dense_offload import decoder_layers
+    from freetoken.layers import iter_moe_layers
+
+    try:
+        n = len(decoder_layers(model))
+    except ValueError:
+        return []
+    if list(iter_moe_layers(model)):
+        return []
+    layers: list[Counter[str]] = [Counter() for _ in range(n)]
+    pattern = re.compile(r"^model\.layers\.(\d+)\.")
+    for name, t in state.items():
+        m = pattern.match(name)
+        if m and int(m[1]) < n:
+            layers[int(m[1])][tensor_category(name)] += _nbytes(t)
+    return layers
+
+
+def _dense_offload_bytes(layers: list[Counter[str]], count: int) -> tuple[Counter[str], int]:
+    """(bytes per category moved to the host, device staging bytes) for ``count`` offloaded layers."""
+    from freetoken.engine.dense_offload import pick_layers
+
+    moved: Counter[str] = Counter()
+    ids = pick_layers(len(layers), count)
+    for i in ids:
+        moved.update(layers[i])
+    staging = 2 * max((sum(layers[i].values()) for i in ids), default=0)
+    return moved, staging
 
 
 def quant_by_category(model) -> dict[str, list[str]]:
@@ -586,6 +623,23 @@ def _tips_embed_device(inp: ForecastInputs) -> Iterable[Change]:
                      note="input-embedding rows read from pinned host RAM; decode speed unchanged")
 
 
+_PCIE_BYTES_PER_S = 24e9  # PCIe 4.0 x16 host-to-device, measured on an RTX 4090
+
+
+def _tips_dense_offload(inp: ForecastInputs) -> Iterable[Change]:
+    layers = inp.weights.dense_layers
+    if not layers or str(getattr(inp.config, "dense_offload_layers", "0")) not in ("0", ""):
+        return
+    for count in (4, 8, 16):
+        if count >= len(layers):
+            break
+        moved, staging = _dense_offload_bytes(layers, count)
+        ms = sum(moved.values()) / _PCIE_BYTES_PER_S * 1e3
+        yield Change(f"--dense-offload-layers {count}", "dense_offload_layers", 8 + count // 4,
+                     _set(dense_offload_layers=str(count)), weight_delta=staging - sum(moved.values()),
+                     note=f"{count} layers stream over PCIe: ~{ms:.0f} ms/token slower decode, prefill ~unchanged")
+
+
 def _tips_dflash_block(inp: ForecastInputs) -> Iterable[Change]:
     states = inp.weights.gpu.get("verify_states", 0)
     config = inp.config
@@ -674,7 +728,7 @@ def _tips_kv_dtype(inp: ForecastInputs) -> Iterable[Change]:
 # reaches the forecast through the pool family's kv_cost, so nothing else changes.
 TIP_CANDIDATES: list[Callable[[ForecastInputs], Iterable[Change]]] = [
     _tips_concurrency, _tips_memory_ratio, _tips_prefill, _tips_cache_type, _tips_encoders, _tips_moe,
-    _tips_kv_dtype, _tips_embed_device, _tips_dflash_block,
+    _tips_kv_dtype, _tips_embed_device, _tips_dflash_block, _tips_dense_offload,
 ]
 
 
@@ -886,10 +940,41 @@ def forecast_inputs(config, model, free_before: int | None) -> ForecastInputs:
             weights.host["experts"] = per_expert * mc.num_moe_layers * in_ram
         else:
             weights.notes.append("expert bank layout unknown for this format: the GPU slot cache is not priced")
-    return ForecastInputs(
+    inp = ForecastInputs(
         config=config, weights=weights, free_before=free_before, per_expert_bytes=per_expert,
         max_slots=max_slots, activation_per_token=activation_bytes_per_token(model, config),
     )
+    _apply_dense_offload(inp)
+    return inp
+
+
+def _apply_dense_offload(inp: ForecastInputs) -> None:
+    """Price --dense-offload-layers into the weight report; ``auto`` resolves like the engine:
+    the fewest layers whose forecast KV pool reaches --kv-reserve-tokens."""
+    from freetoken.engine.dense_offload import parse_count
+
+    setting = str(getattr(inp.config, "dense_offload_layers", "0"))
+    layers = inp.weights.dense_layers
+    if setting in ("0", "") or not layers:
+        return
+    count = parse_count(setting)
+    if count is None:
+        for count in range(len(layers)):
+            moved, staging = _dense_offload_bytes(layers, count)
+            fc = inp.forecast(weight_delta=staging - sum(moved.values()))
+            if fc.kv_tokens >= inp.config.kv_reserve_tokens:
+                break
+    moved, staging = _dense_offload_bytes(layers, count)
+    for cat, nbytes in moved.items():
+        inp.weights.gpu[cat] -= nbytes
+        inp.weights.host[cat] = inp.weights.host.get(cat, 0) + nbytes
+    if staging:
+        inp.weights.gpu["dense_staging"] = staging
+        inp.weights.notes.append(
+            f"--dense-offload-layers: {count} decoder layers in host RAM; each crosses PCIe once per "
+            f"decode step (~{sum(moved.values()) / _PCIE_BYTES_PER_S * 1e3:.0f} ms/token at "
+            f"{_PCIE_BYTES_PER_S / 1e9:.0f} GB/s)"
+        )
 
 
 class PreflightRefused(RuntimeError):
