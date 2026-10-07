@@ -19,6 +19,8 @@ def maintenance_unavailable_detail(mstate: str) -> str | None:
         return "model is still loading"
     if mstate == "failed":
         return "server unavailable: maintenance failed (restart required)"
+    if mstate == "stopping":
+        return "server unavailable: engine is stopping"
     return "server unavailable: cache rebuild in progress"
 
 

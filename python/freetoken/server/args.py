@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -50,6 +51,9 @@ class ServerArgs(SchedulerConfig):
     # a turn cannot also kill the engine — see server/launch.py:_detach_process_group.
     shell_mode: bool = False
     served_model_name: str | None = None
+    # Optional, non-secret correlation token supplied by a process supervisor. The runtime
+    # identity endpoint echoes only this validated token, never argv or environment contents.
+    launch_nonce: str | None = None
     tool_call_parser: str = "llama3"
     # Reasoning parser that splits <think> reasoning from content for OpenAI
     # responses. None disables it (default for models without a reasoning protocol).
@@ -179,6 +183,17 @@ def parse_args(
         if not 0 <= n <= 65535:
             raise argparse.ArgumentTypeError("must be between 0 and 65535")
         return n
+
+    def _launch_nonce(value: str) -> str:
+        # Deliberately narrower than arbitrary CLI text: this value is returned by a read-only
+        # control endpoint and may be compared byte-for-byte by a local process supervisor.
+        if not 16 <= len(value) <= 128:
+            raise argparse.ArgumentTypeError("must contain 16 to 128 characters")
+        if re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+            raise argparse.ArgumentTypeError(
+                "must use only ASCII letters, digits, '_' or '-'"
+            )
+        return value
 
     def _lazy_gpu_arg(value: str) -> tuple[str, ...]:
         from freetoken.gpu_select import gpu_arg
@@ -444,6 +459,16 @@ def parse_args(
             "Require `Authorization: Bearer <key>` on every route except /health "
             "(401 otherwise). Unset: no authentication. When the flag is absent, "
             "FREETOKEN_API_KEY is read instead so the key need not appear in `ps`."
+        ),
+    )
+
+    parser.add_argument(
+        "--launch-nonce",
+        type=_launch_nonce,
+        default=ServerArgs.launch_nonce,
+        help=(
+            "Optional non-secret supervisor correlation token (16-128 URL-safe characters) "
+            "reported by /v1/runtime/identity."
         ),
     )
 
