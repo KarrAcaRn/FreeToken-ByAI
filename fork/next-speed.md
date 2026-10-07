@@ -263,8 +263,29 @@ handshake, correct inside CUDA graphs). A linear pinned H2D copy reaches 23.9 GB
 shaped microbenchmark (48 layers, 6 NVFP4 banks, graph) the gather already does 21-23 GB/s
 (~19-20 in the engine) and the DMA path 15-23: no gain. The levers left are fewer misses
 (pinning hot experts in VRAM, upstream PR #563, parked) or computing misses on the CPU
-(`--moe-strategy hybrid`: plain step 19.6 ms without a benchbw profile, -10%). Open bug:
-`--moe-strategy hybrid` with DFlash hangs at the first request (one thread at 100% CPU).
+(`--moe-strategy hybrid`, below).
+
+Hybrid sweep (2026-10-07, same recipe plus `--moe-cache-auto`, 400 tokens, two runs each).
+`--moe-hybrid-max-fetch N` fetches at most N of a layer's misses per step over PCIe and
+computes the rest on the CPU pool (6 pinned cores, AVX2 NVFP4); auto takes the split from
+an `ft bench bw` profile (CPU MoE 39 GB/s, PCIe gather 10.75 GB/s -> fetch 22%):
+
+| `--moe-strategy` / fetch cap | decode tok/s |
+|---|---|
+| offload | 42.6 / 43.7 |
+| hybrid, cap 0 (every miss on the CPU) | 23.7 / 24.5 |
+| hybrid, cap 1 (default without a profile) | 45.4 / 48.1 |
+| hybrid, cap 2 | 46.3 / 48.6 |
+| hybrid, cap 4 | 43.4 / 42.9 |
+| hybrid, auto from the benchbw profile (22%) | 41.1 / 49.6 |
+
+Hybrid at a small cap gains up to ~+10% over offload (the second run of each pair is warmer).
+Cap 0 halves the speed: nothing new ever enters the VRAM cache, so the CPU computes ever
+more of the routing. From cap 4 up it behaves like offload again. Outputs diverge from
+offload at the word level (CPU arithmetic), stay coherent. Hybrid + DFlash used to hang at
+the first request: the CPU executor was sized for one row per request, a verify sends
+`block_size` rows (fixed on next, `edb7d43`); hybrid + DFlash block 3 now runs at 35.1 tok/s,
+the same as with offload, so still slower than plain.
 
 ## Not done: options that need a decision
 
