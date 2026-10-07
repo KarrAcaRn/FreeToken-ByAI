@@ -48,15 +48,17 @@ def _fp8_roundtrip(x: torch.Tensor, block: int) -> torch.Tensor:
     return (q * s.unsqueeze(-1)).flatten(-2).to(torch.bfloat16)
 
 
-def reference(x, slots, weights, banks, block):
+def reference(x, slots, weights, banks, block, with_magnitude=False):
     """The MoE over dequantized banks: per-route bf16 expert outputs accumulated into an fp32 ``y``,
-    returned in fp32 (the kernels round that sum to bf16)."""
+    returned in fp32 (the kernels round that sum to bf16). ``with_magnitude`` also returns the sum
+    of the routes' absolute outputs (see ``assert_matches_reference``)."""
     gu_p, gu_s, dn_p, dn_s = banks
     W13 = _dequant(gu_p, gu_s)  # [E, 2I, H]
     W2 = _dequant(dn_p, dn_s)  # [E, H, I]
     xq = _fp8_roundtrip(x, block).float()
     T = x.shape[0]
     y = torch.zeros(T, H, dtype=torch.float32, device=x.device)
+    mag = torch.zeros_like(y)
     for t in range(T):
         for r in range(TOP_K):
             e = int(slots[t, r])
@@ -64,8 +66,25 @@ def reference(x, slots, weights, banks, block):
             gate, up = gu[:I].clamp(max=LIMIT), gu[I:].clamp(-LIMIT, LIMIT)
             h = (torch.nn.functional.silu(gate) * up).to(torch.bfloat16)
             hq = _fp8_roundtrip(h.view(1, -1), block).float().view(-1)
-            y[t] += (weights[t, r].float() * (hq @ W2[e].T)).to(torch.bfloat16).float()
-    return y
+            y_r = (weights[t, r].float() * (hq @ W2[e].T)).to(torch.bfloat16).float()
+            y[t] += y_r
+            mag[t] += y_r.abs()
+    return (y, mag) if with_magnitude else y
+
+
+def assert_matches_reference(got, x, slots, weights, banks, block):
+    """``got`` against ``reference`` at 2e-2 abs/rel, except for a rare element (at most 0.2%) that
+    may be off by one bf16 ulp per route instead: a route output within fp32 noise of a bf16
+    rounding midpoint (e.g. 97.749992 between 97.5 and 98.0) rounds either way depending on the
+    kernel's accumulation order, and routes of a few hundred cancelling to a single-digit sum turn
+    that one ulp into a large relative error."""
+    want, mag = reference(x, slots, weights, banks, block, with_magnitude=True)
+    err = (got.float() - want).abs()
+    off = err > 2e-2 + 2e-2 * want.abs()
+    ulp_off = err > 2e-2 + 2e-2 * want.abs() + mag * 2.0 ** -7
+    assert not ulp_off.any() and int(off.sum()) <= max(1, off.numel() // 500), (
+        f"{int(off.sum())} of {off.numel()} elements off ({int(ulp_off.sum())} by more than a "
+        f"bf16 ulp per route), worst {err.max().item()}")
 
 
 def _inputs(T, device, seed=1):
@@ -84,8 +103,7 @@ def test_gemv_path_matches_the_transcription(block):
     banks = _banks("cuda")
     x, slots, w = _inputs(6, "cuda")
     got = routed_experts_fp4(x, slots, w, *banks, LIMIT, act_block=block).float()
-    want = reference(x, slots, w, banks, block)
-    torch.testing.assert_close(got, want, atol=2e-2, rtol=2e-2)
+    assert_matches_reference(got, x, slots, w, banks, block)
 
 
 @pytest.mark.parametrize("block", [32, 128])
@@ -109,8 +127,7 @@ def test_cpu_executor_matches_the_transcription(block):
     got = ex.decode(0, x, w, slots.clone()).clone().float()
     torch.cuda.synchronize()
     del ex
-    want = reference(x, slots, w, (gu_p, gu_s, dn_p, dn_s), block)
-    torch.testing.assert_close(got, want, atol=2e-2, rtol=2e-2)
+    assert_matches_reference(got, x, slots, w, (gu_p, gu_s, dn_p, dn_s), block)
 
 
 def test_grouped_prefill_path_matches_the_transcription():
@@ -119,8 +136,7 @@ def test_grouped_prefill_path_matches_the_transcription():
     banks = _banks("cuda")
     x, slots, w = _inputs(64, "cuda")
     got = fused_ds_fp4.routed_experts_fp4_prefill(x, slots, w, *banks, LIMIT, E, act_block=32).float()
-    want = reference(x, slots, w, banks, 32)
-    torch.testing.assert_close(got, want, atol=2e-2, rtol=2e-2)
+    assert_matches_reference(got, x, slots, w, banks, 32)
 
 
 @pytest.mark.parametrize("block", [32, 128])
@@ -154,7 +170,7 @@ def test_inactive_routes_contribute_zero_without_reading_their_slots(block):
     # and each share matches the reference over its own routes (a zero weight drops a route)
     got_clean = routed_experts_fp4(x, gpu_slots, gpu_w, *clean, LIMIT, act_block=block)
     assert torch.equal(got, got_clean)
-    torch.testing.assert_close(got.float(), reference(x, slots, gpu_w, clean, block), atol=2e-2, rtol=2e-2)
+    assert_matches_reference(got, x, slots, gpu_w, clean, block)
     # the CPU executor computes the complementary split from the same raw ids (ids < 0 skipped)
     pinned = {}
     for name, t in (("gate_up_packed", clean[0]), ("gate_up_scale", clean[1]), ("down_packed", clean[2]), ("down_scale", clean[3])):
@@ -167,4 +183,4 @@ def test_inactive_routes_contribute_zero_without_reading_their_slots(block):
     cpu_out = ex.decode(0, x, w, cpu_ids.clone()).clone()
     torch.cuda.synchronize()
     del ex
-    torch.testing.assert_close(cpu_out.float(), reference(x, slots, torch.where(on_gpu, 0.0, w), clean, block), atol=2e-2, rtol=2e-2)
+    assert_matches_reference(cpu_out, x, slots, torch.where(on_gpu, 0.0, w), clean, block)
