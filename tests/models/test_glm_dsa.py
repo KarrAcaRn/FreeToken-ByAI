@@ -41,7 +41,9 @@ def _hf_indexer(seq: int, topk: int):
     freqs = torch.outer(pos.float(), inv)
     emb = torch.cat((freqs, freqs), dim=-1)
     cos, sin = emb.cos()[None].to(torch.bfloat16), emb.sin()[None].to(torch.bfloat16)
-    ref_topk = idx(x, q_resid, (cos, sin), None, pos[None])  # [1, S, topk]
+    # explicit additive causal mask: transformers >= 5.19 no longer builds one for None
+    mask = torch.zeros(1, seq, seq, device="cuda").masked_fill(pos[None, :] > pos[:, None], float("-inf"))
+    ref_topk = idx(x, q_resid, (cos, sin), mask, pos[None])  # [1, S, topk]
     return idx, x, q_resid, pos, ref_topk
 
 
