@@ -37,7 +37,10 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import gc
 import logging
+import math
+import mmap
 import os
 import shlex
 import socket
@@ -308,6 +311,59 @@ def _synth_experts(E: int, expert_bytes: int) -> int:
     return min(E, max(1, _SYNTH_BANK_BUDGET // max(1, expert_bytes)))
 
 
+_BENCH_FILL = 0x3C  # finite in every expert format (bf16 ~0.011, e4m3 1.5), never denormal
+_HUGE_PAGE = 2 << 20
+_BENCH_BANKS: list[tuple[int, mmap.mmap]] = []  # (registered address, mapping) until released
+
+
+def _bench_bank(*shape: int, dtype: torch.dtype) -> torch.Tensor:
+    """Filled, pinned+mapped host bank for the synthetic benches.
+
+    Zero-copy GPU reads of pinned memory are sensitive to physical contiguity: on a 4090
+    the gather reads scattered 4 KiB pages at ~12 GB/s and contiguous memory at ~22. A
+    process's first allocations take the kernel's fragmented low-order free pages (a few
+    GiB on a box that has run a while), later ones come out of large blocks -- so a 2 GiB
+    synthetic bank allocated first measures the worst corner, while a real model's tens of
+    GiB of banks are mostly contiguous. Backing the bench banks with transparent huge pages
+    makes them contiguous whatever ran before; without THP (or off Linux) this falls back to
+    cudaHostAlloc. The bank is written first: pages never written gather at about half rate.
+    """
+    nbytes = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
+    if not hasattr(mmap, "MADV_HUGEPAGE") or not hasattr(mmap, "MAP_PRIVATE"):
+        t = alloc_pinned_tensor(*shape, dtype=dtype)
+        t.view(torch.uint8).fill_(_BENCH_FILL)
+        return t
+    size = max(_HUGE_PAGE, -(-nbytes // _HUGE_PAGE) * _HUGE_PAGE)
+    buf = mmap.mmap(-1, size + _HUGE_PAGE, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    base = torch.frombuffer(buf, dtype=torch.uint8)
+    off = (-base.data_ptr()) % _HUGE_PAGE  # THP needs 2 MiB-aligned ranges
+    buf.madvise(mmap.MADV_HUGEPAGE, off, size)
+    raw = base[off:off + size]
+    raw.fill_(_BENCH_FILL)
+    cudart = torch.cuda.cudart()
+    err = cudart.cudaHostRegister(raw.data_ptr(), size, 3)  # Portable | Mapped, as host_register
+    if int(err) != 0:
+        raise RuntimeError(f"cudaHostRegister failed ({err}) for a {size >> 20} MiB bench bank")
+    _BENCH_BANKS.append((raw.data_ptr(), buf))
+    return raw[:nbytes].view(dtype).view(*shape)
+
+
+def _release_bench_banks() -> None:
+    """Unpin and unmap the ``_bench_bank`` banks once a bench is done with them."""
+    if not _BENCH_BANKS:
+        return
+    gc.collect()  # drop the bench's executors/caches, which hold raw pointers into the banks
+    torch.cuda.synchronize()  # no in-flight copy may still read a range
+    cudart = torch.cuda.cudart()
+    for addr, buf in _BENCH_BANKS:
+        cudart.cudaHostUnregister(addr)
+        try:
+            buf.close()
+        except BufferError:  # a tensor still views it; the mapping goes with the last one
+            pass
+    _BENCH_BANKS.clear()
+
+
 def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
     """3D pinned banks in the exact layout ``CpuMoeExecutor`` expects for ``fmt``.
 
@@ -317,7 +373,7 @@ def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
     as-is. Values otherwise don't affect the kernel's work.
     """
     def pin(*shape, dtype):
-        return alloc_pinned_tensor(*shape, dtype=dtype)
+        return _bench_bank(*shape, dtype=dtype)
 
     if fmt == "bf16":
         gate_up, down = pin(E, 2 * I, H, dtype=torch.bfloat16), pin(E, H, I, dtype=torch.bfloat16)
@@ -382,67 +438,84 @@ def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> dict:
 # ========================= real kernels (per workload) =========================
 
 
+_GATHER_ROTATIONS = 64
+
+
 def _build_gather_rig(fmt: str, wl: Workload, device: torch.device):
     """Production ``copy_missing`` rig: an ``OffloadMoeCache`` over synthetic pinned banks,
-    staged so every ``copy_missing()`` refills a full layer (all synth experts, scattered
-    sources). Returns ``(cache, bytes_per_copy)``; shared by the standalone PCIe gather
-    bench and the overlapped CPU+PCIe bench."""
+    staged for decode-shaped gathers: each ``step()`` copies one layer's worst-case decode
+    misses (``top_k`` experts) and every step reads a different set of scattered sources,
+    like the per-layer misses of a decode step (a full-layer refill is not what a decode
+    step does). The banks come from ``_bench_bank``.
+    Returns ``(step, bytes_per_step)``; shared by the standalone PCIe gather bench and the
+    overlapped CPU+PCIe bench."""
     from freetoken.moe.offload_cache import OffloadMoeCache
 
     H, I = wl.hidden, wl.inter
     E = _synth_experts(wl.experts, _expert_bytes(fmt, H, I))
     specs = _offload_bank_specs(fmt, H, I)
     cache = OffloadMoeCache(num_layers=1, num_experts=E, cache_size=E, device=device, quant_format=fmt)
-    total_bytes = 0
+    expert_bytes = 0
     for name, (elems, dtype) in specs.items():
-        src = alloc_pinned_tensor(E, elems, dtype=dtype)  # cudaHostAlloc (mapped) like the loaders
+        src = _bench_bank(E, elems, dtype=dtype)  # pinned + mapped like the loaders' banks
         dst = torch.empty(E, elems, dtype=dtype, device=device)
         cache.bank_sources[name] = [src]
         cache.bank_caches[name] = dst
         cache.banks.append(([src], dst))
-        total_bytes += E * elems * dtype.itemsize
+        expert_bytes += elems * dtype.itemsize
     cache._build_copy_plan()  # enable the fused path (production default) when aligned
 
-    cache.evict_slots[:E].copy_(torch.arange(E, dtype=torch.int32, device=device))
-    cache.src_indices[:E].copy_(torch.randperm(E, device=device).to(torch.int32))
-    cache.num_indices.fill_(E)  # int64, allocated by the cache -> matches the kernel contract
+    n = min(wl.top_k, E)
+    cache.evict_slots[:n].copy_(torch.randperm(E, device=device)[:n].to(torch.int32))
+    cache.num_indices.fill_(n)  # int64, allocated by the cache -> matches the kernel contract
+    srcs = torch.stack([torch.randperm(E, device=device)[:n] for _ in range(_GATHER_ROTATIONS)])
+    srcs = srcs.to(torch.int32)
     # copy_missing resolves the per-layer source through this (normally set by
     # ensure_experts/materialize_layer, bypassed here since this bench pokes the
     # evict/src/num_indices state directly).
     cache._pending_src_layer = 0
-    return cache, total_bytes
+    turn = [0]
+
+    def step() -> None:
+        cache.src_indices[:n].copy_(srcs[turn[0] % _GATHER_ROTATIONS], non_blocking=True)
+        turn[0] += 1
+        cache.copy_missing()
+
+    step.cache = cache
+    return step, n * expert_bytes
 
 
 def measure_pcie_gather_bw(fmt: str, wl: Workload, device: torch.device, iters: int = 20) -> dict:
     """Real PCIe gather bandwidth (GB/s): pinned host banks -> GPU slot cache.
 
     Drives the production ``OffloadMoeCache.copy_missing`` (fused multi-bank
-    ``fast_index_copy`` when 16-byte aligned, else per-bank), refilling a full layer
-    (all synth experts, scattered sources). Reusing the cache gives the kernel-correct
-    int64 ``num_indices``. Timed with CUDA events.
+    ``fast_index_copy`` when 16-byte aligned, else per-bank) with decode-shaped gathers
+    (``top_k`` scattered experts per copy, a different set each copy; see
+    ``_build_gather_rig``). One pass is one round through the rig's source rotations.
+    Reusing the cache gives the kernel-correct int64 ``num_indices``. Timed with CUDA events.
     """
     eb = _expert_bytes(fmt, wl.hidden, wl.inter)
-    cache, total_bytes = _build_gather_rig(fmt, wl, device)
-    E = cache.num_experts
+    step, step_bytes = _build_gather_rig(fmt, wl, device)
+    steps = iters * _GATHER_ROTATIONS
 
-    for _ in range(3):
-        cache.copy_missing()
+    for _ in range(_GATHER_ROTATIONS):
+        step()
     torch.cuda.synchronize(device)
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     if hasattr(torch.cuda, "_sleep"):
         torch.cuda._sleep(10**7)  # keep the CPU from running the launches ahead of the timer
     start.record()
-    for _ in range(iters):
-        cache.copy_missing()
+    for _ in range(steps):
+        step()
     end.record()
     end.synchronize()
-    ms = start.elapsed_time(end) / iters
+    ms = start.elapsed_time(end) / steps
     return {
-        "bw_gbs": total_bytes / (ms / 1e3) / 1e9,
+        "bw_gbs": step_bytes / (ms / 1e3) / 1e9,
         "expert_bytes": eb,
-        "synth_experts": E,
-        "fused": bool(cache._copy_fused_ok),
+        "synth_experts": step.cache.num_experts,
+        "fused": bool(step.cache._copy_fused_ok),
     }
 
 
@@ -548,7 +621,7 @@ def measure_overlap_bw(fmt: str, wl: Workload, device: torch.device,
 
     Both sides hammer their own pinned banks flat out for ``seconds`` from a shared
     barrier: a worker thread loops bs=1 CPU decode steps (``run_task`` releases the GIL)
-    while the main thread loops full-layer ``copy_missing`` gathers (synchronized per copy
+    while the main thread loops decode-shaped ``copy_missing`` gathers (synchronized per copy
     so the DMA is really in flight, not just enqueued). Each side reports bytes / its own
     elapsed; the two windows differ by at most one CPU step + one gather.
     """
@@ -557,12 +630,12 @@ def measure_overlap_bw(fmt: str, wl: Workload, device: torch.device,
     E = _synth_experts(wl.experts, eb)
     ex = _build_cpu_moe_executor(fmt, wl, _cpu_moe_bank_sources(fmt, H, I, E), num_threads, E)
     set_ids, run_step = _cpu_moe_step_fns(ex, wl, E)
-    cache, gather_bytes = _build_gather_rig(fmt, wl, device)
+    gather, gather_bytes = _build_gather_rig(fmt, wl, device)
 
     for i in range(8):  # warm both sides (JIT, page faults, clocks)
         set_ids(i)
         run_step()
-        cache.copy_missing()
+        gather()
     torch.cuda.synchronize(device)
 
     start = threading.Barrier(2)
@@ -585,7 +658,7 @@ def measure_overlap_bw(fmt: str, wl: Workload, device: torch.device,
     t0 = time.perf_counter()
     copies = 0
     while time.perf_counter() - t0 < seconds:
-        cache.copy_missing()
+        gather()
         torch.cuda.synchronize(device)
         copies += 1
     pcie_gbs = copies * gather_bytes / (time.perf_counter() - t0) / 1e9
@@ -631,6 +704,7 @@ def _bench_format(fmt: str, wl: Workload, device: torch.device, threshold: float
         logger.warning(f"benchbw: PCIe gather bench failed for {wl.name}/{fmt}: {e}")
         _note(entry, f"pcie gather unavailable ({e})")
     finally:
+        _release_bench_banks()
         torch.cuda.empty_cache()
 
     if fmt not in _CPU_MOE_FORMATS:
@@ -655,6 +729,8 @@ def _bench_format(fmt: str, wl: Workload, device: torch.device, threshold: float
         except (ImportError, RuntimeError) as e:
             logger.warning(f"benchbw: CPU MoE bench failed for {wl.name}/{fmt}: {e}")
             _note(entry, f"cpu moe unavailable ({e})")
+        finally:
+            _release_bench_banks()
 
     cpu_g, pcie_g = entry["cpu_moe_gbs"], entry["pcie_gather_gbs"]
     if cpu_g is not None and pcie_g:  # pcie_g truthy also rules out a div-by-zero
@@ -671,6 +747,7 @@ def _bench_format(fmt: str, wl: Workload, device: torch.device, threshold: float
             logger.warning(f"benchbw: overlap bench failed for {wl.name}/{fmt}: {e}")
             _note(entry, f"overlap bench unavailable ({e})")
         finally:
+            _release_bench_banks()
             torch.cuda.empty_cache()
     else:
         # No CPU-vs-PCIe pair to compare (no CPU path, or a bench failed): offload is the
@@ -785,7 +862,7 @@ def run_benchbw(
     _prog("done")
 
     result = {
-        "version": 4,
+        "version": 5,
         "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "epoch": int(time.time()),
         "host": socket.gethostname(),
