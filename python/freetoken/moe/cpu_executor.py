@@ -599,6 +599,9 @@ class CpuMoeExecutor:
         key = (layer_id, bs)
         task = self._tasks.get(key)
         if task is None:
+            # The C++ scratch is sized for max_tokens rows; a larger batch would overrun it.
+            if bs > self.max_tokens:
+                raise ValueError(f"CPU MoE batch of {bs} rows exceeds max_tokens={self.max_tokens}")
             io = self._io_for(bs)
             task = self._ext.create_task(
                 layer_id,
