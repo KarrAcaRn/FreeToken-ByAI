@@ -60,10 +60,10 @@ def _rocm_paths() -> tuple[list[str], list[str], str]:
     )
 
 
-def _rocm_cxx_std() -> str:
+def _torch_cxx_std() -> str:
     import torch
 
-    # torch 2.14's ROCm headers need C++20; older torch keeps the C++17 build.
+    # torch 2.14's headers need C++20; older torch keeps the C++17 build.
     release = tuple(int(part) for part in re.match(r"(\d+)\.(\d+)", torch.__version__).groups())
     return "-std=c++20" if release >= (2, 14) else "-std=c++17"
 
@@ -90,13 +90,13 @@ if IS_ROCM:
     # These extensions contain host code only. BuildExtension supplies the ROCm
     # platform defines to the C++ compiler; offload architecture flags belong on
     # HIP device sources and would be rejected by the host compiler here.
-    cxx_std = _rocm_cxx_std()
+    cxx_std = _torch_cxx_std()
     extra_compile = ["-O3", cxx_std]
 else:
     runtime_include_dirs, runtime_library_dirs = _cuda_runtime_paths()
     runtime_lib = "cudart"
     runtime_link_args = []
-    cxx_std = "-std=c++17"
+    cxx_std = _torch_cxx_std()
     # cl ignores -O3 and -std with a warning (D9002): /O2 is its spelling, and BuildExtension adds /std:c++17.
     extra_compile = ["/O2"] if IS_WINDOWS else ["-O3", cxx_std]
 
