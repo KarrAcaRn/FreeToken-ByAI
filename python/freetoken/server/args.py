@@ -494,8 +494,12 @@ def parse_args(
         "--max-extend-length",
         type=int,
         dest="max_extend_tokens",
-        default=ServerArgs.max_extend_tokens,
-        help="Chunk Prefill maximum chunk size in tokens.",
+        default=None,
+        help=(
+            "Chunk Prefill maximum chunk size in tokens (default "
+            f"{ServerArgs.max_extend_tokens}). An explicit value is honored even by models "
+            "that default to single-pass prefill (DSV4)."
+        ),
     )
 
     parser.add_argument(
@@ -1122,6 +1126,10 @@ def parse_args(
     if kwargs["max_running_req"] is None:
         # speculation is fastest, and keeps the most context, for one request at a time
         kwargs["max_running_req"] = 1 if kwargs.get("speculative_algorithm") else ServerArgs.max_running_req
+    kwargs["max_extend_tokens_explicit"] = kwargs["max_extend_tokens"] is not None
+    if kwargs["max_extend_tokens"] is None:
+        kwargs["max_extend_tokens"] = ServerArgs.max_extend_tokens
+
     run_shell |= kwargs.pop("shell_mode")
     kwargs["shell_mode"] = run_shell
     if bool(kwargs["ssl_certfile"]) != bool(kwargs["ssl_keyfile"]):
