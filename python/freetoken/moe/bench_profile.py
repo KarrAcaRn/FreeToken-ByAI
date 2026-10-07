@@ -252,10 +252,52 @@ def load_hybrid_fetch_fraction(
     for entry in entries:
         if not isinstance(entry, dict) or not _comparable(entry, fmt, expert_bytes):
             continue
-        cpu_ov, pcie_ov = entry.get("cpu_moe_overlap_gbs"), entry.get("pcie_gather_overlap_gbs")
-        if cpu_ov and pcie_ov:
-            return min(1.0, pcie_ov / (pcie_ov + cpu_ov))
-        cpu, pcie = entry.get("cpu_moe_gbs"), entry.get("pcie_gather_gbs")
-        if cpu and pcie:
-            return min(1.0, pcie / cpu)
+        fraction = hybrid_fraction_from_entry(entry)
+        if fraction is not None:
+            return fraction
     return None
+
+
+def hybrid_fraction_from_entry(entry: dict) -> float | None:
+    """The fetch fraction one kernel entry implies (see ``load_hybrid_fetch_fraction``)."""
+    cpu_ov, pcie_ov = entry.get("cpu_moe_overlap_gbs"), entry.get("pcie_gather_overlap_gbs")
+    if cpu_ov and pcie_ov:
+        return min(1.0, pcie_ov / (pcie_ov + cpu_ov))
+    cpu, pcie = entry.get("cpu_moe_gbs"), entry.get("pcie_gather_gbs")
+    if cpu and pcie:
+        return min(1.0, pcie / cpu)
+    return None
+
+
+# The engine's own startup measurement (benchbw.measure_hybrid_split) for a GPU without a
+# usable `ft bench bw` profile. Kept outside benchbw/ so the profile lookup never mistakes it
+# for a profile; one file per GPU, one entry per (format, model geometry).
+def _startup_split_path(gpu_uuid: str | None) -> str:
+    return os.path.join(_cache_dir(), "hybrid_split", f"{gpu_uuid or 'unknown-gpu'}.json")
+
+
+def startup_split_key(quant_format: str, geometry: dict) -> str:
+    fmt = _QUANT_TO_BENCH_FORMAT.get(quant_format, quant_format)
+    return f"{fmt}:" + "x".join(str(geometry[k]) for k in _GEOMETRY_KEYS)
+
+
+def load_startup_hybrid_fraction(gpu_uuid: str | None, key: str) -> float | None:
+    """The cached startup-measured fetch fraction for ``key`` on this GPU, or None."""
+    data = _load(_startup_split_path(gpu_uuid)) or {}
+    entry = (data.get("entries") or {}).get(key)
+    return hybrid_fraction_from_entry(entry) if isinstance(entry, dict) else None
+
+
+def save_startup_hybrid_split(gpu_uuid: str | None, key: str, entry: dict) -> None:
+    """Record a startup measurement; a failed write only costs a re-measure next launch."""
+    path = _startup_split_path(gpu_uuid)
+    data = _load(path) or {}
+    data.setdefault("entries", {})[key] = entry
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning(f"hybrid split: could not cache the startup measurement in {path}: {exc}")

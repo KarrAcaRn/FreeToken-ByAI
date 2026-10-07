@@ -1021,7 +1021,8 @@ def parse_args(
             "For --moe-strategy hybrid: max experts fetched over PCIe per (layer, decode "
             "step); the rest of that step's misses are computed on the CPU, overlapped. "
             "-1 (default) = auto: fetch the benched pcie/cpu bandwidth fraction of each "
-            "step's misses (perfect overlap; needs an `ft bench bw` profile, else 1). "
+            "step's misses (perfect overlap; from the `ft bench bw` profile, else measured "
+            "once at startup and cached per GPU and model shape). "
             "0 = never fetch (all misses on CPU); large = behaves like plain offload."
         ),
     )
