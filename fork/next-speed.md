@@ -112,7 +112,7 @@ but this is a numerics change, hence opt-in.
 Qwen3.8-27B-NVFP4 has no large bf16 linears (its projections are fp8, its lm_head NVFP4), so
 the option does nothing there.
 
-## Qwen3.8-Flash-Next on 24 GB VRAM + 30 GB RAM (64 GB results below)
+## Qwen3.8-Flash-Next on 24 GB VRAM + 30 GB RAM (64 and 79 GB results below)
 
 `RadixArk/Qwen3.8-Flash-Next-NVFP4` (126 GB: ~68 GB experts, 47.7 GB PLE table) runs with the
 disk tier, the checkpoint on cephfs (no local NVMe):
@@ -198,8 +198,9 @@ Same recipe, profile re-recorded on the coding prompts (the top 320 experts per 
 | 400 RAM experts | OOM kill (49.5 GB anon RSS) |
 
 320 is the practical limit for 64 GB. With the disk mostly out of decode, plain is 4x
-faster, and DFlash now loses. Not profiled yet; the likely cause is that a verify block still pulls more experts from RAM to VRAM than
-one token does, and that costs more than the accepted drafts save. The adaptive gate
+faster, and DFlash now loses: a verify block pulls more experts than one token does (the
+split below, and the all-in-RAM numbers further down), and that costs more than the
+accepted drafts save. The adaptive gate
 switches it off. Batching does not help either (`--max-running-requests 5
 --cuda-graph-max-bs 5`): one request alone 12.6 tok/s, five at once 11.4 tok/s in total,
 because the union of routed experts grows with the batch. A 4k-token prefill runs at 190 tok/s.
@@ -220,7 +221,50 @@ contiguous in its layer's shard) sits in one or two 4 MB ceph objects, i.e. on o
 barely help (3.1 -> 2.8 ms), and our cephfs key may not set striped file layouts. A
 simulated software striping (each expert as 8x300 KB pieces in 8 different objects, 16
 threads) reads one expert in 1.9 ms and two in 3.1 ms, an estimated 8-10% decode gain; it
-would need a ~23 GB expert-major copy of the tail experts. Parked until new hardware.
+would need a ~23 GB expert-major copy of the tail experts. Made moot by the next upgrade.
+
+### All experts in RAM (79 GiB, 2026-10-07)
+
+With 79 GiB the whole expert set fits pinned RAM, so the disk tier goes away:
+
+    ft serve --model RadixArk/Qwen3.8-Flash-Next-NVFP4 --text-model-only --max-running-requests 1 \
+      --kv-cache-dtype fp8 --moe-disk-tier off --ple-backend disk --cuda-graph-max-bs 1 \
+      --online-quant fp8
+
+(`--moe-disk-tier on` rejects `--expert-ram-experts 512`; prefill overlap stays on.) Peak RSS
+65 GiB (banks 63.5 GiB pinned, built serially under "low free RAM"), load 150-195 s, 3765
+VRAM expert slots preloaded, 8.4k KV tokens.
+
+| Config | decode tok/s | 8k prefill tok/s |
+|---|---|---|
+| plain, 320 RAM experts + disk (64 GB) | 18.6-20.7 | 190 (4k) |
+| plain, all in RAM | **41.7-42.6** | **~2280** |
+| DFlash block 3, all in RAM (gate off) | 34.7 | |
+| DFlash block 6, all in RAM (gate off) | 24.4-25.7 | |
+| 5 parallel streams (`--max-running-requests 5 --cuda-graph-max-bs 5`) | 23.7 total (4.7 each) | |
+
+Decode now waits on the PCIe link, not the disk. Per-step timing (2 prompts x 300 tokens,
+gate off): a plain step takes 21.8 ms (median), a verify replay of 2 tokens 38.0 ms (1.74x),
+3 tokens 47.7 ms (2.19x), 6 tokens 71.8 ms (3.3x). The drafter's acceptance on this model is
+low (1.38 / 1.55 / 1.65 tokens per cycle for blocks 2 / 3 / 6), so every block size costs
+33-49 ms per token against plain's 21.8. A len-2 verify touches 786 experts over the 48
+layers, 182 of them missing from VRAM: ~470 MiB over PCIe, i.e. an effective ~12 GB/s for the
+whole 38 ms. Each extra verified token routes to other experts, the
+same reason five parallel streams lose. An MTP head (depth 1 = a len-2 verify plus the MTP
+layer) would break even only at >=84% acceptance, so it is not worth building before the
+miss path is faster.
+
+Upper bound for the miss path: with `FREETOKEN_SKIP_FAST_INDEX_COPY=1` (wrong output, no
+miss copies) a plain step drops 21.8 -> 10.4 ms and a len-2 verify 38 -> 12 ms, so half of
+decode is copying misses over a nearly full link. Tried and dropped: DMA copies for the
+misses (a C++ coordinator issuing `cudaMemcpyAsync` on a copy stream behind a stream-memop
+handshake, correct inside CUDA graphs). A linear pinned H2D copy reaches 23.9 GB/s on this
+4090 while the gather kernel was measured at 11.6 GB/s in isolation, but in a Flash-Next
+shaped microbenchmark (48 layers, 6 NVFP4 banks, graph) the gather already does 21-23 GB/s
+(~19-20 in the engine) and the DMA path 15-23: no gain. The levers left are fewer misses
+(pinning hot experts in VRAM, upstream PR #563, parked) or computing misses on the CPU
+(`--moe-strategy hybrid`: plain step 19.6 ms without a benchbw profile, -10%). Open bug:
+`--moe-strategy hybrid` with DFlash hangs at the first request (one thread at 100% CPU).
 
 ## Not done: options that need a decision
 
