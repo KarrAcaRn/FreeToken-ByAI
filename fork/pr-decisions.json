@@ -13,7 +13,8 @@
       "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
     ],
     "revisit": "after-queue",
-    "summary": "DeepSeek-V4.1 too large for this machine; maintainer branch, expected to land upstream (8 conflicts with next)"
+    "summary": "DeepSeek-V4.1 too large for this machine; maintainer branch, expected to land upstream (8 conflicts with next)",
+    "upstream": "merged"
   },
   "602": {
     "number": 602,
@@ -1041,16 +1042,18 @@
     "number": 460,
     "title": "feat(models): support deepseek v4.1 with native fp8-fp4 kv storage",
     "head_sha": "cba8ae303b4a",
-    "reviewed_at": "2026-10-03",
-    "decision": "deferred",
-    "reason": "15k-line DeepSeek V4.1 port (132 files: new sparse attention, native fp8/fp4 KV storage, checkpoint conversion). Not judged on its merits yet: the model is far beyond a single RTX 4090 with 30 GB RAM, so it cannot be run or verified here, and it touches shared attention/KV code that needs a careful review. Revisit after the queue (or when it lands upstream).",
+    "reviewed_at": "2026-10-07",
+    "decision": "superseded",
+    "reason": "Upstream merged its own DeepSeek-V4.1 port instead (#603, 127c856): same model, text and vision, and it also keeps the KV tiers in native fp8/fp4 row formats (kvcache/dsv4/v41_row_format.py), which was #460's distinguishing part. #460 would now have to be rebased onto #603's runtime.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
-      "ArqAlice <y.tomi0131@gmail.com>"
+      "ArqAlice <y.tomi0131@gmail.com>",
+      "Matsumoto Takaya (松本 貴也) <matsumoto.t@zigexn.co.jp>",
+      "Vincent Labreche <vincent.dev@gmail.com>"
     ],
-    "revisit": "after-queue",
-    "summary": "DeepSeek-V4.1 too large for this machine"
+    "summary": "Upstream merged its own DeepSeek-V4.1 port (#603), incl. native fp8/fp4 KV rows",
+    "superseded_by": 603
   },
   "459": {
     "number": 459,
@@ -1340,7 +1343,8 @@
       "Sam Izdat <ghsamizdat@gmail.com>"
     ],
     "superseded_by": "0ffd5c8 (#438)",
-    "summary": "Already covered by #438 (QuantConfig reader); next's tests cover these mixed-precision layouts"
+    "summary": "Already covered by #438 (QuantConfig reader); next's tests cover these mixed-precision layouts",
+    "upstream": "closed"
   },
   "380": {
     "number": 380,
@@ -2637,11 +2641,11 @@
   },
   "581": {
     "number": 581,
-    "title": "test(checkpoint): read an FTW checkpoint through the mmap path [draft]",
-    "head_sha": "c1863238935c",
-    "reviewed_at": "2026-10-04",
+    "title": "fix(windows): read checkpoints without O_DIRECT, posix_fadvise or PROT_READ [draft]",
+    "head_sha": "c9be561fbed6",
+    "reviewed_at": "2026-10-07",
     "decision": "deferred",
-    "reason": "Draft (Windows): read checkpoints without O_DIRECT/posix_fadvise/PROT_READ. Windows cannot be tested here; overlaps the Windows part of #298. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "reason": "Draft (Windows): read checkpoints without O_DIRECT/posix_fadvise/PROT_READ (range readers share one fan-out, madvise only where mmap has it). Windows cannot be tested here; overlaps the Windows part of #298. Head c9be561 per the API (refs/pull/581/head still served c186323 on 2026-10-07). Deferred while it is a draft: the queue re-lists it once its head moves.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
@@ -2651,11 +2655,11 @@
   },
   "580": {
     "number": 580,
-    "title": "fix(windows): stop on backend death through the server's own SIGTERM handler [draft]",
-    "head_sha": "0e50062f9ccc",
-    "reviewed_at": "2026-10-04",
+    "title": "fix(windows): serve over loopback ZMQ and a selector event loop [draft]",
+    "head_sha": "1b0ee4401c8b",
+    "reviewed_at": "2026-10-07",
     "decision": "deferred",
-    "reason": "Draft (Windows): loopback ZMQ and a selector event loop for serving on Windows. Windows cannot be tested here; overlaps the Windows part of #298. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "reason": "Draft (Windows): loopback ZMQ and a selector event loop for serving on Windows, now also skips expandable segments on win32. Windows cannot be tested here; overlaps the Windows part of #298. Its one Linux-relevant commit (set the allocator config through torch 2.11's _accelerator_setAllocatorSettings) is already on next (36a467b, with a fallback for older torch). Deferred while it is a draft: the queue re-lists it once its head moves.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
@@ -2861,7 +2865,8 @@
     "authors": [
       "SuperHotDogCat <siromisochan@gmail.com>"
     ],
-    "summary": "Opt-in wider expert-gather grid for GH200; no gain on PCIe (measured), C2C untestable here"
+    "summary": "Opt-in wider expert-gather grid for GH200; no gain on PCIe (measured), C2C untestable here",
+    "upstream": "merged"
   },
   "609": {
     "number": 609,
