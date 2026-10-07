@@ -77,6 +77,10 @@ _FORMAT_DISPLAY = {"fp8_block": "fp8", "mxfp4_triton": "mxfp4"}
 # per-byte so a smaller expert count doesn't change the measured GB/s (as long as the
 # working set still exceeds the LLC, which this budget guarantees).
 _SYNTH_BANK_BUDGET = 2 << 30
+# The engine's startup split bench (measure_hybrid_split) runs next to a loaded model, so it
+# gets a smaller set: still past a desktop LLC, and it also bounds the temporary VRAM of the
+# gather rig's slot cache.
+_STARTUP_BANK_BUDGET = 256 << 20
 
 # CPU MoE ISA tiers, forced via FREETOKEN_CPU_MOE_ISA (the kernel caps down to hw/build
 # support, so requesting a higher tier than the CPU has is safe -- it clamps).
@@ -312,6 +316,17 @@ def _synth_experts(E: int, expert_bytes: int) -> int:
     (2 GiB) far exceeds any LLC, so the working set stays DRAM-sized whenever E is large; for
     huge-expert models each expert already exceeds the LLC, so a handful still defeats it."""
     return min(E, max(1, _SYNTH_BANK_BUDGET // max(1, expert_bytes)))
+
+
+@contextlib.contextmanager
+def _synth_budget(nbytes: int):
+    """Temporarily cap the synthetic bank memory (see ``_STARTUP_BANK_BUDGET``)."""
+    global _SYNTH_BANK_BUDGET
+    prev, _SYNTH_BANK_BUDGET = _SYNTH_BANK_BUDGET, nbytes
+    try:
+        yield
+    finally:
+        _SYNTH_BANK_BUDGET = prev
 
 
 _BENCH_FILL = 0x3C  # finite in every expert format (bf16 ~0.011, e4m3 1.5), never denormal
@@ -669,6 +684,27 @@ def measure_overlap_bw(fmt: str, wl: Workload, device: torch.device,
     worker.join()
     del ex
     return {"cpu_gbs": cpu_out["gbs"], "pcie_gbs": pcie_gbs}
+
+
+def measure_hybrid_split(fmt: str, wl: Workload, device: torch.device,
+                         num_threads: int = 0, seconds: float = 1.0) -> dict:
+    """Quick bench for the hybrid backend's fetch split, run by the engine at startup when no
+    ``ft bench bw`` profile covers the served model: only the overlapped CPU MoE + PCIe
+    gather pair (all ``load_hybrid_fetch_fraction`` needs), on a small synthetic set.
+    Returns a profile-style kernel entry."""
+    try:
+        with _synth_budget(_STARTUP_BANK_BUDGET):
+            o = measure_overlap_bw(fmt, wl, device, num_threads, seconds=seconds)
+            eb = _expert_bytes(fmt, wl.hidden, wl.inter)
+            synth = _synth_experts(wl.experts, eb)
+    finally:
+        _release_bench_banks()
+        torch.cuda.empty_cache()
+    return {
+        "expert_bytes": eb, "synth_experts": synth,
+        "cpu_moe_overlap_gbs": round(o["cpu_gbs"], 2),
+        "pcie_gather_overlap_gbs": round(o["pcie_gbs"], 2),
+    }
 
 
 def recommend(cpu_bw_gbs: float, pcie_bw_gbs: float, threshold: float = 2.0) -> str:

@@ -77,6 +77,10 @@ class EnvClassSingleton:
     MAMBA_SSM_DTYPE = EnvStr("float32")
     # cap the longest prefill warmup forward; 0 = the engine's own chunk cap
     WARMUP_MAX_LEN = EnvInt(0)
+    # --moe-strategy hybrid with the auto fetch split and no `ft bench bw` profile for the
+    # model: measure the split at startup (a few seconds, cached per GPU and model shape).
+    # 0 = fall back to a fixed fetch cap of 1 instead.
+    HYBRID_STARTUP_BENCH = EnvBool(True)
 
     def __new__(cls):
         # single instance
