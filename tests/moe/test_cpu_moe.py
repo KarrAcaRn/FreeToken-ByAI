@@ -662,3 +662,21 @@ def test_cpu_moe_executor_is_collectable():
     if watchdog is not None:
         watchdog.join(timeout=5.0)  # exits on the first tick after the weakref dies
         assert not watchdog.is_alive(), "watchdog thread must exit after executor GC"
+
+
+def test_cpu_moe_rejects_batch_above_max_tokens():
+    """A batch wider than max_tokens (e.g. a DFlash verify on an executor sized for one
+    row per request) must raise instead of overrunning the C++ scratch buffers."""
+    from freetoken.moe.cpu_executor import CpuMoeExecutor
+
+    dev = torch.device("cuda")
+    L, E, H, I, top_k = 2, 4, 64, 32, 2
+    ex = CpuMoeExecutor(
+        _make_cache(L, E, H, I), top_k=top_k, activation="silu",
+        apply_router_weight_on_input=False, num_threads=2, max_tokens=2, device=dev,
+    )
+    hidden = torch.randn(3, H, device=dev, dtype=torch.bfloat16)
+    ids = torch.zeros(3, top_k, device=dev, dtype=torch.int32)
+    w = torch.ones(3, top_k, device=dev, dtype=torch.float32)
+    with pytest.raises(ValueError, match="max_tokens=2"):
+        ex.decode(0, hidden, w, ids)

@@ -1298,8 +1298,11 @@ class Engine:
                 f"(MoE layer {type(sample).__name__} is missing {required})."
             )
         # Decode batches never exceed max_running_req, but CUDA-graph padding can
-        # round a batch up to the largest captured size; cover both.
+        # round a batch up to the largest captured size; cover both. A DFlash verify
+        # routes block_size rows per request through the decode MoE path.
         max_tokens = max(config.max_running_req, config.cuda_graph_max_bs or 0, 1)
+        if self.dflash_worker is not None:
+            max_tokens *= self.dflash_worker.block_size
         executor = CpuMoeExecutor(
             cache,
             top_k=sample.top_k,
