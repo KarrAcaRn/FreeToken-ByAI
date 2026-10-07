@@ -7,6 +7,7 @@ so no BF16 copy of the experts is ever materialized.
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Dict
 
 import torch
@@ -236,8 +237,25 @@ def _prefill_config(M: int) -> Dict[str, int]:
     if M <= 64:
         return dict(BLOCK_SIZE_M=16, BLOCK_SIZE_N=64, BLOCK_SIZE_KB=32,
                     GROUP_SIZE_M=1, num_warps=8, num_stages=4)
+    sm89 = _sm89_prefill_config()
+    if sm89 is not None:
+        return dict(sm89)
     return dict(BLOCK_SIZE_M=32, BLOCK_SIZE_N=64, BLOCK_SIZE_KB=32,
                 GROUP_SIZE_M=8, num_warps=8, num_stages=4)
+
+
+@functools.cache
+def _sm89_prefill_config() -> Dict[str, int] | None:
+    """Ada (sm_89) wants 64-token tiles and 4 warps. RTX 4090 sweep over Qwen3.6-35B-A3B and
+    Gemma-4-26B-A4B shapes, 4k/8k tokens, gate_up + down: triton 3.6 BLOCK_N 64 is 21-28% faster
+    than the default above; triton 3.8 compiles this kernel differently and wants BLOCK_N 128
+    (2.5x faster than the default there, still ~30% behind 3.6). Below ~1k tokens the GEMMs are
+    weight-load bound and every config ties."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9):
+        return None
+    new_triton = tuple(int(x) for x in triton.__version__.split(".")[:2]) >= (3, 8)
+    return dict(BLOCK_SIZE_M=64, BLOCK_SIZE_N=128 if new_triton else 64, BLOCK_SIZE_KB=32,
+                GROUP_SIZE_M=8, num_warps=4, num_stages=3)
 
 
 def _prefill_gemm(
