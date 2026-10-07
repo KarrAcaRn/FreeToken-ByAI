@@ -1227,8 +1227,6 @@ class Engine:
                 "index, so experts released at load would never be refetched "
                 f"(quant_format={banks.quant_format!r})")
         cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
-        if decode_target == "hybrid":
-            self._resolve_hybrid_fetch(config, cache)
         # Must be set before CUDA graph capture so the (device-side) accumulation ops are
         # captured and re-run on every decode replay.
         cache.collect_stats = config.moe_collect_stats
@@ -1242,20 +1240,25 @@ class Engine:
         # _iter_offload_moe_layers() hook when its MoE blocks are bespoke nn.Modules (DSV4).
         layers = attach_offload_moe_cache(self.model, cache)
         assert len(layers) == config.model_config.num_moe_layers
+        if cache.decode_target == "hybrid":
+            # before the CPU executor exists: a startup split bench must not share its cores
+            self._resolve_hybrid_fetch(config, cache, layers[0])
         if cache.decode_target in ("cpu", "hybrid"):
             self._init_cpu_moe_executor(config, cache, layers)
         self.ctx.moe_offload_cache = cache
         self.moe_offload_cache = cache
         return cache
 
-    def _resolve_hybrid_fetch(self, config: EngineConfig, cache) -> None:
+    def _resolve_hybrid_fetch(self, config: EngineConfig, cache, sample) -> None:
         """Resolve --moe-hybrid-max-fetch -1 (auto) into a bandwidth-matched fetch fraction.
 
         Perfect fetch/compute overlap wants fetched : cpu-computed misses = pcie_bw :
         (cpu_bw - pcie_bw), i.e. fetching a pcie_bw / cpu_bw fraction of each decode
         step's misses -- both sides then finish together instead of one idling. The
         achieved bandwidths come from the cached `ft bench bw` profile (the same one the
-        auto backend pick reads); without a usable profile the old fixed cap of 1 applies.
+        auto backend pick reads); without one, a quick startup bench measures them
+        (``_startup_hybrid_fraction``), and only if that is off or fails does the old fixed
+        cap of 1 apply.
         """
         if config.moe_hybrid_max_fetch >= 0:
             return  # explicit fixed cap
@@ -1268,6 +1271,10 @@ class Engine:
             expert_bytes=_model_expert_bytes(cache.quant_format, model_config),
             geometry=_model_geometry(model_config),
         )
+        source = "benched PCIe/CPU bandwidth ratio"
+        if fraction is None:
+            fraction = self._startup_hybrid_fraction(config, cache, sample, gpu_uuid)
+            source = "measured at startup"
         if fraction is None:
             cache.hybrid_max_fetch = 1
             logger.warning_rank0(
@@ -1279,8 +1286,51 @@ class Engine:
         cache.hybrid_fetch_fraction = fraction
         logger.info_rank0(
             f"--moe-hybrid-max-fetch auto: fetching {fraction:.1%} of each decode step's "
-            "expert misses over PCIe (benched PCIe/CPU bandwidth ratio), the rest on the CPU"
+            f"expert misses over PCIe ({source}), the rest on the CPU"
         )
+
+    def _startup_hybrid_fraction(self, config: EngineConfig, cache, sample,
+                                 gpu_uuid: str | None) -> float | None:
+        """Measure the hybrid fetch split for this GPU and model shape (or reuse the cached
+        measurement). The overlapped CPU MoE + PCIe gather pair on a small synthetic set,
+        ~1-2 s, while the CPU executor does not exist yet. None when switched off
+        (FREETOKEN_HYBRID_STARTUP_BENCH=0), under tensor parallelism (ranks would contend for
+        the same CPU and DRAM; a `ft bench bw` profile covers that), or when the bench fails."""
+        if not ENV.HYBRID_STARTUP_BENCH.value or config.tp_info.size > 1:
+            return None
+        from freetoken.moe import bench_profile
+        from freetoken.moe.benchbw import _CPU_MOE_FORMATS, Workload, measure_hybrid_split
+
+        geometry = _model_geometry(config.model_config)
+        fmt = bench_profile._QUANT_TO_BENCH_FORMAT.get(cache.quant_format)
+        if geometry is None or fmt not in _CPU_MOE_FORMATS:
+            return None
+        key = bench_profile.startup_split_key(cache.quant_format, geometry)
+        fraction = bench_profile.load_startup_hybrid_fraction(gpu_uuid, key)
+        if fraction is not None:
+            return fraction
+        wl = Workload(
+            "startup", geometry["hidden"], geometry["inter"], geometry["experts"],
+            geometry["top_k"], (fmt,), activation=sample.activation,
+            swiglu_alpha=float(sample.alpha), swiglu_limit=sample.limit,
+        )
+        logger.info_rank0(
+            f"--moe-hybrid-max-fetch auto: no `ft bench bw` profile for {fmt!r} experts of this "
+            "shape; measuring the CPU/PCIe split now (once per GPU and model shape)"
+        )
+        try:
+            entry = measure_hybrid_split(fmt, wl, self.device, config.moe_cpu_threads)
+        except Exception as exc:  # a failed bench only costs the better split
+            logger.warning_rank0(f"--moe-hybrid-max-fetch auto: startup bench failed: {exc}")
+            return None
+        fraction = bench_profile.hybrid_fraction_from_entry(entry)
+        if fraction is not None:
+            bench_profile.save_startup_hybrid_split(gpu_uuid, key, entry)
+            logger.info_rank0(
+                f"--moe-hybrid-max-fetch auto: CPU MoE {entry['cpu_moe_overlap_gbs']} GB/s, "
+                f"PCIe gather {entry['pcie_gather_overlap_gbs']} GB/s while overlapped"
+            )
+        return fraction
 
     def _init_cpu_moe_executor(self, config: EngineConfig, cache, layers) -> None:
         """Build the persistent CPU MoE executor (decode-time expert compute).

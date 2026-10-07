@@ -83,7 +83,8 @@ class EngineConfig:
     # (layer, decode step); the rest of that step's misses are computed on the CPU.
     # -1 (default) = auto: fetch the benched pcie_bw/cpu_bw fraction of each step's
     # misses so the PCIe fetch and the CPU compute finish together (perfect overlap);
-    # falls back to a fixed cap of 1 without a usable `ft bench bw` profile.
+    # without a usable `ft bench bw` profile the engine measures the split at startup
+    # (cached per GPU and model shape; FREETOKEN_HYBRID_STARTUP_BENCH=0 -> fixed cap of 1).
     moe_hybrid_max_fetch: int = -1
     cuda_graph_bs: List[int] | None = None
     cuda_graph_max_bs: int | None = None

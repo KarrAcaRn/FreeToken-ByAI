@@ -370,6 +370,9 @@ ft bench bw --gpu 1               # a specific GPU (UUID or nvidia-smi index, as
 
 Measures host-RAM vs PCIe bandwidth with the real cpu/offload MoE kernels and writes a
 profile that `ft serve --moe-strategy auto` and `--moe-hybrid-max-fetch -1` then read.
+Without a profile, `--moe-strategy hybrid` measures its fetch split at startup instead (one or
+two seconds, cached in `~/.cache/freetoken/hybrid_split/<gpu-uuid>.json` per model shape;
+`FREETOKEN_HYBRID_STARTUP_BENCH=0` falls back to a fixed cap of 1).
 
 - One profile per GPU, at `~/.cache/freetoken/benchbw/<gpu-uuid>.json`.
 - Keyed on expert format + GPU, so a profile from other hardware is ignored rather than
