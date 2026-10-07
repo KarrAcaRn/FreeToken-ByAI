@@ -15,7 +15,6 @@ import triton
 from freetoken.kernel.triton.dsv4.fp8_linear import act_quant_fp8_roundtrip
 from freetoken.kernel.triton.dsv4.fused_moe import (
     _decode_dsfp4_moe_kernel,
-    _e2m1_lut,
     _prefill_dsfp4_moe_kernel,
     fused_swiglu,
 )
@@ -71,7 +70,6 @@ def _grouped_decode(
     grid = (total_routes, triton.cdiv(N, BLOCK_SIZE_N))
     _decode_dsfp4_moe_kernel[grid](
         a, packed_cache, scale_u8, out, topk_weights, slots,
-        _e2m1_lut(a.device.index),
         total_routes, N, K,
         a.stride(0), a.stride(1),
         packed_cache.stride(0), packed_cache.stride(1), packed_cache.stride(2),
