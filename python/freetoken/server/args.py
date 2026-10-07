@@ -867,6 +867,18 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--dense-offload-layers",
+        default=ServerArgs.dense_offload_layers,
+        metavar="N|auto",
+        help=(
+            "Keep N decoder layers of a dense model in pinned host RAM and stream their weights "
+            "over PCIe on every forward, freeing their VRAM for the KV cache. 'auto' offloads the "
+            "fewest layers that give the KV pool --kv-reserve-tokens. Costs decode speed (one "
+            "layer's weights over PCIe per token each); long prefills hide most of the copies."
+        ),
+    )
+
+    parser.add_argument(
         "--swa-decoder-replay",
         default=ServerArgs.swa_decoder_replay,
         choices=["bounded", "exact"],
