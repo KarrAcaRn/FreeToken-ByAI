@@ -1927,10 +1927,13 @@ class Engine:
             batch.out_loc = self.page_table[req.table_idx, position_i : position_i + 1]
             batch.fla_metadata = None
             self.attn_backend.prepare_metadata(batch)
-            with self.ctx.forward_batch(batch):
-                if self.graph_runner.can_use_cuda_graph(batch) and self.graph_runner.can_return_hidden_layers(
-                    worker.target_layer_ids
-                ):
+            use_graph = self.graph_runner.can_use_cuda_graph(batch) and self.graph_runner.can_return_hidden_layers(
+                worker.target_layer_ids
+            )
+            # forward_host_ctx stages the step's host-side inputs (the disk PLE rows) like any
+            # decode forward; without it a captured PLE lookup waits forever
+            with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
+                if use_graph:
                     logits_i, hidden_i = self.graph_runner.replay(
                         batch, return_hidden_layers=worker.target_layer_ids
                     )
