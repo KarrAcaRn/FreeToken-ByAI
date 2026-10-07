@@ -8,8 +8,8 @@ requires = [
     # 77 is the first release that understands the PEP 639 `license` SPDX string below.
     "setuptools>=77",
     "wheel",
-    "torch>=2.11,<2.12",
-    "apache-tvm-ffi==0.1.13.post3",
+    "torch>=2.14.1,<2.15",
+    "apache-tvm-ffi==0.1.14.post1",
 ]
 build-backend = "build_backend"
 backend-path = ["."]
@@ -20,18 +20,17 @@ dynamic = ["version"]
 description = "Prebuilt TVM FFI kernel cache for FreeToken"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-dependencies = ["apache-tvm-ffi==0.1.13.post3"]
+dependencies = ["apache-tvm-ffi==0.1.14.post1"]
 
-# Provenance pin: PyPI's torch 2.11.0 is itself the cu130 build, but this index serves
-# ONLY cu130 wheels, so an isolated build can never resolve a different-CUDA torch and
-# stamp the wheel +cu126/+cu128. uv applies these to build-system.requires when this
+# Provenance pin: this index serves ONLY cu132 wheels, so an isolated build can never resolve a different-CUDA torch and
+# stamp the wheel +cu130 (PyPI) or +cu128. uv applies these to build-system.requires when this
 # directory is the build root. Mirrors ../pyproject.toml.
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu132" }
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [tool.setuptools]

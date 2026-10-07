@@ -4,7 +4,7 @@
 #
 # Installs the `freetoken` runtime (the `ft` CLI) and its prebuilt kernel-cache
 # wheel into a managed venv, then wires it up so FreeToken Desktop can find it.
-# Dependencies come from PyPI via uv, except torch whose cu130
+# Dependencies come from PyPI via uv, except torch whose cu132
 # wheels live on a dedicated index (see CU_INDEX_ARGS below).
 #
 # Typical use (once a release exists):
@@ -35,7 +35,7 @@ set -euo pipefail
 
 DEFAULT_WHEEL_URL=""   # filled in once GitHub Releases are live
 DEFAULT_KERNEL_CACHE_WHEEL_URL=""   # filled in once GitHub Releases are live
-DEFAULT_FLASHINFER_VERSION="0.6.18.post1"
+DEFAULT_FLASHINFER_VERSION="0.7.0.post1"
 
 FT_HOME="${FREETOKEN_HOME:-$HOME/.freetoken}"
 VENV="$FT_HOME/venv"
@@ -206,8 +206,8 @@ mkdir -p "$FT_HOME"
 # re-install can't inherit a stale/mismatched torch (e.g. an old cu128 venv after a cu130 bump).
 "$UV" venv "$VENV" --python "$PY_VERSION" --clear
 
-# PyPI's torch 2.11.0 is the same cu130 build the pytorch index
-# serves; the explicit index pins provenance to the cu130 channel. `unsafe-best-match`
+# torch comes from the pytorch cu132 index (PyPI's torch 2.14.1 is the cu130 build);
+# flashinfer's prebuilt jit-cache only has a cu130 channel, which the 13.x runtime loads. `unsafe-best-match`
 # is needed because the pytorch index also mirrors stale copies of common deps (e.g.
 # packaging<=24.1) that would shadow PyPI under uv's first-index strategy; all indexes
 # here are trusted. [tool.uv.sources] does not survive into a built wheel, so the
@@ -226,7 +226,7 @@ INSTALL_WHEELS=(
 )
 CU_INDEX_ARGS=(
   --index-strategy unsafe-best-match
-  --extra-index-url https://download.pytorch.org/whl/cu130
+  --extra-index-url https://download.pytorch.org/whl/cu132
   --extra-index-url https://flashinfer.ai/whl
   --extra-index-url https://flashinfer.ai/whl/cu130
 )
