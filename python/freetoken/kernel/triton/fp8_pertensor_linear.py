@@ -56,7 +56,10 @@ def rowwise_scaled_mm_ok() -> bool:
 
     idx = assigned_visible_gpu()
     dev = torch.device("cuda", torch.cuda.current_device() if idx is None else idx)
-    if torch.cuda.get_device_capability(dev) == (8, 9) and _torch_version() < (2, 12):
+    if torch.cuda.get_device_capability(dev) == (8, 9):
+        # torch < 2.12: the stream bug above. torch >= 2.12 fixed it, but its sm_89 row-wise
+        # CUTLASS kernel is ~2.5x slower than the per-part cuBLASLt GEMMs at prefill sizes
+        # (Qwen3.8-27B 4k prefill on a 4090: 2427 vs 2993 tok/s), so keep the parts there too.
         return False
     # Probe on the default stream (safe even where the launch ignores the current stream); a
     # build without the row-wise kernel raises here instead of at the first forward.
