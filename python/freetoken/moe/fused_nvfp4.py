@@ -118,7 +118,6 @@ def _decode_gemm_marlin(
     grid = (total_routes, triton.cdiv(N, block_n))
     _decode_nvfp4_marlin_kernel[grid](
         a, packed_i32, scale, glob, c, topk_weights, topk_ids,
-        _e2m1_lut(a.device.index),
         total_routes, N, K,
         a.stride(0), a.stride(1),
         packed_i32.stride(0), packed_i32.stride(1), packed_i32.stride(2),
