@@ -55,3 +55,11 @@ actual target reported by `rocminfo`.
   only where hipGraph replays stream memory operations (ROCm 10). ROCm 7.14
   captures but does not replay them, so a startup probe falls back to the
   slower host-callback sync there.
+
+## Optional kernel backends
+
+FreeToken's FlashInfer, `sgl_kernel`, and vLLM kernel integrations are CUDA-only.
+On ROCm, these paths use the built-in fallbacks; do not install the `[accel]`,
+`[fi]`, or `[sgl]` extras. Forcing `--attention-backend fi`, `fa`, or `trtllm`,
+or NVFP4 Marlin/b12x (e.g. `--quant-backend moe.nvfp4=marlin` or
+`--quant-backend moe.nvfp4=b12x`), fails with a ROCm-specific error.
