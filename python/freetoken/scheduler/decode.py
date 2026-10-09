@@ -29,10 +29,15 @@ class DecodeManager:
         tokens_reserved = (self.page_size - 1) * len(self.running_reqs)  # 1 page reserved
         return sum(req.remain_len for req in self.running_reqs) + tokens_reserved
 
-    def schedule_next_batch(self) -> Batch | None:
-        if not self.runnable:
+    def schedule_next_batch(self, exclude: Set[Req] = frozenset(), max_size: int | None = None) -> Batch | None:
+        """All running requests, or (pipeline parallelism) at most ``max_size`` of those not in
+        ``exclude``, oldest first."""
+        reqs = sorted((req for req in self.running_reqs if req not in exclude), key=lambda req: req.uid)
+        if max_size is not None:
+            reqs = reqs[:max_size]
+        if not reqs:
             return None
-        return Batch(reqs=sorted(self.running_reqs, key=lambda req: req.uid), phase="decode")
+        return Batch(reqs=reqs, phase="decode")
 
     @property
     def runnable(self) -> bool:

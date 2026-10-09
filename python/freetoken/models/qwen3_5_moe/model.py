@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from freetoken.core import get_global_ctx
+from freetoken.distributed.pipeline import PipelineMissingLayer, stage_input
 from freetoken.layers import (
     BaseOP,
     GemmaRMSNorm,
@@ -76,28 +77,54 @@ class Qwen3_5DecoderLayer(BaseOP):
 
 class Qwen3_5Model(BaseOP):
     def __init__(self, config: ModelConfig, *, prefix: str = "model"):
-        self.embed_tokens = VocabParallelEmbedding(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.hidden_size,
-        )
+        # pipeline stage: the embedding lives on the first stage, the final norm on the last
+        self._first, self._last = config.pp_is_first, config.pp_is_last
+        self._hidden_size = config.hidden_size
+        self._pp_dtype = torch.get_default_dtype()  # the engine builds under the model dtype
+        if self._first:
+            self.embed_tokens = VocabParallelEmbedding(
+                num_embeddings=config.vocab_size,
+                embedding_dim=config.hidden_size,
+            )
         self.layers = OPList(
             [
                 Qwen3_5DecoderLayer(config, layer_id, prefix=f"{prefix}.layers.{layer_id}")
+                if config.owns_layer(layer_id) else PipelineMissingLayer(layer_id)
                 for layer_id in range(config.num_layers)
             ]
         )
-        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        if self._last:
+            self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    @property
+    def _local_layers(self) -> list:
+        """This pipeline stage's decoder layers (all of them without pipeline parallelism).
+
+        A property, not a stored list, so module walkers (iter_moe_layers) see each layer once."""
+        return [layer for layer in self.layers.op_list if isinstance(layer, Qwen3_5DecoderLayer)]
+
+    @property
+    def pp_hidden_width(self) -> int:
+        """Width of the residual stream handed between pipeline stages."""
+        return self._hidden_size
 
     def forward(
         self, input_ids: torch.Tensor, *, return_hidden_layers: set[int] | None = None
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        x = embed_input_ids(self.embed_tokens, input_ids, get_global_ctx().batch)
+        batch = get_global_ctx().batch
+        if self._first:
+            x = embed_input_ids(self.embed_tokens, input_ids, batch)
+        else:
+            x = stage_input(batch, input_ids.shape[0], self._hidden_size, self._pp_dtype, input_ids.device)
         residual: torch.Tensor | None = None
         hidden_states: list[torch.Tensor] | None = [] if return_hidden_layers else None
-        for i, layer in enumerate(self.layers.op_list):
+        for layer in self._local_layers:
             x, residual = layer.forward(x, residual)
-            if hidden_states is not None and i in return_hidden_layers:
+            if hidden_states is not None and layer._layer_id in return_hidden_layers:
                 hidden_states.append(x)
+        if not self._last:
+            # the next stage starts from the summed residual stream (its first layer norms it)
+            return x if residual is None else x + residual
         x, _ = self.norm.forward_add_residual(x, residual)
         if hidden_states is not None:
             return x, hidden_states
@@ -106,19 +133,29 @@ class Qwen3_5Model(BaseOP):
 
 class Qwen3_5ForCausalLM(BaseLLMModel):
     def __init__(self, config: ModelConfig):
+        self._last = config.pp_is_last
         self.model = Qwen3_5Model(config)
-        self.lm_head = ParallelLMHead(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.hidden_size,
-            tie_word_embeddings=config.tie_word_embeddings,
-            tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
-            quant_config=config.quant,
-            prefix="lm_head",
-        )
+        if self._last:
+            self.lm_head = ParallelLMHead(
+                num_embeddings=config.vocab_size,
+                embedding_dim=config.hidden_size,
+                tie_word_embeddings=config.tie_word_embeddings,
+                tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
+                quant_config=config.quant,
+                prefix="lm_head",
+            )
         super().__init__()
+
+    supports_pipeline_parallel = True
+
+    @property
+    def pp_hidden_width(self) -> int:
+        return self.model.pp_hidden_width
 
     def forward(self, *, return_hidden_layers: set[int] | None = None) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         output = self.model.forward(get_global_ctx().batch.input_ids, return_hidden_layers=return_hidden_layers)
+        if not self._last:
+            return output  # the residual stream for the next pipeline stage
         if isinstance(output, tuple):
             hidden, hidden_states = output
             return self.lm_head.forward(hidden), hidden_states

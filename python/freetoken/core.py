@@ -193,6 +193,9 @@ class Batch:
     # _prepare_batch succeeds. Continuation chunks leave this empty, so accounting is
     # exactly-once.
     prompt_admissions: List[Tuple[int, int, int]] = field(default_factory=list, init=False)
+    # Pipeline parallelism: the residual stream the previous stage sent, one row per input token
+    # (None on the first stage, and in warmup / capture forwards, which run on zeros).
+    pp_hidden: torch.Tensor | None = field(default=None, init=False)
 
     @property
     def is_prefill(self) -> bool:

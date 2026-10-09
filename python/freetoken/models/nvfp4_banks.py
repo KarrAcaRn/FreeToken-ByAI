@@ -53,6 +53,10 @@ def _bank_layer(spec: Nvfp4ExpertSourceSpec, layer: int, config) -> int | None:
     if bank_layer is None:
         return None
     num_layers = _num_moe_layers(config)
+    if getattr(config, "pp_layers", None) is not None:
+        # a pipeline stage keeps only its own banks, renumbered from its first MoE layer
+        bank_layer -= config.moe_bank_offset
+        return bank_layer if 0 <= bank_layer < num_layers else None
     if bank_layer < 0 or bank_layer >= num_layers:
         raise ValueError(
             f"{spec.desc}: bank layer {bank_layer} for checkpoint layer {layer} "

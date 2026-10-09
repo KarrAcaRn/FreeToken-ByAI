@@ -513,6 +513,9 @@ def make_moe_layer(
     """
     offload = is_offload_moe_strategy(config.moe_strategy)
     layer_cls = (offload_cls or OffloadMoELayer) if offload else (resident_cls or MoELayer)
+    if layer_id is not None and getattr(config, "pp_layers", None) is not None:
+        # a pipeline stage holds only its own expert banks, numbered from its first MoE layer
+        layer_id -= config.moe_bank_offset
     kwargs = dict(
         num_experts=num_experts if num_experts is not None else config.num_experts,
         top_k=top_k if top_k is not None else config.num_experts_per_tok,

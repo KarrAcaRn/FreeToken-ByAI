@@ -349,13 +349,29 @@ def main(argv: Sequence[str] | None = None, prog: str = "ft info") -> int:
     from freetoken.server.args import parse_args
 
     config, _ = parse_args(serve_argv, prog=prog)
+    stages = config.pp_info.size
+    if stages > 1:
+        # one forecast per pipeline stage: each GPU holds its own layers, caches and KV pages
+        from dataclasses import replace
+
+        from freetoken.distributed import DistributedInfo
+
+        configs = [replace(config, pp_info=DistributedInfo(r, stages)) for r in range(stages)]
+    else:
+        configs = [config]
     try:
-        report = analyze(config, opts)
+        reports = [analyze(c, opts) for c in configs]
     except (ValueError, RuntimeError, NotImplementedError) as exc:
         print(f"{prog}: error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     if opts.json:
-        print(json.dumps(report_dict(report), indent=2, default=str))
+        out = [report_dict(r) for r in reports]
+        print(json.dumps(out[0] if stages == 1 else out, indent=2, default=str))
     else:
-        print(format_report(report))
-    return 1 if report.forecast.verdict == "does not fit" else 0
+        for c, report in zip(configs, reports):
+            if stages > 1:
+                start, end = c.model_config.pp_layers
+                print(f"=== pipeline stage {c.pp_info.rank + 1}/{stages}: decoder layers {start}-{end - 1} "
+                      "(the KV page count is the smallest any stage holds) ===")
+            print(format_report(report))
+    return 1 if any(r.forecast.verdict == "does not fit" for r in reports) else 0

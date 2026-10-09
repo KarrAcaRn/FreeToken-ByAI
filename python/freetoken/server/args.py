@@ -344,12 +344,33 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--pipeline-parallel-size",
+        "--pp-size",
+        type=int,
+        default=1,
+        help=(
+            "Split the decoder layers over this many GPUs, one process per GPU: each keeps only "
+            "its layers' weights, KV cache and expert cache, and requests run through the GPUs "
+            "one after another, several at a time (text-only, --tp-size 1)."
+        ),
+    )
+
+    parser.add_argument(
+        "--pp-layer-split",
+        type=str,
+        default=None,
+        metavar="N,N,...",
+        help="Decoder layers per pipeline stage, first GPU first (default: an even split).",
+    )
+
+    parser.add_argument(
         "--gpu",
         type=_lazy_gpu_arg,
         default=ServerArgs.gpu,
         help=(
-            "GPU(s) to run on, comma-separated; entry i is TP rank i. Each entry is a GPU "
-            "UUID (GPU-xxxx..., as nvidia-smi -L prints) or an nvidia-smi index"
+            "GPU(s) to run on, comma-separated; entry i is TP rank i (with --pp-size, pipeline "
+            "stage i). Each entry is a GPU UUID (GPU-xxxx..., as nvidia-smi -L prints) or an "
+            "nvidia-smi index"
         ),
     )
 
@@ -1182,13 +1203,20 @@ def parse_args(
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
 
+    if kwargs["pipeline_parallel_size"] < 1:
+        parser.error("--pp-size must be >= 1")
+    if kwargs["pipeline_parallel_size"] > 1 and kwargs["tensor_parallel_size"] > 1:
+        parser.error("--pp-size and --tp-size do not combine yet")
+    if kwargs["pp_layer_split"] is not None and kwargs["pipeline_parallel_size"] == 1:
+        parser.error("--pp-layer-split needs --pp-size > 1")
     # reject a too-long list here with a clear reason, not as a dead rank later
-    if len(kwargs["gpu"]) not in (0, kwargs["tensor_parallel_size"]):
-        if kwargs["tensor_parallel_size"] == 1 and len(kwargs["gpu"]) > 1:
-            parser.error("tensor parallelism is not supported yet: --gpu takes one entry")
+    world = kwargs["tensor_parallel_size"] * kwargs["pipeline_parallel_size"]
+    if len(kwargs["gpu"]) not in (0, world):
+        if world == 1 and len(kwargs["gpu"]) > 1:
+            parser.error("--gpu takes one entry (several GPUs need --tp-size or --pp-size)")
         parser.error(
-            f"--gpu has {len(kwargs['gpu'])} entries but --tensor-parallel-size is "
-            f"{kwargs['tensor_parallel_size']}; give one entry per TP rank"
+            f"--gpu has {len(kwargs['gpu'])} entries but --tensor-parallel-size x "
+            f"--pipeline-parallel-size is {world}; give one entry per rank"
         )
 
     # resolve some arguments
@@ -1302,6 +1330,7 @@ def parse_args(
     kwargs["dtype"] = DTYPE_MAP[dtype_str] if isinstance(dtype_str, str) else dtype_str
     kwargs["tp_info"] = DistributedInfo(0, kwargs["tensor_parallel_size"])
     del kwargs["tensor_parallel_size"]
+    kwargs["pp_info"] = DistributedInfo(0, kwargs.pop("pipeline_parallel_size"))
 
     disabled = set(ENCODER_KINDS) if kwargs.pop("text_model_only") else set()
     disabled.update(kwargs.pop("mm_disable"))

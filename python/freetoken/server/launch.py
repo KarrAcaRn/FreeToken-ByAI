@@ -82,8 +82,8 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
     from freetoken.gpu_select import set_assigned_gpu
 
     # resolved UUIDs when we have them, the raw --gpu entries when NVML could not resolve them, else one CUDA ordinal per rank
-    targets = args.gpu_assigned or args.gpu or tuple(str(r) for r in range(args.tp_info.size))
-    set_assigned_gpu(targets[args.tp_info.rank])
+    targets = args.gpu_assigned or args.gpu or tuple(str(r) for r in range(args.tp_info.world_size))
+    set_assigned_gpu(targets[args.tp_info.world_rank])
 
     _configure_worker_tqdm_lock()
 
@@ -179,17 +179,24 @@ def launch_server(
         mp.set_start_method("spawn", force=True)
         detach = server_args.shell_mode  # see _detach_process_group
 
-        world_size = server_args.tp_info.size
+        tp_size, pp_size = server_args.tp_info.size, server_args.pp_info.size
+        world_size = tp_size * pp_size
         ack_queue: mp.Queue = mp.Queue()
         processes: list[mp.Process] = []
 
         for i in range(world_size):
-            new_args = replace(server_args, tp_info=DistributedInfo(i, world_size))
+            # world rank i = pipeline stage i // tp_size, TP rank i % tp_size (--gpu entry i)
+            new_args = replace(
+                server_args,
+                tp_info=DistributedInfo(i % tp_size, tp_size, world_rank=i, world_size=world_size),
+                pp_info=DistributedInfo(i // tp_size, pp_size),
+            )
+            name = f"freetoken-TP{i}-scheduler" if pp_size == 1 else f"freetoken-PP{i // tp_size}-TP{i % tp_size}-scheduler"
             p = mp.Process(
                 target=_run_scheduler,
                 args=(new_args, ack_queue),
                 daemon=False,
-                name=f"freetoken-TP{i}-scheduler",
+                name=name,
             )
             p.start()
             processes.append(p)

@@ -25,8 +25,10 @@ def num_moe_layers(config) -> int:
 
 
 def bank_layer_of(config, layer: int) -> int | None:
-    """MoE-layer index of checkpoint layer ``layer``; None for the leading dense layers."""
-    bank_layer = layer - int(getattr(config, "first_k_dense_replace", 0) or 0)
+    """MoE-layer index of checkpoint layer ``layer``; None for the leading dense layers (and for
+    the layers of other pipeline stages, whose banks start at ``moe_bank_offset``)."""
+    first = int(getattr(config, "first_k_dense_replace", 0) or 0) + int(getattr(config, "moe_bank_offset", 0) or 0)
+    bank_layer = layer - first
     return bank_layer if 0 <= bank_layer < num_moe_layers(config) else None
 
 

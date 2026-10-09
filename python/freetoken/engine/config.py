@@ -24,6 +24,10 @@ class EngineConfig:
     model_path: str
     tp_info: DistributedInfo
     dtype: torch.dtype
+    # --pp-size: this process's pipeline stage (rank of size); its decoder layers come from
+    # --pp-layer-split (comma-separated layer counts per stage), else an even split
+    pp_info: DistributedInfo = DistributedInfo(0, 1)
+    pp_layer_split: str | None = None
     # --hf-overrides: applied to the checkpoint config the model is built from (cached_load_hf_config)
     hf_overrides: Mapping[str, Any] = field(default_factory=dict)
     max_running_req: int = 4
@@ -195,7 +199,13 @@ class EngineConfig:
         quant = checkpoint_quant_config(self.model_path, hf_config, spec)
         set_quant_config(quant)
         model_config = _load_attr(spec.module, spec.parse_config)(hf_config)
-        return replace(model_config, quant=quant)
+        model_config = replace(model_config, quant=quant)
+        if self.pp_info.size > 1:
+            from freetoken.distributed.pipeline import split_layers, stage_model_config
+
+            stages = split_layers(model_config.num_layers, self.pp_info.size, self.pp_layer_split)
+            model_config = stage_model_config(model_config, stages[self.pp_info.rank])
+        return model_config
 
     @property
     def max_seq_len(self) -> int:

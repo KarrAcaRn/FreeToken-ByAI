@@ -47,7 +47,9 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--ssl-certfile` | disabled | PEM certificate chain for HTTPS; requires `--ssl-keyfile` |
 | `--ssl-keyfile` | disabled | PEM private key for HTTPS; requires `--ssl-certfile` |
 | `--launch-nonce` | unset | Optional non-secret local-supervisor correlation token, echoed only by loopback `/v1/runtime/identity` (which also requires `--api-key` when set) |
-| `--gpu` | GPU 0 | GPU to run on: a UUID from `nvidia-smi -L` or an `nvidia-smi` index; see [below](#choosing-a-gpu) |
+| `--gpu` | GPU 0 | GPU to run on: a UUID from `nvidia-smi -L` or an `nvidia-smi` index; see [below](#choosing-a-gpu). With `--pp-size N`, N entries, first stage first |
+| `--pp-size`, `--pipeline-parallel-size` | 1 | Split the decoder layers over N GPUs; see [Pipeline parallelism](#pipeline-parallelism) |
+| `--pp-layer-split` | even | Decoder layers per pipeline stage, e.g. `20,16,12` |
 | `--max-running-requests` | 4 | Max concurrently running requests |
 | `--max-output-tokens` | 32768 | Default output budget for requests that omit one |
 | `--max-seq-len-override` | from checkpoint | Max sequence length |
@@ -77,6 +79,33 @@ GPU 1: NVIDIA GeForce RTX 5090 (UUID: GPU-9e8d7c6b-5a49-4f13-8207-c1b0a4e6d3f5)
 ft serve --model ... --gpu 1             # by nvidia-smi index -- the 5090
 ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefix is enough)
 ```
+
+### Pipeline parallelism
+
+`--pp-size N` runs one engine process per GPU and gives each a contiguous run of decoder
+layers: GPU 1 layers 0-15, GPU 2 layers 16-31, GPU 3 layers 32-47 for a 48-layer model. Each
+GPU holds only its layers' weights, KV cache and -- for a MoE model -- expert banks and expert
+slot cache, so every layer gets about N times the expert cache it would get on one card. The
+residual stream goes from GPU to GPU over NCCL; the last GPU samples.
+
+Several requests run at once: while GPU 2 computes request A's token, GPU 1 already computes
+request B's. A decode step takes only requests whose previous token is back, at most
+running / N of them, so N or more concurrent requests keep every GPU busy. A single request
+does not get faster from the pipeline itself (its next token needs the whole pass), only from
+the bigger expert cache per layer.
+
+```bash
+ft serve --model RadixArk/Qwen3.8-Flash-Next-NVFP4 --pp-size 3 --gpu 0,1,2 \
+  --text-model-only --kv-cache-dtype fp8 --max-running-requests 3
+ft info RadixArk/Qwen3.8-Flash-Next-NVFP4 --pp-size 3 --gpu-memory-gib 16 ...  # one forecast per stage
+```
+
+The stages agree on one KV page count (the smallest any of them holds) and read their expert
+banks one after another at startup, so peak host RAM stays at one stage's reader on top of the
+banks. Families: Qwen3.5 / Qwen3.6 (`qwen3_5_moe`) and Qwen3.8-Flash-Next (`qwen4_exp`). Not
+yet combined with `--tp-size`, speculative decoding, image input, the CPU / hybrid MoE
+executors, `--moe-disk-tier`, `--dense-offload-layers`, `--mamba-host-slots`, FTW checkpoints or
+tied embeddings; runtime cache rebuilds are refused.
 
 ### KV cache & memory
 

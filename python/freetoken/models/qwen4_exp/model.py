@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, List, Sequence, Tuple
 
 import torch
 from freetoken.core import get_global_ctx
+from freetoken.distributed.pipeline import PipelineMissingLayer, stage_input
 from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add
 from freetoken.layers import BaseOP, OPList, ParallelLMHead, VocabParallelEmbedding
 from freetoken.models.blocks import BaseLLMModel
@@ -105,8 +106,9 @@ class Qwen4ExpDecoderLayer(BaseOP):
         return mlp_hc.combine_norm(hidden, routed, inject, self._next_norm, shared, gate)
 
 
-def link_next_norms(layers: Sequence[Qwen4ExpDecoderLayer], final_norm: GroupedPlusOneRMSNorm) -> None:
-    """Point each layer at the hc_norm that reads its output, or None when a PLE layer comes next."""
+def link_next_norms(layers: Sequence[Qwen4ExpDecoderLayer], final_norm: GroupedPlusOneRMSNorm | None) -> None:
+    """Point each layer at the hc_norm that reads its output, or None when a PLE layer comes next
+    (or, with ``final_norm`` None, after the last layer of a pipeline stage)."""
     for layer, nxt in zip(layers, layers[1:]):
         layer._next_norm = None if nxt.ple is not None else nxt.attn_hyper_connection.hc_norm
     if layers:
@@ -116,20 +118,40 @@ def link_next_norms(layers: Sequence[Qwen4ExpDecoderLayer], final_norm: GroupedP
 class Qwen4ExpModel(BaseOP):
     def __init__(self, config: ModelConfig, *, prefix: str = "model") -> None:
         self.hc_count = config.qwen4_args.hc_count
-        self.embed_tokens = VocabParallelEmbedding(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.hidden_size,
-        )
+        # pipeline stage: the embedding lives on the first stage, the final mixer on the last
+        self._first, self._last = config.pp_is_first, config.pp_is_last
+        self._hidden_size = config.hidden_size
+        self._pp_dtype = torch.get_default_dtype()  # the engine builds under the model dtype
+        if self._first:
+            self.embed_tokens = VocabParallelEmbedding(
+                num_embeddings=config.vocab_size,
+                embedding_dim=config.hidden_size,
+            )
         self.layers = OPList(
             [
                 Qwen4ExpDecoderLayer(config, layer_id, prefix=f"{prefix}.layers.{layer_id}")
+                if config.owns_layer(layer_id) else PipelineMissingLayer(layer_id)
                 for layer_id in range(config.num_layers)
             ]
         )
-        self.hyper_connection_mixer = GatedResidual(config, use_combine=False, prefix=f"{prefix}.hyper_connection_mixer")
-        link_next_norms(self.layers.op_list, self.hyper_connection_mixer.hc_norm)
+        if self._last:
+            self.hyper_connection_mixer = GatedResidual(config, use_combine=False, prefix=f"{prefix}.hyper_connection_mixer")
+        # a stage boundary hands over the bare residual: the next stage's first layer norms it itself
+        link_next_norms(self._local_layers, self.hyper_connection_mixer.hc_norm if self._last else None)
         # plain tuple (not an OP child), so it never shows up in the state dict
-        self._ple = tuple(layer.ple for layer in self.layers.op_list if layer.ple is not None)
+        self._ple = tuple(layer.ple for layer in self._local_layers if layer.ple is not None)
+
+    @property
+    def _local_layers(self) -> list:
+        """This pipeline stage's decoder layers (all of them without pipeline parallelism).
+
+        A property, not a stored list, so module walkers (iter_moe_layers) see each layer once."""
+        return [layer for layer in self.layers.op_list if isinstance(layer, Qwen4ExpDecoderLayer)]
+
+    @property
+    def pp_hidden_width(self) -> int:
+        """Width of the residual stream handed between pipeline stages."""
+        return self.hc_count * self._hidden_size
 
     @property
     def ple_layers(self) -> List[PLELayer]:
@@ -144,8 +166,11 @@ class Qwen4ExpModel(BaseOP):
         final mixer)."""
         if batch is None:
             batch = get_global_ctx().batch
-        hidden = embed_input_ids(self.embed_tokens, input_ids, batch)
-        hidden = hidden.repeat(1, self.hc_count)
+        if self._first:
+            hidden = embed_input_ids(self.embed_tokens, input_ids, batch)
+            hidden = hidden.repeat(1, self.hc_count)
+        else:
+            hidden = stage_input(batch, input_ids.shape[0], self.pp_hidden_width, self._pp_dtype, input_ids.device)
         meta = None
         if self._ple:
             from .ple import build_ple_metadata, commit_ngram_context
@@ -155,13 +180,16 @@ class Qwen4ExpModel(BaseOP):
                 ple.start_prefetch(batch, meta)
         normed = None
         taps: List[torch.Tensor] | None = [] if return_hidden_layers else None
-        for i, layer in enumerate(self.layers.op_list):
+        for layer in self._local_layers:
+            i = layer._layer_id
             tap = taps if taps is not None and i - 1 in return_hidden_layers else None
             hidden, normed = layer.forward(hidden, batch, normed, tap)
         if meta is not None:
             # single writer: the layers only read the context, so a second PLE layer's
             # prefetch sees the un-rolled window
             commit_ngram_context(meta, getattr(batch, "fla_metadata", None))
+        if not self._last:
+            return hidden
         out = self.hyper_connection_mixer.mix(hidden, normed)[0]
         if taps is None:
             return out
@@ -174,15 +202,22 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
     def __init__(self, config: ModelConfig) -> None:
         self._config = config
         self.model = Qwen4ExpModel(config)
-        self.lm_head = ParallelLMHead(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.hidden_size,
-            tie_word_embeddings=config.tie_word_embeddings,
-            tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
-            quant_config=config.quant,
-            prefix="lm_head",
-        )
+        if config.pp_is_last:
+            self.lm_head = ParallelLMHead(
+                num_embeddings=config.vocab_size,
+                embedding_dim=config.hidden_size,
+                tie_word_embeddings=config.tie_word_embeddings,
+                tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
+                quant_config=config.quant,
+                prefix="lm_head",
+            )
         super().__init__()
+
+    supports_pipeline_parallel = True
+
+    @property
+    def pp_hidden_width(self) -> int:
+        return self.model.pp_hidden_width
 
     def prime_graph_replay(self) -> None:
         table = getattr(self, "_ple_table", None)
@@ -277,6 +312,8 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
     ) -> torch.Tensor | Tuple[torch.Tensor, List[torch.Tensor]]:
         batch = get_global_ctx().batch
         output = self.model.forward(batch.input_ids, batch, return_hidden_layers=return_hidden_layers)
+        if not self._config.pp_is_last:
+            return output  # the residual stream for the next pipeline stage
         if isinstance(output, tuple):
             hidden, hidden_states = output
             return self.lm_head.forward(hidden), hidden_states

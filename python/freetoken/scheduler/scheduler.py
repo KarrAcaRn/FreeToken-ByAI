@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 import time
 
-from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
+from collections import deque
+from typing import TYPE_CHECKING, Deque, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
 import torch
 from freetoken.attention.linear import build_fla_metadata
@@ -106,6 +107,15 @@ def _multi_token_hit_length(input_len_after_append: int, max_device_len: int) ->
     return input_len_after_append >= max_device_len
 
 
+def _world_size(config) -> int:
+    """Engine processes in all (TP x PP); duck-typed configs without a world count are one group."""
+    return getattr(config.tp_info, "world_size", config.tp_info.size)
+
+
+def _busy_reqs(inflight) -> Set[Req]:
+    return {req for forward_input, _ in inflight for req in forward_input.batch.reqs}
+
+
 class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from freetoken.engine import Engine
@@ -178,6 +188,10 @@ class Scheduler(SchedulerIOMixin):
         # A received-but-not-yet-executed runtime cache rebuild (CacheRebuildBackendMsg),
         # run at the next idle safe point in overlap_loop. None when no rebuild is pending.
         self._pending_rebuild: CacheRebuildBackendMsg | None = None
+        # Pipeline parallelism: up to one launched batch per stage, oldest first; a request in
+        # one of them waits for its tokens before it is scheduled again (pipeline_loop).
+        self._pp_depth = config.pp_info.size
+        self._pp_inflight: Deque[ForwardData] = deque()
         self.tokenizer = load_tokenizer(config.model_path)
         self.eos_token_ids = load_eos_token_ids(config.model_path, self.tokenizer)
         self.toolcall_anchor_id = None
@@ -232,7 +246,7 @@ class Scheduler(SchedulerIOMixin):
         assert not self.prefill_manager.runnable, "rebuild requires no pending prefill"
         assert not self.decode_manager.runnable, "rebuild requires no running decode"
         torch.cuda.synchronize(self.device)
-        if self.config.tp_info.size > 1:
+        if _world_size(self.config) > 1:
             self.sync_all_ranks()
         self.engine.rebuild_runtime_cache(
             moe_cache_size=moe_cache_size, num_pages=num_pages, num_mamba_slots=num_mamba_slots,
@@ -259,7 +273,7 @@ class Scheduler(SchedulerIOMixin):
             min(self.config.max_extend_tokens, _chunk_cap)
             if _chunk_cap else self.config.max_extend_tokens
         )
-        if self.config.tp_info.size > 1:
+        if _world_size(self.config) > 1:
             self.sync_all_ranks()
 
     def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:
@@ -351,13 +365,82 @@ class Scheduler(SchedulerIOMixin):
         self._process_last_data(ongoing_data)
         self._flush_abort_acks()
 
+    def pipeline_loop(self) -> None:
+        """The main loop under pipeline parallelism: keep up to one batch per stage in flight.
+
+        While stage 2 runs batch k, stage 1 already runs batch k + 1 -- so a batch must not need
+        the tokens of one still in flight. A decode batch takes only requests with no forward in
+        flight, and at most its share of them (running / stages), leaving the rest for the next
+        batches; a prompt's chunks need no tokens and follow each other directly. Every stage
+        runs this same loop on the same messages, so they all launch and drain the same batches.
+        """
+        inflight = self._pp_inflight
+        blocking = not (
+            inflight
+            or self.prefill_manager.runnable
+            or self.decode_manager.runnable
+            or self._pending_rebuild is not None
+        )
+        for msg in self.receive_msg(blocking=blocking):
+            self._process_one_msg(msg)
+
+        self.stream.wait_stream(self.engine.stream)
+        forward_input = self._schedule_next_batch() if len(inflight) < self._pp_depth else None
+        if forward_input is not None:
+            with self.engine_stream_ctx:
+                self.engine.stream.wait_stream(self.stream)
+                self._restore_linear_states(forward_input.batch)
+                inflight.append((forward_input, self._forward(forward_input)))
+        if inflight and (forward_input is None or len(inflight) >= self._pp_depth):
+            self.stream.wait_stream(self.engine.stream)
+            self._process_last_data(self._pp_collect(inflight.popleft()))
+        self._flush_abort_acks()
+
+    def _pp_busy_reqs(self) -> Set[Req]:
+        """Requests with a forward in flight in the pipeline."""
+        return _busy_reqs(self._pp_inflight)
+
+    def _pp_collect(self, data: ForwardData) -> ForwardData:
+        """The drained batch's sampled tokens on every stage: the last stage sampled them and
+        broadcasts them on the CPU group; the others also write them into their token pool, which
+        the next forward of these requests reads."""
+        import torch.distributed as dist
+
+        forward_input, output = data
+        comm = self.engine.pp_comm
+        last = comm.pp_size - 1  # world rank of the last stage (TP is 1 under PP)
+        if comm.is_last:
+            output.copy_done_event.synchronize()
+            tokens = output.next_tokens_cpu
+        else:
+            tokens = torch.empty(forward_input.batch.size, dtype=torch.int32)
+        dist.broadcast(tokens, src=last, group=self.tp_cpu_group)
+        logprobs = [None]
+        if forward_input.sample_args.logprob_rows is not None:
+            if comm.is_last:
+                logprobs = [(output.chosen_logprobs_cpu, output.top_ids_cpu, output.top_logprobs_cpu)]
+            dist.broadcast_object_list(logprobs, src=last, group=self.tp_cpu_group)
+        comm.release(output.pp_tag)
+        if comm.is_last:
+            return data
+        self.token_pool[forward_input.write_tuple] = tokens.to(self.device)
+        chosen, top_ids, top_logprobs = logprobs[0] or (None, None, None)
+        return forward_input, output._replace(
+            next_tokens_cpu=tokens, chosen_logprobs_cpu=chosen, top_ids_cpu=top_ids,
+            top_logprobs_cpu=top_logprobs,
+        )
+
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:
         # DSV4 (owned-KV) decode reads its per-token window/cmp/idx slot maps off the attention
         # backend's per-batch SNAPSHOT (staged in prepare_for_replay right before the replay, on
         # the same stream, like the generic out_loc copy_from), not the live slot maps -- so the
         # next batch's allocate_paged cannot corrupt the in-flight graph replay. DSV4 overlaps.
-        if ENV.DISABLE_OVERLAP_SCHEDULING:
+        if self._pp_depth > 1:
+            assert torch.cuda.current_stream() == self.stream
+            while True:
+                self.pipeline_loop()
+        elif ENV.DISABLE_OVERLAP_SCHEDULING:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
                 while True:
@@ -369,6 +452,8 @@ class Scheduler(SchedulerIOMixin):
                 data = self.overlap_loop(data)
 
     def shutdown(self) -> None:
+        if self.engine.pp_comm is not None:
+            self.engine.pp_comm.release_all()
         torch.cuda.synchronize(self.device)
         self.sync_all_ranks()
         self.engine.shutdown()
@@ -718,7 +803,7 @@ class Scheduler(SchedulerIOMixin):
                 inflight = (
                     self._last_data is not None
                     and req_to_free in self._last_data[0].batch.reqs
-                )
+                ) or req_to_free in _busy_reqs(getattr(self, "_pp_inflight", ()))
                 if inflight:
                     req_to_free.aborted = True
                 else:
@@ -740,9 +825,9 @@ class Scheduler(SchedulerIOMixin):
                 self._reply_rebuild(
                     msg.request_id, "unsupported", f"mode {msg.mode!r} unsupported (use if_idle)"
                 )
-            elif self.config.tp_info.size > 1:
+            elif _world_size(self.config) > 1:
                 self._reply_rebuild(
-                    msg.request_id, "unsupported", "runtime rebuild unsupported under TP > 1"
+                    msg.request_id, "unsupported", "runtime rebuild unsupported under TP or PP > 1"
                 )
             elif self.prefill_manager.runnable or self.decode_manager.runnable:
                 # if_idle: refuse rather than wait. (finished_reqs hold no resources — they
@@ -847,7 +932,7 @@ class Scheduler(SchedulerIOMixin):
                 logger.error(f"cache rebuild failed before teardown: {e!r} — old cache intact")
                 self._reply_rebuild(msg.request_id, "rejected", error=repr(e))
                 return
-            if self.config.tp_info.size > 1:
+            if _world_size(self.config) > 1:
                 # A lone-rank failure cannot be rolled back symmetrically: rebuild_cache runs TP
                 # barriers, and ranks that succeeded will not re-enter them — a solo rollback
                 # would desync the group. Keep the latch-failed behavior for tp>1.
@@ -1031,7 +1116,7 @@ class Scheduler(SchedulerIOMixin):
         policy = getattr(self, "_interleave", None)
         batch = None
         if policy is not None and policy.wants_decode():
-            batch = self.decode_manager.schedule_next_batch()
+            batch = self._schedule_decode()
             if batch is not None:
                 policy.note_decode()
         if batch is None:
@@ -1039,7 +1124,7 @@ class Scheduler(SchedulerIOMixin):
             if batch is not None and policy is not None:
                 policy.note_prefill()
         if batch is None:
-            batch = self.decode_manager.schedule_next_batch()
+            batch = self._schedule_decode()
             if batch is not None and policy is not None:
                 policy.note_decode()
         if batch is None:
@@ -1047,6 +1132,14 @@ class Scheduler(SchedulerIOMixin):
         forward_input = self._prepare_batch(batch)
         self._report_prompt_admissions(batch)
         return forward_input
+
+    def _schedule_decode(self) -> Batch | None:
+        if getattr(self, "_pp_depth", 1) <= 1:
+            return self.decode_manager.schedule_next_batch()
+        running = len(self.decode_manager.running_reqs)
+        return self.decode_manager.schedule_next_batch(
+            exclude=self._pp_busy_reqs(), max_size=-(-running // self._pp_depth)
+        )
 
     def _report_prompt_admissions(self, batch: Batch) -> None:
         """Publish first-prefill accounting only after batch preparation succeeded.
@@ -1083,7 +1176,9 @@ class Scheduler(SchedulerIOMixin):
             self.cache_manager.snapshot_toolcall_anchor(batch.reqs)
         forward_output = self.engine.forward_batch(batch, sample_args)
 
-        if forward_output.num_tokens <= 1:
+        if forward_output.next_tokens_gpu is None:
+            pass  # a pipeline stage before the last: _pp_collect writes the tokens when drained
+        elif forward_output.num_tokens <= 1:
             self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         else:
             for i, req in enumerate(batch.reqs):

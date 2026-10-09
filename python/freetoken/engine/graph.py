@@ -56,6 +56,10 @@ class GraphCaptureBuffer:
     # Decode GDN query indptr = arange(bs+1); a constant per captured bs, filled once.
     fla_cu_seqlens: torch.Tensor
     fla_has_initial_state: torch.Tensor | None = None
+    # Pipeline stage: the residual stream received from the previous stage (non-first stages)
+    # and the one handed to the next (non-last stages, which then have no logits)
+    pp_in: torch.Tensor | None = None
+    pp_out: torch.Tensor | None = None
     # DFlash verify graphs: (requests, verify len); on a GDN target, per-token conv states and
     # recurrence inputs (FLAMetadata)
     dflash_shape: tuple[int, int] = (1, 1)
@@ -75,8 +79,19 @@ class GraphCaptureBuffer:
         hidden_dtype: torch.dtype | None = None,
         num_hidden_layers: int = 0,
         linear_state_pool=None,
+        pp_stage: tuple[bool, bool, int] | None = None,
     ) -> GraphCaptureBuffer:
+        """``pp_stage``: (first, last, residual width) of this pipeline stage."""
         hidden_states = None
+        pp_in = pp_out = None
+        if pp_stage is not None:
+            first, last, width = pp_stage
+            dtype = hidden_dtype or torch.get_default_dtype()
+            if not first:
+                pp_in = torch.zeros(bs, width, dtype=dtype, device=device)
+            if not last:
+                pp_out = torch.zeros(bs, width, dtype=dtype, device=device)
+                vocab_size = 0
         if num_hidden_layers > 0:
             assert hidden_size is not None
             assert hidden_dtype is not None
@@ -95,6 +110,8 @@ class GraphCaptureBuffer:
             hidden_states=hidden_states,
             table_idx=torch.zeros(bs, dtype=torch.int32, device=device),
             fla_cu_seqlens=torch.arange(bs + 1, dtype=torch.int32, device=device),
+            pp_in=pp_in,
+            pp_out=pp_out,
         )
 
     @classmethod
@@ -149,9 +166,14 @@ class GraphCaptureBuffer:
         batch.fla_metadata = FLAMetadata(
             cu_seqlens=self.fla_cu_seqlens[: bs + 1], cache_indices=self.table_idx[_slice]
         )
+        if self.pp_in is not None:
+            batch.pp_hidden = self.pp_in[_slice]
 
     def copy_from(self, batch: Batch) -> None:
         _slice = slice(batch.padded_size)
+        if self.pp_in is not None:
+            assert batch.pp_hidden is not None, "a non-first pipeline stage replays on received rows"
+            self.pp_in[_slice] = batch.pp_hidden[_slice]
         self.input_ids[_slice] = batch.input_ids
         if batch.out_loc is not None:
             self.out_loc[_slice] = batch.out_loc
@@ -294,7 +316,9 @@ class GraphRunner:
         hidden_dtype: torch.dtype | None = None,
         dflash_target_verify_lens: list[int] | None = None,
         dflash_verify_batch_sizes: list[int] | None = None,
+        pp_stage: tuple[bool, bool, int] | None = None,
     ) -> None:
+        self.pp_stage = pp_stage
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
             cuda_graph_max_bs=cuda_graph_max_bs,
@@ -356,6 +380,7 @@ class GraphRunner:
             hidden_size=self.hidden_size,
             hidden_dtype=self.hidden_dtype,
             num_hidden_layers=len(self.hidden_layer_ids),
+            pp_stage=self.pp_stage,
         )
         self._reset_moe_offload_cache()
 
@@ -513,7 +538,8 @@ class GraphRunner:
             for dst, src in zip(buffer.hidden_states, hidden_states):
                 dst[offset : offset + bs].copy_(src[:bs])
             return
-        buffer.logits[offset : offset + bs].copy_(model.forward()[:bs])
+        out = buffer.pp_out if buffer.pp_out is not None else buffer.logits
+        out[offset : offset + bs].copy_(model.forward()[:bs])
 
     def _run_dflash_target_verify_into_buffer(
         self,
@@ -600,6 +626,9 @@ class GraphRunner:
         g = self.graph_map[batch.padded_size]
         self.attn_backend.prepare_for_replay(batch)
         g.replay()
+        if self.buffer.pp_out is not None:
+            # every padded row: the next stage replays the same padded batch
+            return self.buffer.pp_out[: batch.padded_size]
         logits = self.buffer.logits[: batch.size]
         if wants_hidden:
             assert self.buffer.hidden_states is not None

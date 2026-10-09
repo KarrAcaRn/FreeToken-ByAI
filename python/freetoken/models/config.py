@@ -359,6 +359,9 @@ class ModelConfig:
     # Extra per-request tensors riding the LinearStatePool slots (see SlotStateSpec);
     # () for models without any. Requires a linear-attention group to ride on.
     slot_states: Tuple[SlotStateSpec, ...] = ()
+    # Pipeline stage: the decoder layers [start, end) this process builds (--pp-size). Layer ids
+    # stay global; the attention groups, MoE layer count and expert banks cover only these.
+    pp_layers: Tuple[int, int] | None = None
 
     @property
     def is_moe(self) -> bool:
@@ -370,8 +373,31 @@ class ModelConfig:
 
         Models with leading dense layers (``first_k_dense_replace`` > 0, e.g. GLM-4)
         only store experts for the trailing layers; everything else has all layers MoE.
+        A pipeline stage counts only its own MoE layers.
         """
+        if self.pp_layers is not None:
+            start, end = self.pp_layers
+            return max(0, end - max(start, self.first_k_dense_replace))
         return self.num_layers - self.first_k_dense_replace
+
+    @property
+    def moe_bank_offset(self) -> int:
+        """Global MoE-layer index of this stage's first expert bank (0 without pipeline stages)."""
+        if self.pp_layers is None:
+            return 0
+        return max(0, self.pp_layers[0] - self.first_k_dense_replace)
+
+    def owns_layer(self, layer_id: int) -> bool:
+        """Whether this process builds decoder layer ``layer_id`` (always, without pipeline stages)."""
+        return self.pp_layers is None or self.pp_layers[0] <= layer_id < self.pp_layers[1]
+
+    @property
+    def pp_is_first(self) -> bool:
+        return self.pp_layers is None or self.pp_layers[0] == 0
+
+    @property
+    def pp_is_last(self) -> bool:
+        return self.pp_layers is None or self.pp_layers[1] == self.num_layers
 
     @property
     def is_multimodal(self) -> bool:

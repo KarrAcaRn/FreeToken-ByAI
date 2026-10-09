@@ -11,6 +11,7 @@ from typing import Iterator
 import safetensors
 import torch
 from freetoken.distributed import get_tp_info
+from freetoken.distributed.pipeline import keeps_weight
 from freetoken.kernel.triton.nvfp4_dequant import dequant_nvfp4
 from freetoken.layers.quantization import QuantConfig, QuantKind, QuantScheme, get_quant_config
 from freetoken.models.config import VISION_KEY_PREFIXES
@@ -264,6 +265,8 @@ def _iter_shards(model_path: str, device: torch.device, reader: _DenseReader | N
                     continue
                 if not include_vision and name.startswith(VISION_KEY_PREFIXES):
                     continue
+                if not keeps_weight(name):
+                    continue  # another pipeline stage's tensor
                 if _STACKED_EXPERT_RE.match(name):
                     if stacked:
                         yield name, f.get_tensor(raw_name)
@@ -338,9 +341,11 @@ _FP8_EXPERT_KEY_RE = (
 
 def _moe_dims(model_config):
     L = model_config.num_moe_layers
+    # checkpoint layer of bank 0: past the dense prefix and, on a pipeline stage, the earlier stages' layers
+    first = model_config.first_k_dense_replace + getattr(model_config, "moe_bank_offset", 0)
     return (
         L, model_config.num_experts, model_config.hidden_size,
-        model_config.moe_intermediate_size, model_config.num_layers - L,  # dense prefix
+        model_config.moe_intermediate_size, first,
     )
 
 
@@ -365,6 +370,8 @@ def iter_expert_pieces(model_path, config, kind: QuantKind, *, parallel: bool | 
             return None
         li = int(m["layer"]) - dense
         if not 0 <= li < L:
+            if getattr(config, "pp_layers", None) is not None:
+                return None  # another pipeline stage's expert
             raise ValueError(f"unexpected routed-expert layer in {raw_name}")
         return li, int(m["expert"]), m["proj"] + suffix[m["kind"]]
 

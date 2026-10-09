@@ -46,7 +46,7 @@ class SchedulerIOMixin:
 
         recv = self._recv_msg_single_rank
         send = self._reply_tokenizer_rank0
-        if tp_info.size > 1:
+        if tp_info.world_size > 1:
             if tp_info.is_primary():
                 recv = self._recv_msg_multi_rank0
                 self._send_into_ranks: Final = ZmqPubQueue(
@@ -54,7 +54,7 @@ class SchedulerIOMixin:
                 )
                 # a SUB's subscribe reaches the publisher asynchronously; broadcasting
                 # before it lands drops the message and both ranks block forever
-                self._send_into_ranks.wait_for_subscribers(tp_info.size - 1)
+                self._send_into_ranks.wait_for_subscribers(tp_info.world_size - 1)
             else:
                 recv = self._recv_msg_multi_rank1
                 send = self._reply_tokenizer_rank1

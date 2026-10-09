@@ -615,6 +615,9 @@ class ForwardOutput(NamedTuple):
     force_drain: bool = False
     # DFlash: tokens each request emitted (its rows are num_tokens apart); None = num_tokens each
     token_counts: tuple[int, ...] | None = None
+    # Pipeline parallelism: this forward's sequence number (releases its sends once drained).
+    # Only the last stage samples; the others carry None tokens until the scheduler fills them in.
+    pp_tag: int = -1
 
 
 def _dflash_sample_and_select(
@@ -648,14 +651,27 @@ def _dflash_sample_and_select(
 class Engine:
     def __init__(self, config: EngineConfig):
         assert not torch.cuda.is_initialized()
-        set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
+        tp = config.tp_info
+        set_tp_info(rank=tp.rank, size=tp.size, world_rank=tp.world_rank, world_size=tp.world_size)
         set_quant_backend(_adjust_ftw_quant_backend(config.model_path, QuantBackend.parse(config.quant_backend)))
         _ensure_expandable_segments()  # before the first CUDA allocation below
 
         from freetoken.gpu_select import bind_assigned_gpu
 
-        self.device = bind_assigned_gpu(config.tp_info.rank)
+        self.device = bind_assigned_gpu(tp.world_rank)
         _adjust_config(config)
+        self.pp_comm = None  # set by _init_communication on a pipeline stage
+        self._pp_seq = 0
+        if config.pp_info.size > 1:
+            from freetoken.distributed.pipeline import PipelineStage, set_pipeline_stage
+
+            start, end = config.model_config.pp_layers
+            set_pipeline_stage(PipelineStage(
+                config.pp_info.rank, config.pp_info.size, start, end, config.model_config.num_layers))
+            logger.info(
+                f"Pipeline stage {config.pp_info.rank + 1}/{config.pp_info.size}: decoder layers "
+                f"[{start}, {end}) on {self.device}"
+            )
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
@@ -678,6 +694,8 @@ class Engine:
         set_rope_device(self.device)
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_config)
+        if self.pp_comm is not None and not getattr(self.model, "supports_pipeline_parallel", False):
+            raise ValueError(f"--pp-size: {type(self.model).__name__} does not support pipeline parallelism yet")
         if not config.skip_preflight:
             from .forecast import run_preflight
 
@@ -777,6 +795,8 @@ class Engine:
         available_memory = _startup_kv_budget(config.memory_ratio, init_free_memory, new_free)
         available_memory -= state_pool_bytes(config)
         self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
+        if self.pp_comm is not None:
+            self.num_pages = self._agree_num_pages(self.num_pages)
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
             config, self.num_pages, device=self.device, dtype=self.dtype
@@ -875,7 +895,8 @@ class Engine:
             attn_backend=self.attn_backend,
             cuda_graph_bs=config.cuda_graph_bs,
             cuda_graph_max_bs=config.cuda_graph_max_bs,
-            free_memory=init_free_memory,
+            # every pipeline stage must pad a batch to the same graph size
+            free_memory=self._world_min(init_free_memory) if self.pp_comm is not None else init_free_memory,
             max_seq_len=aligned_max_seq_len,
             vocab_size=config.model_config.vocab_size,
             dummy_req=self.dummy_req,
@@ -886,6 +907,10 @@ class Engine:
             ),
             hidden_size=config.model_config.hidden_size,
             hidden_dtype=self.dtype,
+            pp_stage=(
+                (self.pp_comm.is_first, self.pp_comm.is_last, self.model.pp_hidden_width)
+                if self.pp_comm is not None else None
+            ),
             **_dflash_graph_runner_dflash_kwargs(
                 self.dflash_worker,
                 target_verify_graph_enabled=_dflash_target_verify_graph_enabled_for_config(config),
@@ -913,10 +938,10 @@ class Engine:
         on every interface, so an unauthenticated TCPStore ends up reachable off-box even
         when distributed_addr says 127.0.0.1. Rank 0 pre-binds the listening socket to
         loopback itself and hands the fd to TCPStore (master_listen_fd) to force that."""
-        timeout = timedelta(seconds=config.distributed_timeout)
+        timeout = timedelta(seconds=_distributed_timeout(config))
         if not config.tp_info.is_primary():
             return torch.distributed.TCPStore(
-                "127.0.0.1", config.distributed_port, config.tp_info.size,
+                "127.0.0.1", config.distributed_port, config.tp_info.world_size,
                 is_master=False, timeout=timeout, multi_tenant=True,
             )
         if sys.platform == "win32":
@@ -927,7 +952,7 @@ class Engine:
                 "firewall that port if this host is reachable.", config.distributed_port,
             )
             return torch.distributed.TCPStore(
-                "127.0.0.1", config.distributed_port, config.tp_info.size,
+                "127.0.0.1", config.distributed_port, config.tp_info.world_size,
                 is_master=True, timeout=timeout, multi_tenant=True,
             )
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -938,18 +963,19 @@ class Engine:
         # store; kept alive on self, closed only when the process (and the store) exits.
         self._distributed_listen_socket = sock
         return torch.distributed.TCPStore(
-            "127.0.0.1", config.distributed_port, config.tp_info.size,
+            "127.0.0.1", config.distributed_port, config.tp_info.world_size,
             is_master=True, timeout=timeout, multi_tenant=True, master_listen_fd=sock.fileno(),
         )
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         store = self._make_distributed_store(config)
+        self._store = store
         use_gloo = config.tp_info.size == 1 or config.use_pynccl
         torch.distributed.init_process_group(
             backend="gloo" if use_gloo else "nccl",
-            rank=config.tp_info.rank,
-            world_size=config.tp_info.size,
-            timeout=timedelta(seconds=config.distributed_timeout),
+            rank=config.tp_info.world_rank,
+            world_size=config.tp_info.world_size,
+            timeout=timedelta(seconds=_distributed_timeout(config)),
             store=store,
         )
         if use_gloo:
@@ -962,6 +988,11 @@ class Engine:
         else:
             tp_cpu_group = torch.distributed.new_group(backend="gloo")
             assert tp_cpu_group is not None
+        if config.pp_info.size > 1:
+            from freetoken.distributed.pipeline import PipelineComm
+
+            # TP is 1 on a pipeline (_adjust_pipeline_config), so world rank == stage
+            self.pp_comm = PipelineComm(config.pp_info.rank, config.pp_info.size, range(config.pp_info.size))
         return tp_cpu_group
 
     def _load_weights(self, config: EngineConfig) -> None:
@@ -1046,16 +1077,18 @@ class Engine:
         # _materialize casts each loaded tensor to its model-param dtype (model_state), so
         # models declaring per-tensor dtypes (e.g. DSV4's mixed fp8/fp32/bf16) are preserved;
         # MoE models exclude routed experts (they load as expert banks, not dense weights).
-        return _materialize_loaded_weight_state_dict(
-            model_state,
-            load_weight(
-                config.model_path,
-                self.device,
-                include_moe_experts=not getattr(config.model_config, "is_moe", False),
-                include_vision=bool(config.active_encoders),
-            ),
-            device=self.device,
+        weights = load_weight(
+            config.model_path,
+            self.device,
+            include_moe_experts=not getattr(config.model_config, "is_moe", False),
+            include_vision=bool(config.active_encoders),
         )
+        if self.pp_comm is not None:
+            from freetoken.distributed.pipeline import keeps_weight
+
+            # the family readers already skip other stages' tensors; this covers FTW and the rest
+            weights = ((k, w) for k, w in weights if k in model_state or keeps_weight(k))
+        return _materialize_loaded_weight_state_dict(model_state, weights, device=self.device)
 
     def _load_resident_experts(self, config: EngineConfig, layers) -> None:
         with _weight_load_context():
@@ -1203,7 +1236,7 @@ class Engine:
                 for i in range(config.model_config.num_moe_layers)
             ]
         try:
-            with _weight_load_context():
+            with _weight_load_context(), self._one_stage_at_a_time("expert-banks"):
                 banks = load_expert_banks(
                     config.model_path,
                     config.model_config,
@@ -1452,11 +1485,43 @@ class Engine:
         """The min and max free device memory across TP ranks, with what the allocator caches still
         held: after a forward, that is the peak the forward reached."""
         free_memory = get_free_memory(self.device)
+        if self.pp_comm is not None:
+            # pipeline stages hold different layers: each sizes its own caches, only the KV page
+            # count is agreed on (_agree_num_pages)
+            return free_memory, free_memory
         free_mem_tensor = torch.tensor([free_memory, -free_memory], device="cpu", dtype=torch.int64)
         torch.distributed.all_reduce(
             free_mem_tensor, op=torch.distributed.ReduceOp.MIN, group=self.tp_cpu_group
         )
         return int(free_mem_tensor[0].item()), -int(free_mem_tensor[1].item())
+
+    @contextlib.contextmanager
+    def _one_stage_at_a_time(self, what: str):
+        """Pipeline stages run this block one after another, first stage first. The expert-bank
+        readers each hold whole-shard buffers on top of the banks they fill, and decide on the
+        free host RAM they see: side by side they would peak together and misjudge each other."""
+        comm = self.pp_comm
+        if comm is None:
+            yield
+            return
+        wait = timedelta(seconds=_distributed_timeout(self.config))
+        if comm.pp_rank > 0:
+            self._store.wait([f"pp-{what}-{comm.pp_rank - 1}"], wait)
+        yield
+        self._store.set(f"pp-{what}-{comm.pp_rank}", "done")
+
+    def _world_min(self, value: int) -> int:
+        t = torch.tensor([value], dtype=torch.int64)
+        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MIN, group=self.tp_cpu_group)
+        return int(t.item())
+
+    def _agree_num_pages(self, num_pages: int) -> int:
+        """The KV page count every pipeline stage can hold: one scheduler-side page table
+        addresses the pages of all stages, each stage storing its own layers' KV."""
+        agreed = self._world_min(num_pages)
+        if agreed != num_pages:
+            logger.info(f"KV pages {num_pages} -> {agreed}, the smallest any pipeline stage holds")
+        return agreed
 
     def _target_moe_and_expert_bytes(self, moe_cache_size: int | None) -> tuple[int, int]:
         from freetoken.engine.cache_budget import expert_bytes_per_slot
@@ -1652,6 +1717,10 @@ class Engine:
             ),
             hidden_size=config.model_config.hidden_size,
             hidden_dtype=self.dtype,
+            pp_stage=(
+                (self.pp_comm.is_first, self.pp_comm.is_last, self.model.pp_hidden_width)
+                if self.pp_comm is not None else None
+            ),
             **_dflash_graph_runner_dflash_kwargs(
                 self.dflash_worker,
                 target_verify_graph_enabled=_dflash_target_verify_graph_enabled_for_config(config),
@@ -1662,6 +1731,8 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
+        if self.pp_comm is not None:
+            return self._forward_batch_pp(batch, args)
         if batch.mm_gather_plan:
             self._run_mm_encoder(batch)
 
@@ -1723,15 +1794,43 @@ class Engine:
             probe_end.record(self.stream)
             self._dflash_gate.record_plain_events(probe_start, probe_end)
             self._dflash_gate.probing = False
+        return self._sampled_output(batch, args, batch_logits, next_tokens_gpu)
+
+    def _forward_batch_pp(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
+        """One pipeline stage's share of a forward: receive the residual stream from the previous
+        stage, run this stage's layers, then send it on -- or, on the last stage, sample."""
+        comm = self.pp_comm
+        use_graph = self.graph_runner.can_use_cuda_graph(batch)
+        rows = batch.input_ids.shape[0]  # padded rows on a graph decode, every token on a prefill
+        if not comm.is_first:
+            batch.pp_hidden = comm.recv(rows, self.model.pp_hidden_width, self.dtype, self.device)
+        with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
+            out = self.graph_runner.replay(batch) if use_graph else self.model.forward()
+        batch.pp_hidden = None
+        for req in batch.reqs:
+            req.complete_one()
+        self._pp_seq += 1
+        if comm.is_last:
+            batch_logits = out[: batch.size]
+            next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
+            return self._sampled_output(batch, args, batch_logits, next_tokens_gpu)._replace(pp_tag=self._pp_seq)
+        # a graph's output buffer is rewritten by the next replay while the send may still wait
+        hidden = out[:rows].clone() if use_graph else out[:rows]
+        comm.send(self._pp_seq, hidden)
+        done = torch.cuda.Event()
+        done.record(self.stream)
+        self._count_moe_stats_step(batch)
+        # the tokens come from the last stage when the scheduler drains this batch
+        return ForwardOutput(None, None, done, pp_tag=self._pp_seq)
+
+    def _sampled_output(
+        self, batch: Batch, args: BatchSamplingArgs, batch_logits: torch.Tensor, next_tokens_gpu: torch.Tensor
+    ) -> ForwardOutput:
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         logprobs_out = self.sampler.compute_logprobs(batch_logits, next_tokens_gpu, args)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)
-        if self.moe_offload_cache is not None and self.moe_offload_cache.collect_stats and batch.is_decode:
-            self._moe_stats_step += 1
-            if self._moe_stats_step >= MOE_STATS_INTERVAL:
-                self._moe_stats_step = 0
-                self._emit_moe_stats()
+        self._count_moe_stats_step(batch)
         if logprobs_out is None:
             return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
         chosen_logprobs, top_ids, top_logprobs = logprobs_out
@@ -1740,6 +1839,13 @@ class Engine:
             chosen_logprobs_cpu=chosen_logprobs, top_ids_cpu=top_ids,
             top_logprobs_cpu=top_logprobs,
         )
+
+    def _count_moe_stats_step(self, batch: Batch) -> None:
+        if self.moe_offload_cache is not None and self.moe_offload_cache.collect_stats and batch.is_decode:
+            self._moe_stats_step += 1
+            if self._moe_stats_step >= MOE_STATS_INTERVAL:
+                self._moe_stats_step = 0
+                self._emit_moe_stats()
 
     def _emit_moe_stats(self) -> None:
         """Report one window of expert-cache behaviour, then reset the miss counters.
@@ -2736,6 +2842,55 @@ def offload_expert_method(config: EngineConfig):
     return shared_offload_method(model)
 
 
+# Pipeline stages reach their startup collectives far apart (each reads its own expert banks, one
+# stage after another), so they wait for each other much longer than TP ranks do.
+_PP_MIN_DISTRIBUTED_TIMEOUT = 3600.0
+
+
+def _distributed_timeout(config: EngineConfig) -> float:
+    if getattr(config, "pp_info", None) is not None and config.pp_info.size > 1:
+        return max(config.distributed_timeout, _PP_MIN_DISTRIBUTED_TIMEOUT)
+    return config.distributed_timeout
+
+
+def _adjust_pipeline_config(config: EngineConfig, override) -> None:
+    """--pp-size: refuse what a pipeline stage cannot serve yet, before any weight is read."""
+    model_config = config.model_config
+    problems = []
+    if config.tp_info.size > 1:
+        problems.append("--tp-size > 1 (tensor and pipeline parallelism do not combine yet)")
+    if getattr(config, "offline_mode", False):
+        problems.append("the in-process LLM API (pipeline stages run as `ft serve` worker processes)")
+    if config.speculative_algorithm is not None:
+        problems.append("--speculative-algorithm")
+    if config.active_encoders:
+        problems.append("the vision encoder (add --text-model-only)")
+    if getattr(model_config, "tie_word_embeddings", False):
+        problems.append("tied input/output embeddings (the first stage embeds, the last projects)")
+    if getattr(model_config, "is_moe", False):
+        if getattr(config, "_moe_hybrid_from_profile", False) and config.moe_strategy == "hybrid":
+            # the profile upgrade is a default, not a request: every stage would claim all CPU cores
+            override("moe_strategy", "offload")
+            override("_moe_hybrid_from_profile", False)
+            logger.info_rank0("--pp-size: staying on the offload MoE strategy (no CPU expert executor per stage)")
+        if config.moe_strategy not in ("offload", "fused"):
+            problems.append(f"--moe-strategy {config.moe_strategy} (use offload or fused)")
+        if config.moe_cpu_layers:
+            problems.append("--moe-cpu-layers")
+        if config.moe_disk_tier != "off":
+            problems.append("--moe-disk-tier on")
+    if config.dense_offload_layers not in ("0", 0, "", None):
+        problems.append("--dense-offload-layers")
+    if config.mamba_host_slots:
+        problems.append("--mamba-host-slots")
+    from freetoken.checkpoint.ftw import is_ftw_checkpoint
+
+    if is_ftw_checkpoint(config.model_path):
+        problems.append("FTW checkpoints (serve the original checkpoint)")
+    if problems:
+        raise ValueError("--pp-size does not support: " + "; ".join(problems))
+
+
 def _adjust_config(config: EngineConfig):
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
@@ -3066,6 +3221,10 @@ def _adjust_config(config: EngineConfig):
     if is_moe and config.moe_cpu_layers and config.moe_cpu_layers.strip() != "auto":
         if not _parse_cpu_layers_spec(config.moe_cpu_layers, model_config.num_moe_layers):
             override("moe_cpu_layers", None)
+
+    pp_info = getattr(config, "pp_info", None)
+    if pp_info is not None and pp_info.size > 1:
+        _adjust_pipeline_config(config, override)
 
     if is_moe:
         object.__setattr__(model_config, "moe_strategy", config.moe_strategy)

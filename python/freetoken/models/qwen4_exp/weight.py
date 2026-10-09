@@ -23,6 +23,7 @@ from typing import Iterator
 import safetensors
 import torch
 from freetoken.distributed import get_tp_info
+from freetoken.distributed.pipeline import keeps_weight
 from freetoken.models.qwen3_vl.weight import rename_vl_prefix
 
 from freetoken.models.config import VISION_KEY_PREFIXES
@@ -84,6 +85,10 @@ _HC_WITH_INJECT = (".attn_hyper_connection", ".mlp_hyper_connection")
 _KIND_SUFFIXES = (".weight_scale_inv", ".weight")
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 _ELEM_DTYPES = {"e4m3": torch.float8_e4m3fn}
+
+
+# state-dict prefixes only the last pipeline stage builds
+_PP_TAIL = ("lm_head.", "model.hyper_connection_mixer.")
 
 
 def _rename(raw_name: str, quant) -> str | None:
@@ -244,6 +249,8 @@ def iter_weights(
                     continue
                 if not include_vision and name.startswith(VISION_KEY_PREFIXES):
                     continue
+                if not keeps_weight(name, tail=_PP_TAIL):
+                    continue  # another pipeline stage's tensor
                 tensor = f.get_tensor(raw_name)
                 fused = fuser.fuse(name, tensor)
                 if fused is None:
