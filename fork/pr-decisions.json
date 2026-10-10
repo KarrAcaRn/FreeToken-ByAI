@@ -20,16 +20,15 @@
     "number": 602,
     "title": "fix(moe): fit Qwen3.8 Flash Next FP8 banks across host and GPU memory",
     "head_sha": "cc175ba9970d",
-    "reviewed_at": "2026-10-04",
-    "decision": "deferred",
-    "revisit": "after-queue",
-    "reason": "Keeps leading FP8-block expert source layers in VRAM when host RAM cannot hold all banks (also mid-load, re-reading MemAvailable). Not judged on its merits yet: the target (Qwen3.8 Flash Next FP8, host RAM short of its banks) cannot run here, and our only MoE is NVFP4 and fits in RAM, so the FP8-only path cannot be exercised. Points for the revisit: the mid-load fallback moves layers to the GPU without checking VRAM; it now conflicts with #601 in build_expert_banks; GPU-resident source layers would also be duplicated by our slot-cache preload (fix/moe-ttft) and should be skipped there.",
+    "reviewed_at": "2026-10-10",
+    "decision": "rejected",
+    "reason": "Keeps leading FP8-block expert source layers in VRAM when host RAM cannot hold all banks (also mid-load, re-reading MemAvailable). Not judged on its merits yet: the target (Qwen3.8 Flash Next FP8, host RAM short of its banks) cannot run here, and our only MoE is NVFP4 and fits in RAM, so the FP8-only path cannot be exercised. Points for the revisit: the mid-load fallback moves layers to the GPU without checking VRAM; it now conflicts with #601 in build_expert_banks; GPU-resident source layers would also be duplicated by our slot-cache preload (fix/moe-ttft) and should be skipped there. REVISITED 2026-10-10 (88 GiB RAM, Qwen3.6-35B-A3B-FP8 offload, RAM capped by a cgroup): merged with fixups (cgroup-clamped available RAM, VRAM check before moving a layer). At a 40 GiB cap next loads fine (decode 89.6 tok/s; page cache is reclaimed), but with the PR the up-front estimate moved 6 layers and the mid-load re-check (available < 2 layers, which naturally happens as the banks fill) moved 15 more, leaving no VRAM for the slot cache and KV: the load failed ('cache budget too small'). At 32 GiB it moved 21 layers and ran out of VRAM at layer 30. The estimate ignores reclaimable page cache and the re-check fires on the load's own progress, so it turns working configs into failures. No decode regression when no layer moves (88.0 vs 87.5 tok/s).",
     "commits": [],
-    "gpu_untested": true,
+    "gpu_untested": false,
     "authors": [
       "云微 <1067852565@qq.com>"
     ],
-    "summary": "FP8 expert layers kept in VRAM when host RAM is short; deferred - the FP8 model and RAM shortage cannot be reproduced here"
+    "summary": "Moves FP8 expert layers to VRAM on low RAM, but misfires: a 40 GiB-capped load that works on next fails with the PR"
   },
   "601": {
     "number": 601,
@@ -810,16 +809,16 @@
     "number": 499,
     "title": "feat(kvcache): host-RAM KV tier for sparse-attention models (--kv-host-pages)",
     "head_sha": "6c316e2c9371",
-    "reviewed_at": "2026-10-03",
+    "reviewed_at": "2026-10-10",
     "decision": "deferred",
-    "revisit": "after-queue",
-    "reason": "Its fp8 parts (16-bit indexer dtype guard, k/v scales on the QSA attend) are already on main via #354. The remaining host-RAM KV tier (~700 lines: LRU GPU page cache over a pinned host mirror, per-row prefill attend loop) only serves QSA models (qwen4_exp / Flash-Next), ships without tests, and cannot be run here: only the Flash-Next config is cached and 30 GB RAM cannot hold its weights. Interesting for long context; revisit after the queue together with #525 and the CPU-embedding work.",
+    "revisit": "with a smaller card or many concurrent long requests",
+    "reason": "Its fp8 parts (16-bit indexer dtype guard, k/v scales on the QSA attend) are already on main via #354. The remaining host-RAM KV tier (~700 lines: LRU GPU page cache over a pinned host mirror, per-row prefill attend loop) only serves QSA models (qwen4_exp / Flash-Next), ships without tests, and cannot be run here: only the Flash-Next config is cached and 30 GB RAM cannot hold its weights. Interesting for long context; revisit after the queue together with #525 and the CPU-embedding work. REVISITED 2026-10-10 on Flash-Next NVFP4 (4090, all experts in RAM, fp8 KV, next-speed + PR + our fixups: nvfp4 KV refused, English comments, offloader unit tests). Works: needle passes at 30k/100k/150k. But Flash-Next's fp8 KV is cheap (~0.8 GiB VRAM per 65k tokens), so plain GPU KV covers the 262k rope cap for ~3.3 GiB: 150k needle WITHOUT the tier (--num-pages 2400, moe cache 3300 slots) passes in 103 s, decode 29-32 tok/s, vs WITH the tier (1600 GPU + 2496 host pages, moe 3500) 156 s, decode 23-25 tok/s. With 8k prefill chunks and 1024 GPU pages the tier's prefill collapsed to ~45 tok/s past the GPU pool (150k took 19 min) and the needle came back truncated. Not adopted: slower than plain KV at every size this card can use; the earlier 8.4k-token limit came from --moe-cache-auto giving nearly all VRAM to expert slots.",
     "commits": [],
-    "gpu_untested": true,
+    "gpu_untested": false,
     "authors": [
       "alvarorsouza-arch <alvaro.r.souza@gmail.com>"
     ],
-    "summary": "fp8 parts already on main via #354; host-RAM KV tier serves only Flash-Next, untested, cannot run here"
+    "summary": "Host-RAM KV tier works, but on 24 GB plain fp8 KV reaches the 262k cap and is faster (150k: 103 s vs 156 s); not adopted"
   },
   "502": {
     "number": 502,
@@ -1556,16 +1555,21 @@
     "number": 300,
     "title": "feat: Automatic KV/MoE Laddering for decode speed vs context-length trade off ( upto 33% faster decode ) ",
     "head_sha": "1b90e9fc97a7",
-    "reviewed_at": "2026-10-03",
-    "decision": "deferred",
-    "reason": "--enable-kv-ladder: start with a small KV cache and grow it at request boundaries by shrinking the GPU expert cache (runtime rebuild), so short requests keep more experts resident. Relevant to our Qwen3.6 MoE work (expert cache vs context, TTFT floor), but needs a rework on next: it reads kwargs['moe_backend'], which next renamed to moe_strategy (crashes as soon as the flag is used), conflicts in scheduler.py and docs, and ships no tests. Revisit after the queue together with the MoE work items.",
-    "commits": [],
-    "gpu_untested": true,
+    "reviewed_at": "2026-10-10",
+    "decision": "adopted-with-fixups",
+    "reason": "Opt-in --enable-kv-ladder: start KV at 2 steps (65k by default) and, before a request whose prompt + max_tokens reaches the bound, grow KV by rungs at an idle point through the runtime cache rebuild, paid for with expert slots. Merged with next's admission checks (image refusal, context errors) kept before the ladder queue. Fixups: the flag check read kwargs['moe_backend'] (renamed on next: crash at startup), it rejected the default --moe-strategy auto, and the queue needed a no-ladder early return; tests added for the policy and the flags. Live on Qwen3.6-35B-A3B NVFP4 (4090, fp8 KV): start 65.6k KV / 8903 slots; a 108k-token needle request grew KV to 131k (8519 slots, ~1 s rebuild) and passed in 19 s; short-request decode 143.6 -> 142.4 tok/s.",
+    "commits": [
+      "250232f",
+      "6f666c6",
+      "41ff810",
+      "a2f8ff7"
+    ],
+    "gpu_untested": false,
     "authors": [
       "Aswinkumar <aswinkumar1999@gmail.com>"
     ],
-    "revisit": "after-queue",
-    "summary": "Needs rework on next (uses renamed moe_backend kwarg, conflicts, no tests); revisit with the MoE work"
+    "summary": "Opt-in KV ladder: KV grows in rungs before long requests, paid with expert slots (108k needle passed)",
+    "fixup": "Flag check read the renamed moe_backend (startup crash), default strategy accepted, no-ladder early return, tests ([6f666c6](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/6f666c6), [41ff810](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/41ff810), [a2f8ff7](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/a2f8ff7))"
   },
   "298": {
     "number": 298,
