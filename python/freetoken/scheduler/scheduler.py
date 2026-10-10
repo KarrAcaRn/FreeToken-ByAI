@@ -707,6 +707,8 @@ class Scheduler(SchedulerIOMixin):
 
     def _queue_for_kv_ladder(self, msg: UserMsg) -> bool:
         """Hold a request until the next idle point if its possible length reaches this rung."""
+        if getattr(self, "_kv_ladder", None) is None:
+            return False
         from .kv_ladder import KVLadderCapacityError
 
         # Preserve arrival order if an earlier request is already waiting for a rung change.
