@@ -47,6 +47,7 @@ from .base import BaseOP
 
 # ggml type groups for kernel dispatch (subset we build kernels for).
 _UNQUANTIZED = {GGML_F32, GGML_F16, GGML_BF16}
+_UNQUANTIZED_DTYPE = {GGML_F32: torch.float32, GGML_F16: torch.float16, GGML_BF16: torch.bfloat16}
 # standard + k-quants: both an MMVQ (small-batch GEMV) and MMQ (large-batch) kernel exist.
 _STANDARD_AND_K = {
     GGML_Q4_0,
@@ -93,7 +94,7 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
     if x.shape[0] == 0:
         return x.new_empty((0, out_features))
     if qweight_type in _UNQUANTIZED:
-        return x @ qweight.T
+        return x @ qweight.view(_UNQUANTIZED_DTYPE[qweight_type]).to(x.dtype).T
     if x.shape[0] <= _MMVQ_SAFE and qweight_type in _MMVQ:
         return ggml_mul_mat_vec_a8(qweight, x, qweight_type, out_features)
     if qweight_type in _MMQ:

@@ -175,3 +175,15 @@ def test_gguf_expert_gemm_passes_independent_quant_types(monkeypatch):
 
     assert out.shape == (1, 4)
     assert [call[0] for call in calls] == [21, 20]
+
+
+def test_unquantized_gguf_linear_reads_its_bytes_as_floats():
+    """An F32 / F16 projection keeps its bytes in the uint8 qweight; the GEMM must view them as floats."""
+    from freetoken.layers.gguf import GGUFLinear
+
+    for quant_type, dtype in ((0, torch.float32), (1, torch.float16)):
+        weight = torch.randn(5, 64).to(dtype)
+        op = GGUFLinear(64, 5, quant_type)
+        op.qweight = weight.view(torch.uint8)
+        x = torch.randn(3, 64)
+        torch.testing.assert_close(op.forward(x), x @ weight.float().T, atol=1e-2, rtol=1e-2)
