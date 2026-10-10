@@ -76,6 +76,10 @@ class TritonFp8BlockQuantizeAtLoadKernel(TritonFp8BlockLinearKernel):
 
     name = "triton_qat"
 
+    def unusable_reason(self, cfg: LinearConfig) -> str | None:
+        # the inherited check asserts an FP8_BLOCK scheme; the QAT scheme is always 128x128 bf16
+        return None
+
     def finalize(self, layer: Any) -> None:
         from freetoken.kernel.triton.fp8_block_linear import per_block_quant_fp8
 
