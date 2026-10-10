@@ -809,16 +809,16 @@
     "number": 499,
     "title": "feat(kvcache): host-RAM KV tier for sparse-attention models (--kv-host-pages)",
     "head_sha": "6c316e2c9371",
-    "reviewed_at": "2026-10-03",
+    "reviewed_at": "2026-10-10",
     "decision": "deferred",
-    "revisit": "after-queue",
-    "reason": "Its fp8 parts (16-bit indexer dtype guard, k/v scales on the QSA attend) are already on main via #354. The remaining host-RAM KV tier (~700 lines: LRU GPU page cache over a pinned host mirror, per-row prefill attend loop) only serves QSA models (qwen4_exp / Flash-Next), ships without tests, and cannot be run here: only the Flash-Next config is cached and 30 GB RAM cannot hold its weights. Interesting for long context; revisit after the queue together with #525 and the CPU-embedding work.",
+    "revisit": "with a smaller card or many concurrent long requests",
+    "reason": "Its fp8 parts (16-bit indexer dtype guard, k/v scales on the QSA attend) are already on main via #354. The remaining host-RAM KV tier (~700 lines: LRU GPU page cache over a pinned host mirror, per-row prefill attend loop) only serves QSA models (qwen4_exp / Flash-Next), ships without tests, and cannot be run here: only the Flash-Next config is cached and 30 GB RAM cannot hold its weights. Interesting for long context; revisit after the queue together with #525 and the CPU-embedding work. REVISITED 2026-10-10 on Flash-Next NVFP4 (4090, all experts in RAM, fp8 KV, next-speed + PR + our fixups: nvfp4 KV refused, English comments, offloader unit tests). Works: needle passes at 30k/100k/150k. But Flash-Next's fp8 KV is cheap (~0.8 GiB VRAM per 65k tokens), so plain GPU KV covers the 262k rope cap for ~3.3 GiB: 150k needle WITHOUT the tier (--num-pages 2400, moe cache 3300 slots) passes in 103 s, decode 29-32 tok/s, vs WITH the tier (1600 GPU + 2496 host pages, moe 3500) 156 s, decode 23-25 tok/s. With 8k prefill chunks and 1024 GPU pages the tier's prefill collapsed to ~45 tok/s past the GPU pool (150k took 19 min) and the needle came back truncated. Not adopted: slower than plain KV at every size this card can use; the earlier 8.4k-token limit came from --moe-cache-auto giving nearly all VRAM to expert slots.",
     "commits": [],
-    "gpu_untested": true,
+    "gpu_untested": false,
     "authors": [
       "alvarorsouza-arch <alvaro.r.souza@gmail.com>"
     ],
-    "summary": "fp8 parts already on main via #354; host-RAM KV tier serves only Flash-Next, untested, cannot run here"
+    "summary": "Host-RAM KV tier works, but on 24 GB plain fp8 KV reaches the 262k cap and is faster (150k: 103 s vs 156 s); not adopted"
   },
   "502": {
     "number": 502,
