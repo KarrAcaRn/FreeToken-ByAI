@@ -125,7 +125,7 @@ def _build_engine(monkeypatch, ledger: _Ledger, *, moe: int, kv: int, budget: in
     config = types.SimpleNamespace(
         page_size=16, max_seq_len=4096, max_running_req=4, memory_ratio=1.0,
         cuda_graph_max_bs=4, swa_num_pages_override=None,
-        model_config=types.SimpleNamespace(vocab_size=128, model_is_mrope=False),
+        model_config=types.SimpleNamespace(vocab_size=128, model_is_mrope=False, hidden_size=64),
     )
     page_table = torch.zeros((config.max_running_req + 1, 256), dtype=torch.int32)
     eng = types.SimpleNamespace(
@@ -137,6 +137,9 @@ def _build_engine(monkeypatch, ledger: _Ledger, *, moe: int, kv: int, budget: in
         attn_backend=types.SimpleNamespace(reset_capture=lambda: None),
         graph_runner=_FakeGraphRunner(),
         _sync_get_memory=lambda: (0, 0),
+        dflash_worker=None,
+        dtype=torch.bfloat16,
+        _fill_moe_slot_cache=lambda: None,
     )
     eng._target_moe_and_expert_bytes = Engine._target_moe_and_expert_bytes.__get__(eng)
     eng._resize_kv_pool = Engine._resize_kv_pool.__get__(eng)
