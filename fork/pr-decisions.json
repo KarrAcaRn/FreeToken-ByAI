@@ -2985,5 +2985,89 @@
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
     "summary": "Draft - revisit when ready; /health 503 until serving (breaking for 200-polling clients)"
+  },
+  "651": {
+    "number": 651,
+    "title": "fix(scheduler): stop the swa prefill commit from freeing pages the request still reads",
+    "head_sha": "a0a6643d38dc",
+    "reviewed_at": "2026-10-10",
+    "decision": "adopted-with-fixups",
+    "commits": [
+      "56ed267",
+      "371d985"
+    ],
+    "gpu_untested": false,
+    "reason": "Fixes #204: an unfinished SWA prefill commit whose span runs through a tombstone another request still full-locks freed the request's own copy, so its row named free pages (double free at finish). The fix skips that commit like the hybrid path does. On next the PR's test could not reach the scenario: next keeps the finished prompt head's swa (#488), so the test now tombstones it through pool pressure (ensure_swa_slots), the second route the PR names; the bug reproduces there without the fix and is gone with it.",
+    "summary": "SWA prefill commit through a locked tombstone left a request reading freed pages (#204 double free); commit now skipped",
+    "fixup": "Test reaches the locked tombstone through swa pool pressure, since next keeps the prompt head's swa (#488) ([371d985](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/371d985))",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>"
+    ]
+  },
+  "650": {
+    "number": 650,
+    "title": "fix(engine): apply shrinking cache resizes before growing ones in live rebuild (Closes #643)",
+    "head_sha": "4f4832839719",
+    "reviewed_at": "2026-10-10",
+    "decision": "adopted-with-fixups",
+    "commits": [
+      "cdbf463",
+      "8898db6"
+    ],
+    "gpu_untested": false,
+    "reason": "Live cache rebuild resized MoE -> KV -> mamba regardless of direction, so a mixed resize that passed the fit check could OOM in the MoE grow. Now shrinks run before grows. Merged cleanly; its fake engine lacked next's dflash_worker/graph-runner fields. Live on Qwen3.6-35B-A3B NVFP4 (4090): moe 9095 -> 9220 slots with kv 32.9k -> 8k tokens in one rebuild: ok, generation correct afterwards.",
+    "summary": "Mixed-direction live cache rebuild could OOM mid-way although the target fit; shrinking resizes now run first",
+    "fixup": "Rebuild test fake given next's dflash and graph-runner fields ([8898db6](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/8898db6))",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ]
+  },
+  "641": {
+    "number": 641,
+    "title": "fix(rotary): preserve fp32 inputs in mrope torch fallbacks",
+    "head_sha": "3cae53d41551",
+    "reviewed_at": "2026-10-10",
+    "decision": "adopted-with-fixups",
+    "commits": [
+      "acc9494",
+      "519dff0"
+    ],
+    "gpu_untested": false,
+    "reason": "Real bug: .float() on FP32 Q/K aliases the input, so the torch mRoPE fallbacks rotated the high half with an already rotated low half. Only the two triton-less fallbacks change. The PR has no test; ours (both fallbacks, fp32 + bf16) fails before and passes after.",
+    "summary": "FP32 Q/K in the torch mRoPE fallbacks were rotated with an already overwritten half; both halves computed first",
+    "fixup": "Regression test for both fallbacks with fp32 and bf16 inputs ([519dff0](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/519dff0))",
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ]
+  },
+  "637": {
+    "number": 637,
+    "title": "feat(qwen3_5_moe): tensor-parallel weight sharding for multi-GPU serving",
+    "head_sha": "e75384f7d851",
+    "reviewed_at": "2026-10-10",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "commits": [],
+    "gpu_untested": true,
+    "reason": "Tensor-parallel sharding for qwen3_5_moe (bf16, fp8-block, NVFP4 experts, GDN, vision). Not judged on its merits yet: multi-GPU TP cannot be run here (one RTX 4090). Same feature as the deferred #104 (1.9k lines); compare both when revisiting.",
+    "summary": "Multi-GPU TP for Qwen3.5/3.6 MoE; needs several GPUs, not judged yet (same goal as #104)",
+    "authors": [
+      "zhangnju <zhangnju@126.com>"
+    ]
+  },
+  "657": {
+    "number": 657,
+    "title": "feat(models): add bounded encoder swa replay behind --swa-encoder-replay",
+    "head_sha": "5b2f3c05675a",
+    "reviewed_at": "2026-10-10",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "commits": [],
+    "gpu_untested": true,
+    "reason": "DeepSeek-V4.1 encoder SWA replay (on by default: bounded). Not judged on its merits yet: V4.1 is far too large for this machine and the author could not run a real checkpoint either; it also changes shared scheduler/SWA radix code (cache.py, prefill.py, swa_radix_cache.py) that needs careful review against next's SWA changes (#488, #651).",
+    "summary": "DeepSeek-V4.1 encoder SWA replay; model cannot run here, touches shared SWA scheduler code, not judged yet",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ]
   }
 }
