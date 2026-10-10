@@ -426,7 +426,7 @@
     "head_sha": "2e99aadbd9e5",
     "reviewed_at": "2026-10-03",
     "decision": "adopted",
-    "reason": "Pulled forward while reviewing #558 (same feature). The more complete --api-key: tests, docs, WWW-Authenticate, CORS preflight passes, and the attached shell client carries the key (with #558 a keyed ft serve --shell would lock out its own shell). args.py conflict resolved in the merge commit.",
+    "reason": "Pulled forward while reviewing #558 (same feature). The more complete --api-key: tests, docs, WWW-Authenticate, CORS preflight passes, and the attached shell client carries the key (with #558 a keyed ft serve --shell would lock out its own shell). args.py conflict resolved in the merge commit. 2026-10-10: upstream merged its own --api-key (#639); the sync merge f2541a9 replaced this implementation on next with upstream's.",
     "commits": [
       "30550b5"
     ],
@@ -434,7 +434,7 @@
     "authors": [
       "Ben Wilson <soft@mainlight.com>"
     ],
-    "summary": "Adds --api-key bearer authentication (tests, docs, CORS preflight, shell client sends the key)"
+    "summary": "Adds --api-key bearer authentication; on next replaced by upstream #639 (sync merge f2541a9)"
   },
   "558": {
     "number": 558,
