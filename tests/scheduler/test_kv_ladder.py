@@ -69,7 +69,13 @@ def test_the_flag_reserves_the_first_rung():
     assert args.enable_kv_ladder and args.kv_reserve_tokens >= 2 * 16384
 
 
+def test_the_default_strategy_needs_no_cache_flag():
+    args, _ = _parse(["--enable-kv-ladder", "--max-running-requests", "1"])
+    assert args.kv_reserve_tokens >= 2 * STEP
+
+
 @pytest.mark.parametrize("argv", [
+    ["--max-running-requests", "1", "--moe-cache-size", "4000"],
     ["--max-running-requests", "2", "--moe-strategy", "offload", "--moe-cache-auto"],
     ["--max-running-requests", "1", "--moe-strategy", "cpu"],
 ])

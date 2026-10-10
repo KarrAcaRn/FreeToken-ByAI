@@ -1267,7 +1267,8 @@ def parse_args(
             parser.error("--enable-kv-ladder currently requires --tensor-parallel-size 1")
         if kwargs["moe_strategy"] in ("cpu", "fused"):
             parser.error("--enable-kv-ladder requires the offload or hybrid MoE strategy")
-        if not kwargs["moe_cache_auto"]:
+        # --moe-strategy auto turns --moe-cache-auto on in the engine when no cache flag is given
+        if not kwargs["moe_cache_auto"] and not (kwargs["moe_strategy"] == "auto" and _no_cache_flag):
             parser.error("--enable-kv-ladder requires --moe-cache-auto")
         # --moe-cache-auto consumes this floor during startup, giving the ladder its first
         # 2x-step rung without a wasteful post-startup graph recapture.
