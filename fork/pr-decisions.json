@@ -357,13 +357,13 @@
     "reviewed_at": "2026-10-03",
     "decision": "deferred",
     "revisit": "after-queue",
-    "reason": "Valuable idea (pin per-layer hot experts in VRAM, hotness stats + selection tool, EMA repinning, live K via tune file, fp8_block CPU executor from #534), but 9.4k lines incl. a 1.2k-line rewrite of the offload cache, measured on one machine, and not opt-in: it changes the hybrid PCIe/CPU split default from the benched profile to a fixed 50%. Conflicts with the adopted #337 in 6 files. User decision: come back after all other PRs, then likely build our own version -- with a GPU test environment.",
+    "reason": "Valuable idea (pin per-layer hot experts in VRAM, hotness stats + selection tool, EMA repinning, live K via tune file, fp8_block CPU executor from #534), but 9.4k lines incl. a 1.2k-line rewrite of the offload cache, measured on one machine, and not opt-in: it changes the hybrid PCIe/CPU split default from the benched profile to a fixed 50%. Conflicts with the adopted #337 in 6 files. User decision: come back after all other PRs, then likely build our own version -- with a GPU test environment. 2026-10-10: own version studied on recorded decode traces (Flash-Next, Qwen3.6): static hot-expert pinning loses to the engine's global LRU at every cache size, other policies gain <=5%; the host-RAM saving is ~2.4 GiB on a 24 GB card. User decision: not built here (fork/next-speed.md on next-speed). Stays deferred for hardware with a 48 GB card.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "mmletgo <zhengrongh@126.com>"
     ],
-    "summary": "User's call: own project later (9.4k lines, not opt-in, conflicts with #337); ideally with GPU test setup"
+    "summary": "Own version studied 2026-10-10: pinning loses to LRU on 24 GB; not built, revisit with a 48 GB card"
   },
   "564": {
     "number": 564,
