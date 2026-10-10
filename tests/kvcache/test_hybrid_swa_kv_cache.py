@@ -151,6 +151,39 @@ def test_create_kvcache_pool_uses_hybrid_swa_cache(monkeypatch):
     assert pool.group_of(0) == "swa"
 
 
+def test_kv_sharing_layers_get_no_slab_and_read_their_source(monkeypatch):
+    import dataclasses
+
+    from freetoken.kvcache import create_kvcache_pool
+
+    _patch_tp(monkeypatch)
+    # Gemma-4 E-series layout: layers 4 (swa) and 5 (full) reuse layers 3 and 2
+    config = dataclasses.replace(_hybrid_model_config(), kv_sharing=((4, 3), (5, 2)))
+    specs = {spec.name: spec.layer_ids for spec in config.kv_cache_group_specs()}
+    assert specs == {"full": (2,), "swa": (0, 1, 3)}
+
+    pool = create_kvcache_pool(
+        model_config=config,
+        num_pages=4,
+        page_size=16,
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+    assert pool.full_kv_pool.buffer.shape[1] == 1 and pool.swa_kv_pool.buffer.shape[1] == 3
+    assert pool.k_cache(5).data_ptr() == pool.k_cache(2).data_ptr()
+    assert pool.v_cache(4).data_ptr() == pool.v_cache(3).data_ptr()
+    assert pool.group_of(4) == "swa" and pool.group_of(5) == "full"
+
+    with pytest.raises(ValueError, match="KV-sharing"):
+        create_kvcache_pool(
+            model_config=dataclasses.replace(config, kv_sharing=((4, 3), (5, 4))),
+            num_pages=4,
+            page_size=16,
+            dtype=torch.bfloat16,
+            device=torch.device("cpu"),
+        )
+
+
 def test_adjust_config_resolves_swa_cache_type():
     from freetoken.distributed import DistributedInfo
     from freetoken.engine.engine import _adjust_config

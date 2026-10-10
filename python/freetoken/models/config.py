@@ -323,6 +323,15 @@ class ModelConfig:
     output_multiplier: float | None = None
     vision_config: Any | None = None
     image_token_id: int | None = None
+    # Per-layer embeddings (Gemma-4 E-series): each decoder layer gets a ``per_layer_input_size``
+    # slice of a ``[per_layer_vocab_size, num_layers * per_layer_input_size]`` table; 0 = off.
+    per_layer_input_size: int = 0
+    per_layer_vocab_size: int = 0
+    # (layer, source layer) pairs: the layer stores no KV and attends over its source layer's KV.
+    kv_sharing: Tuple[Tuple[int, int], ...] = ()
+    # the KV-sharing layers run a 2x intermediate_size dense MLP (Gemma-4 E2B)
+    double_wide_shared_mlp: bool = False
+    pad_token_id: int | None = None
     attention_groups: Tuple[AttentionGroupConfig, ...] = ()
     has_attn_bias: bool = False
     has_router_bias: bool = False
@@ -445,6 +454,16 @@ class ModelConfig:
     def is_swa_layer(self, layer_id: int) -> bool:
         return isinstance(self.attention_group_for_layer(layer_id), SWAAttentionGroupConfig)
 
+    def kv_source_layer(self, layer_id: int) -> int | None:
+        """The layer whose KV ``layer_id`` reads, or None when it owns its KV."""
+        return dict(self.kv_sharing).get(layer_id)
+
+    def _kv_owning_layers(self, layer_ids: Tuple[int, ...]) -> Tuple[int, ...]:
+        if not self.kv_sharing:
+            return layer_ids
+        shared = {layer for layer, _ in self.kv_sharing}
+        return tuple(layer for layer in layer_ids if layer not in shared)
+
     def is_linear_layer(self, layer_id: int) -> bool:
         return isinstance(
             self.attention_group_for_layer(layer_id),
@@ -481,7 +500,7 @@ class ModelConfig:
                 specs.append(
                     KVCacheGroupSpec(
                         name=group.name,
-                        layer_ids=group.layer_ids,
+                        layer_ids=self._kv_owning_layers(group.layer_ids),
                         num_kv_heads=group.num_kv_heads,
                         head_dim=group.head_dim,
                         sliding_window=None,
@@ -496,7 +515,7 @@ class ModelConfig:
                 specs.append(
                     KVCacheGroupSpec(
                         name=group.name,
-                        layer_ids=group.layer_ids,
+                        layer_ids=self._kv_owning_layers(group.layer_ids),
                         num_kv_heads=group.num_kv_heads,
                         head_dim=group.head_dim,
                         sliding_window=group.sliding_window,

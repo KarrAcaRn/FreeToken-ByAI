@@ -53,6 +53,7 @@ _NVFP4_BANK_KINDS = {
 }
 _LAYER_INDEX_PATTERN = re.compile(r"layers\.(\d+)\.")
 _LAYER_FF_PREFIX_PATTERN = re.compile(r"^(model\.layers\.\d+)\.")
+_SELF_ATTN_KEY_PATTERN = re.compile(r"^model\.layers\.(\d+)\.self_attn\.(\w+?)\.")
 _MERGE_RULES = {
     ".q_proj": MergeRule(".qkv_proj", "q", ("q", "k", "v")),
     ".k_proj": MergeRule(".qkv_proj", "k", ("q", "k", "v")),
@@ -210,6 +211,7 @@ def iter_weights(
         if isinstance(config.attention_group_for_layer(layer_id), FullAttentionGroupConfig)
         and config.attention_group_for_layer(layer_id).k_eq_v
     }
+    kv_shared_layers = {layer for layer, _ in getattr(config, "kv_sharing", ())}
     merge_buf: dict[str, dict[str, torch.Tensor]] = {}
     gateup_buf: dict[str, dict[str, tuple]] = {}
     reader = ShardReader(model_path, device)
@@ -255,6 +257,15 @@ def iter_weights(
                         continue
                     if not is_expert and not include_non_moe:
                         continue
+
+                    # KV-sharing layers keep a standalone q_proj; the checkpoint's k/v for them are unused
+                    attn_key = _SELF_ATTN_KEY_PATTERN.match(name) if kv_shared_layers else None
+                    if attn_key is not None and int(attn_key.group(1)) in kv_shared_layers:
+                        if attn_key.group(2) in ("k_proj", "v_proj", "k_norm", "v_norm"):
+                            continue
+                        if attn_key.group(2) == "q_proj":
+                            yield name, f.get_tensor(raw_name)
+                            continue
 
                     # llm-compressor / compressed-tensors NVFP4.  The stored names
                     # differ from ModelOpt but map to the same FreeToken buffers.

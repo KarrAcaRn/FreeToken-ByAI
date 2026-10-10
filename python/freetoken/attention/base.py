@@ -46,6 +46,8 @@ class AttentionSpec:
     sinks: torch.Tensor | None = None
     # rows of a multimodal span (batch.mm_block_ends) also attend to the span's later keys
     bidirectional_mm_blocks: bool = False
+    # the layer attends over another layer's KV, which that layer already stored
+    kv_shared: bool = False
 
 
 @dataclass

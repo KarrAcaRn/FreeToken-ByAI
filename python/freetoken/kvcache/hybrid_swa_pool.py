@@ -94,6 +94,7 @@ class HybridSWAKVCache(BaseKVCachePool):
         device: torch.device,
         num_swa_tokens: int | None = None,
         kv_quant: str = "none",
+        kv_sharing: Sequence[tuple[int, int]] = (),
     ) -> None:
         if kv_quant not in ("none", "fp8", "nvfp4"):
             raise ValueError(f"unsupported hybrid-SWA kv_quant {kv_quant!r}")
@@ -146,7 +147,7 @@ class HybridSWAKVCache(BaseKVCachePool):
             "full": self.full_kv_pool,
             "swa": self.swa_kv_pool,
         }
-        self.layers_mapping = self._build_layers_mapping(num_layers, specs)
+        self.layers_mapping = self._build_layers_mapping(num_layers, specs, kv_sharing)
         if self._swa_paged:
             self._init_swa_paged_state()
 
@@ -176,7 +177,9 @@ class HybridSWAKVCache(BaseKVCachePool):
 
     @staticmethod
     def _build_layers_mapping(
-        num_layers: int, specs: dict[str, KVCacheGroupSpec]
+        num_layers: int,
+        specs: dict[str, KVCacheGroupSpec],
+        kv_sharing: Sequence[tuple[int, int]] = (),
     ) -> tuple[_LayerRef, ...]:
         mapping: list[_LayerRef | None] = [None] * num_layers
         for group_name in ("full", "swa"):
@@ -186,6 +189,12 @@ class HybridSWAKVCache(BaseKVCachePool):
                 if mapping[layer_id] is not None:
                     raise ValueError(f"KV layer id {layer_id} appears in more than one group")
                 mapping[layer_id] = _LayerRef(group=group_name, index=local_index)
+        # a KV-sharing layer owns no slab: it resolves to its source layer's
+        owners = {layer_id for layer_id, ref in enumerate(mapping) if ref is not None}
+        for layer_id, source in kv_sharing:
+            if layer_id in owners or source not in owners:
+                raise ValueError(f"KV-sharing layer {layer_id} -> {source} must map a slab-less layer to a slab owner")
+            mapping[layer_id] = mapping[source]
 
         missing = [layer_id for layer_id, ref in enumerate(mapping) if ref is None]
         if missing:
