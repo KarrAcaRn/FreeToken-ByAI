@@ -834,7 +834,8 @@
       "Mukkesh Ganesh <mukmckenzie@gmail.com>"
     ],
     "revisit": "after-queue",
-    "summary": "DeepSeek-V4 too large for this machine; reworks shared mm code, needs careful review"
+    "summary": "DeepSeek-V4 too large for this machine; reworks shared mm code, needs careful review",
+    "upstream": "merged"
   },
   "494": {
     "number": 494,
@@ -2803,7 +2804,8 @@
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
     ],
-    "summary": "Draft - revisit when ready; ROCm cannot be tested here"
+    "summary": "Draft - revisit when ready; ROCm cannot be tested here",
+    "upstream": "merged"
   },
   "133": {
     "number": 133,
@@ -2817,7 +2819,8 @@
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
     ],
-    "summary": "Draft - revisit when ready; ROCm cannot be tested here"
+    "summary": "Draft - revisit when ready; ROCm cannot be tested here",
+    "upstream": "closed"
   },
   "618": {
     "number": 618,
