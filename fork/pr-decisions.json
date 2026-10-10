@@ -2541,16 +2541,18 @@
     "number": 59,
     "title": "Add Gemma-4 E-series (E2B/E4B) support: PLE, KV-layer sharing, double-wide MLP, and a dense GGUF parser",
     "head_sha": "abd3b143e609",
-    "reviewed_at": "2026-10-04",
-    "decision": "deferred",
-    "reason": "Gemma-4 E2B/E4B support (per-layer embeddings, KV-layer sharing, double-wide MLP) plus a dense GGUF parser. A trial merge conflicts in 13 files (26 hunks) against Gemma-4 code next reworked since (#359, #494, #467 and fixups; the dense GGUF parser part is covered by #359 + 7f2fc79), so it amounts to a reimplementation. Worth doing as its own project after the queue - the E-series models are small enough to test here (E2B/E4B GGUF or safetensors).",
-    "commits": [],
-    "gpu_untested": true,
+    "reviewed_at": "2026-10-10",
+    "decision": "reimplemented",
+    "reason": "Gemma-4 E2B/E4B support (per-layer embeddings, KV-layer sharing, double-wide MLP) plus a dense GGUF parser. A trial merge conflicts in 13 files (26 hunks) against Gemma-4 code next reworked since (#359, #494, #467 and fixups; the dense GGUF parser part is covered by #359 + 7f2fc79), so it amounts to a reimplementation. Worth doing as its own project after the queue - the E-series models are small enough to test here (E2B/E4B GGUF or safetensors). REVISITED 2026-10-10: reimplemented on next (8589098, Co-authored-by the PR author): per-layer embeddings, KV-layer sharing (shared layers read the source layer's paged KV, no copy; CUDA-graph safe), double-wide MLP; the PLE table can sit in host RAM through the existing --embed-device cpu. google/gemma-4-E2B-it and E4B-it (bf16 safetensors, text) match HF transformers greedy tokens exactly on 5 prompts incl. 2.8k tokens past the sliding window, graphs on/off and chunked prefill alike; decode E2B ~158, E4B ~83-86 tok/s on the 4090; Gemma-4-26B-A4B output byte-identical. Left out: the PR's dense GGUF E-series parsing and its unrelated llama GGUF parser; image/audio paths untested.",
+    "commits": [
+      "8589098"
+    ],
+    "gpu_untested": false,
     "authors": [
       "mkornreich <52514824+mkornreich@users.noreply.github.com>"
     ],
-    "revisit": "after-queue",
-    "summary": "Needs rework on next (13-file conflict with Gemma-4 changes); own project later, E2B/E4B are testable here"
+    "summary": "Gemma-4 E2B/E4B (per-layer embeddings, KV sharing, double-wide MLP); matches HF greedy output exactly",
+    "fixup": "Own version on today's code: shared layers read the source's paged KV, PLE table via --embed-device cpu, GGUF parts left out ([8589098](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/8589098))"
   },
   "31": {
     "number": 31,
