@@ -256,6 +256,11 @@ closed drop out of these tables; the JSON keeps their decisions.
   fits, without loading a weight; `ft serve` refuses a configuration that cannot fit before
   spending minutes on the load. Within ~2% of the real allocation. Opened upstream as
   [#595](https://github.com/FlashML-org/FreeToken/pull/595).
+- **Long context by default for MoE models** (`--kv-reserve-share`, default 0.1): with
+  `--moe-cache-auto` the KV cache keeps a tenth of the cache budget (up to the model's context)
+  instead of only 8192 tokens. Where the KV is cheap next to an expert slot the context grows a
+  lot for a few slots: Qwen3.8-Flash-Next 8.3k -> 101k tokens and Qwen3.6-35B-A3B 8.3k -> 159k,
+  each for about 5% decode speed. `--kv-reserve-share 0` restores the old split.
 - **CPU-resident input embeddings** (`--embed-device cpu`): the input-embedding table moves to
   pinned host RAM and the GPU reads the looked-up rows over PCIe, inside the CUDA graphs. On
   Qwen3.8-27B with the fp8 KV cache the context grows from 25k to 100k tokens, with the same
