@@ -14,8 +14,25 @@ from tokenizers import AddedToken
 
 from .reader import gguf_architecture, load_gguf_metadata
 
-# GGUF architecture -> transformers GGUF tokenizer-converter key.
-_TOKENIZER_ARCH = {"gemma4": "gemma4_text"}
+# GGUF architecture -> transformers GGUF tokenizer-converter key. qwen35moe is a GPT2-style
+# BPE that transformers has no converter key for; the qwen2 converter builds the same BPE.
+_TOKENIZER_ARCH = {"gemma4": "gemma4_text", "qwen35moe": "qwen2"}
+
+# Chat turn end first (it becomes eos, so chat generation halts there), then the formal
+# document end; every name present in the vocab is a stop id.
+_STOP_TOKENS = {
+    "gemma4": ("<turn|>", "<eos>"),
+    "qwen35moe": ("<|im_end|>", "<|endoftext|>"),
+}
+
+# tokenizer.ggml.pre -> the split regex of the source tokenizer.json, where the qwen2
+# converter's default differs. Qwen3.5 counts combining marks (\p{M}) as letters.
+_PRE_SPLIT = {
+    "qwen35": (
+        r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}"
+        r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+    ),
+}
 
 
 def load_gguf_tokenizer(model_path: str):
@@ -31,16 +48,25 @@ def load_gguf_tokenizer(model_path: str):
         if k.startswith("tokenizer.ggml.")
     }
     fast, _extra = convert_gguf_tokenizer(conv_arch, tok_dict)
+    split = _PRE_SPLIT.get(tok_dict.get("pre"))
+    if split is not None:
+        from tokenizers import Regex, pre_tokenizers
+
+        fast.pre_tokenizer = pre_tokenizers.Sequence([
+            pre_tokenizers.Split(Regex(split), behavior="isolated", invert=False),
+            pre_tokenizers.ByteLevel(add_prefix_space=False, trim_offsets=False, use_regex=False),
+        ])
 
     tokens = tok_dict["tokens"]
 
-    def tok_for(id_key: str, default: str) -> str:
+    def tok_for(id_key: str, default: str) -> str | None:
         tid = meta.get(f"tokenizer.ggml.{id_key}")
-        return tokens[int(tid)] if tid is not None and int(tid) < len(tokens) else default
+        if tid is not None and int(tid) < len(tokens):
+            return tokens[int(tid)]
+        # a default absent from this vocab (Qwen has no <unk>) would be appended as a new token
+        return default if default in tokens else None
 
-    # gemma4 chat turns end with <turn|>; prefer it as eos so chat generation halts
-    # (the formal <eos> is also a stop id, see gguf_eos_token_ids).
-    turn_end = "<turn|>" if "<turn|>" in tokens else None
+    turn_end = next((t for t in _STOP_TOKENS.get(arch, ()) if t in tokens), None)
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=fast,
         bos_token=tok_for("bos_token_id", "<bos>"),
@@ -91,7 +117,7 @@ def load_gguf_tokenizer(model_path: str):
 
 
 def gguf_eos_token_ids(model_path: str, tokenizer) -> set[int]:
-    """Stop ids for GGUF generation: the formal <eos> plus the chat turn end <turn|>."""
+    """Stop ids for GGUF generation: the formal eos plus the architecture's chat turn end."""
     meta = load_gguf_metadata(model_path)
     tokens = meta["tokenizer.ggml.tokens"]
     ids: set[int] = set()
@@ -102,7 +128,7 @@ def gguf_eos_token_ids(model_path: str, tokenizer) -> set[int]:
         ids.add(int(eid))
     # Look the stop tokens up in the vocab directly (convert_tokens_to_ids would map an
     # absent name to <unk>, wrongly adding it as a stop id).
-    for name in ("<eos>", "<turn|>"):
+    for name in _STOP_TOKENS.get(gguf_architecture(model_path), ()):
         try:
             ids.add(tokens.index(name))
         except ValueError:

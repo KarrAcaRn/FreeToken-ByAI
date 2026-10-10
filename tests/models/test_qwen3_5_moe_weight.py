@@ -636,3 +636,217 @@ def test_dense_mixed_precision_keeps_fp8_gdn_native(checkpoint):
     expected = torch.cat([raw[f"{gdn}.in_proj_{p}.weight_scale"].float().expand(t.shape[0]) for p, t in zip(("qkv", "z"), parts)])
     assert torch.equal(scale, expected)
     assert loaded["model.layers.0.mlp.gate_up_proj.weight"].dtype is torch.uint8
+
+
+# --------------------------------------------------------------------------- llama.cpp qwen35moe GGUF
+
+GK, GV, GD = 2, 4, 32  # GDN key / value heads (V tiled by llama.cpp since GK != GV), head dim
+GQ, GKV, GAD = 2, 1, 64  # attention q / kv heads, head dim (rope needs 64+)
+GH, GE, GI = 64, 4, 32  # hidden, routed experts, expert and shared-expert width
+GVOCAB = 64
+
+
+def _reorder_v_heads(t: torch.Tensor, dim: int, head_dim: int) -> torch.Tensor:
+    """llama.cpp conversion/qwen.py ``_reorder_v_heads``: grouped -> tiled V heads."""
+    shape = list(t.shape)
+    t = t.reshape(shape[:dim] + [GK, GV // GK, head_dim] + shape[dim + 1:])
+    return t.transpose(dim, dim + 1).contiguous().reshape(shape)
+
+
+def _hf_qwen35moe() -> dict[str, torch.Tensor]:
+    """HF-layout fp32 tensors of a 2-layer model: layer 0 GDN, layer 1 full attention."""
+    r = lambda *s: torch.randn(*s) * 0.5  # noqa: E731
+    raw = {"embed": r(GVOCAB, GH), "lm_head": r(GVOCAB, GH), "norm": r(GH)}
+    for layer in (0, 1):
+        raw.update({f"{layer}.{k}": v for k, v in {
+            "input_norm": r(GH), "post_norm": r(GH), "router": r(GE, GH), "shared_gate": r(1, GH),
+            "sh_gate": r(GI, GH), "sh_up": r(GI, GH), "sh_down": r(GH, GI),
+            "exp_gate": r(GE, GI, GH), "exp_up": r(GE, GI, GH), "exp_down": r(GE, GH, GI),
+        }.items()})
+    raw.update({
+        "0.qkv": r(2 * GK * GD + GV * GD, GH), "0.z": r(GV * GD, GH), "0.b": r(GV, GH), "0.a": r(GV, GH),
+        "0.conv": r(2 * GK * GD + GV * GD, 1, 4), "0.A_log": r(GV), "0.dt_bias": r(GV), "0.gdn_norm": r(GD),
+        "0.out": r(GH, GV * GD),
+        "1.q": r(2 * GQ * GAD, GH), "1.k": r(GKV * GAD, GH), "1.v": r(GKV * GAD, GH), "1.o": r(GH, GQ * GAD),
+        "1.q_norm": r(GAD), "1.k_norm": r(GAD),
+    })
+    return raw
+
+
+def _write_qwen35moe_gguf(path, raw: dict[str, torch.Tensor]) -> None:
+    """What llama.cpp's converter writes for ``raw``: A as -exp(A_log), norms as 1 + w, V heads tiled;
+    projections Q8_0 next to F32 GDN beta / alpha, a Q4_0 down bank in layer 1, and a NextN block."""
+    import gguf
+
+    Q8, Q4, F32 = gguf.GGMLQuantizationType.Q8_0, gguf.GGMLQuantizationType.Q4_0, gguf.GGMLQuantizationType.F32
+    w = gguf.GGUFWriter(str(path), "qwen35moe")
+    for key, value in {
+        "block_count": 3, "nextn_predict_layers": 1, "context_length": 4096, "embedding_length": GH,
+        "attention.head_count": GQ, "attention.head_count_kv": GKV, "attention.key_length": GAD,
+        "attention.value_length": GAD, "rope.dimension_count": GAD // 4, "expert_count": GE, "expert_used_count": 2,
+        "expert_feed_forward_length": GI, "expert_shared_feed_forward_length": GI, "ssm.conv_kernel": 4,
+        "ssm.state_size": GD, "ssm.group_count": GK, "ssm.time_step_rank": GV, "ssm.inner_size": GV * GD,
+        "full_attention_interval": 2,
+    }.items():
+        w.add_uint32(f"qwen35moe.{key}", value)
+    w.add_float32("qwen35moe.rope.freq_base", 1e7)
+    w.add_float32("qwen35moe.attention.layer_norm_rms_epsilon", 1e-6)
+
+    def add(name: str, t: torch.Tensor, qtype=F32):
+        arr = t.float().contiguous().numpy()
+        if qtype == F32:
+            w.add_tensor(name, arr)
+        else:
+            w.add_tensor(name, gguf.quants.quantize(arr, qtype), raw_dtype=qtype)
+
+    add("token_embd.weight", raw["embed"], Q8)
+    add("output.weight", raw["lm_head"], Q8)
+    add("output_norm.weight", raw["norm"] + 1)
+    for layer in (0, 1):
+        blk = f"blk.{layer}"
+        add(f"{blk}.attn_norm.weight", raw[f"{layer}.input_norm"] + 1)
+        add(f"{blk}.post_attention_norm.weight", raw[f"{layer}.post_norm"] + 1)
+        add(f"{blk}.ffn_gate_inp.weight", raw[f"{layer}.router"])
+        add(f"{blk}.ffn_gate_inp_shexp.weight", raw[f"{layer}.shared_gate"].reshape(-1))
+        add(f"{blk}.ffn_gate_shexp.weight", raw[f"{layer}.sh_gate"], Q8)
+        add(f"{blk}.ffn_up_shexp.weight", raw[f"{layer}.sh_up"], Q8)
+        add(f"{blk}.ffn_down_shexp.weight", raw[f"{layer}.sh_down"], Q8)
+        add(f"{blk}.ffn_gate_exps.weight", raw[f"{layer}.exp_gate"], Q8)
+        add(f"{blk}.ffn_up_exps.weight", raw[f"{layer}.exp_up"], Q8)
+        add(f"{blk}.ffn_down_exps.weight", raw[f"{layer}.exp_down"], Q8 if layer == 0 else Q4)
+    qk = 2 * GK * GD
+    add("blk.0.attn_qkv.weight", torch.cat([raw["0.qkv"][:qk], _reorder_v_heads(raw["0.qkv"][qk:], 0, GD)]), Q8)
+    add("blk.0.attn_gate.weight", _reorder_v_heads(raw["0.z"], 0, GD), Q8)
+    add("blk.0.ssm_beta.weight", _reorder_v_heads(raw["0.b"], 0, 1))
+    add("blk.0.ssm_alpha.weight", _reorder_v_heads(raw["0.a"], 0, 1))
+    conv = raw["0.conv"].squeeze(1)
+    add("blk.0.ssm_conv1d.weight", torch.cat([conv[:qk], _reorder_v_heads(conv[qk:], 0, GD)]))
+    add("blk.0.ssm_a", _reorder_v_heads(-raw["0.A_log"].exp(), 0, 1))
+    add("blk.0.ssm_dt.bias", _reorder_v_heads(raw["0.dt_bias"], 0, 1))
+    add("blk.0.ssm_norm.weight", raw["0.gdn_norm"])
+    add("blk.0.ssm_out.weight", _reorder_v_heads(raw["0.out"], 1, GD))  # F32, so the CPU path can run it
+    add("blk.1.attn_q.weight", raw["1.q"], Q8)
+    add("blk.1.attn_k.weight", raw["1.k"], Q8)
+    add("blk.1.attn_v.weight", raw["1.v"], Q8)
+    add("blk.1.attn_output.weight", raw["1.o"], Q8)
+    add("blk.1.attn_q_norm.weight", raw["1.q_norm"] + 1)
+    add("blk.1.attn_k_norm.weight", raw["1.k_norm"] + 1)
+    add("blk.2.attn_norm.weight", torch.ones(GH))  # NextN block: not a decoder layer
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+@pytest.fixture(scope="module")
+def qwen35moe_gguf(tmp_path_factory):
+    torch.manual_seed(7)
+    raw = _hf_qwen35moe()
+    path = tmp_path_factory.mktemp("gguf") / "qwen35moe-tiny.gguf"
+    _write_qwen35moe_gguf(path, raw)
+    return str(path), raw
+
+
+def _gguf_weights(path: str) -> dict[str, torch.Tensor]:
+    from freetoken.models.qwen3_5_moe.gguf import iter_gguf_weights
+
+    return {n: t.clone() for n, t in iter_gguf_weights(path, torch.device("cpu"), include_moe_experts=False, include_non_moe=True)}
+
+
+def _q8(packed: torch.Tensor, cols: int) -> torch.Tensor:
+    from freetoken.models.gguf.dequant import GGML_Q8_0, dequantize
+
+    return dequantize(packed.reshape(-1), GGML_Q8_0, torch.float32).reshape(-1, cols)
+
+
+def test_gguf_config_has_the_hf_geometry(qwen35moe_gguf):
+    from freetoken.models.config import FullAttentionGroupConfig
+
+    path, _raw = qwen35moe_gguf
+    config = parse_gguf_config_of(path)
+    assert config.num_layers == 2  # the NextN block is dropped
+    assert [config.is_linear_layer(i) for i in range(2)] == [True, False]
+    gdn = config.linear_attention_group()
+    assert (gdn.num_key_heads, gdn.num_value_heads, gdn.key_head_dim, gdn.conv_kernel_dim) == (GK, GV, GD, 4)
+    full = config.attention_group_for_layer(1)
+    assert isinstance(full, FullAttentionGroupConfig) and (full.num_kv_heads, full.head_dim) == (GKV, GAD)
+    assert config.rotary_config.rotary_dim == GAD // 4 and config.rotary_config.base == 1e7
+    assert (config.num_experts, config.num_experts_per_tok, config.moe_intermediate_size) == (GE, 2, GI)
+    assert config.shared_expert_intermediate_size == GI and not config.tie_word_embeddings
+    layout = config.gguf_quant_types
+    assert layout["expert_gate_up"] == (8, 8) and layout["expert_down"] == (8, 2)
+    assert layout["tensors"]["blk.0.ssm_beta.weight"] == 0 and layout["tensors"]["blk.0.attn_qkv.weight"] == 8
+
+
+def parse_gguf_config_of(path: str):
+    from freetoken.models.qwen3_5_moe.gguf import parse_gguf_config
+
+    return parse_gguf_config(cached_load_hf_config(path))
+
+
+def test_gguf_emitted_keys_are_the_model_state_dict(qwen35moe_gguf):
+    path, _raw = qwen35moe_gguf
+    loaded, state = _gguf_weights(path), _meta_state_dict(path)
+    assert set(loaded) == set(state)
+    for key, tensor in loaded.items():
+        assert tensor.shape == state[key].shape, key
+        assert tensor.dtype is state[key].dtype or not key.endswith("qweight"), key
+    # beta / alpha are F32 next to the Q8_0 qkv | z, so the GDN in-projection runs as two GEMMs
+    assert "model.layers.0.linear_attn.in_proj.runs.1.qweight" in loaded
+    assert "model.layers.1.self_attn.qkv_proj.qweight" in loaded
+
+
+def test_gguf_undoes_the_llama_cpp_transforms(qwen35moe_gguf):
+    path, raw = qwen35moe_gguf
+    got = _gguf_weights(path)
+    gdn = "model.layers.0.linear_attn"
+    qkvz = _q8(got[f"{gdn}.in_proj.runs.0.qweight"], GH)
+    ba = got[f"{gdn}.in_proj.runs.1.qweight"].view(torch.float32)
+    tol = dict(atol=0.03, rtol=0.03)  # Q8_0
+    torch.testing.assert_close(qkvz, torch.cat([raw["0.qkv"], raw["0.z"]]), **tol)
+    torch.testing.assert_close(ba, torch.cat([raw["0.b"], raw["0.a"]]))
+    torch.testing.assert_close(got[f"{gdn}.A_log"], raw["0.A_log"])
+    torch.testing.assert_close(got[f"{gdn}.dt_bias"], raw["0.dt_bias"])
+    torch.testing.assert_close(got[f"{gdn}.conv1d.weight"].float(), raw["0.conv"], atol=0.01, rtol=0.01)
+    torch.testing.assert_close(got[f"{gdn}.norm.weight"].float(), raw["0.gdn_norm"], atol=0.01, rtol=0.01)
+    for key, ref in (("model.norm.weight", raw["norm"]), ("model.layers.1.input_layernorm.weight", raw["1.input_norm"]),
+                     ("model.layers.1.self_attn.q_norm.weight", raw["1.q_norm"])):
+        torch.testing.assert_close(got[key].float(), ref + 1, atol=0.01, rtol=0.01)  # stored shifted, read as is
+    attn = _q8(got["model.layers.1.self_attn.qkv_proj.qweight"], GH)
+    torch.testing.assert_close(attn, torch.cat([raw["1.q"], raw["1.k"], raw["1.v"]]), **tol)
+    shared = _q8(got["model.layers.0.mlp.shared_expert.gate_up_proj.qweight"], GH)
+    torch.testing.assert_close(shared, torch.cat([raw["0.sh_gate"], raw["0.sh_up"]]), **tol)
+    torch.testing.assert_close(got["model.layers.0.mlp.shared_expert_gate.weight"].float(), raw["0.shared_gate"], atol=0.01, rtol=0.01)
+
+
+def test_gguf_ssm_out_tiles_its_grouped_input(qwen35moe_gguf):
+    """ssm_out keeps llama.cpp's tiled columns; the op tiles the grouped GDN output to match."""
+    from freetoken.models.qwen3_5_moe.gguf import GGUFTiledVInputLinear
+
+    path, raw = qwen35moe_gguf
+    op = GGUFTiledVInputLinear(GV * GD, GH, 0, GK, GV // GK)
+    op.qweight = _gguf_weights(path)["model.layers.0.linear_attn.out_proj.qweight"]
+    x = torch.randn(3, GV * GD)
+    torch.testing.assert_close(op.forward(x), x @ raw["0.out"].T, atol=1e-4, rtol=1e-4)
+
+
+def test_gguf_expert_banks_put_each_experts_up_rows_after_its_gate_rows(qwen35moe_gguf, monkeypatch):
+    import gguf
+
+    from freetoken.models.gguf.dequant import row_bytes
+    from freetoken.models.qwen3_5_moe.gguf import load_q4_0_expert_sources
+
+    path, _raw = qwen35moe_gguf
+    config = parse_gguf_config_of(path)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    banks = load_q4_0_expert_sources(path, config)
+    src = {t.name: torch.from_numpy(t.data.copy()).view(torch.uint8).reshape(GE, -1) for t in gguf.GGUFReader(path).tensors
+           if "_exps." in t.name}
+    gate_bytes = GI * row_bytes(GH, 8)
+    for layer in (0, 1):
+        gate_up, down = banks["gate_up"][layer], banks["down"][layer]
+        assert torch.equal(gate_up[:, :gate_bytes], src[f"blk.{layer}.ffn_gate_exps.weight"])
+        assert torch.equal(gate_up[:, gate_bytes:], src[f"blk.{layer}.ffn_up_exps.weight"])
+        dn = src[f"blk.{layer}.ffn_down_exps.weight"]
+        assert torch.equal(down[:, : dn.shape[1]], dn)  # layer 1's Q4_0 rows sit in a Q8_0-wide slot
+    assert banks["down"][1].shape[1] == GH * row_bytes(GI, 8) > GH * row_bytes(GI, 2)

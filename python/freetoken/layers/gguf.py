@@ -43,7 +43,7 @@ from freetoken.models.gguf.dequant import (
     row_bytes,
 )
 
-from .base import BaseOP
+from .base import BaseOP, OPList
 
 # ggml type groups for kernel dispatch (subset we build kernels for).
 _UNQUANTIZED = {GGML_F32, GGML_F16, GGML_BF16}
@@ -130,6 +130,62 @@ class GGUFLinear(BaseOP):
         return out
 
 
+def gguf_type_runs(sizes: list[int], quant_types: list[int]) -> list[tuple[int, int, int]]:
+    """Group consecutive parts of a fused projection that share a ggml type: ``[(first part,
+    end part, type)]``. Parts of one run concatenate as packed rows; runs cannot (row_bytes differ)."""
+    assert len(sizes) == len(quant_types) and sizes
+    runs: list[tuple[int, int, int]] = []
+    for i, quant_type in enumerate(quant_types):
+        if runs and runs[-1][2] == quant_type:
+            runs[-1] = (runs[-1][0], i + 1, quant_type)
+        else:
+            runs.append((i, i + 1, quant_type))
+    return runs
+
+
+class GGUFMergedLinear(BaseOP):
+    """A fused projection whose parts a GGUF stores in different ggml types (llama.cpp's
+    mixed quant levels): one :class:`GGUFLinear` per run of same-typed parts, outputs
+    concatenated. Each part reads the same input, so this equals the single fused GEMM."""
+
+    def __init__(self, in_features: int, sizes: list[int], quant_types: list[int]):
+        self.in_features = in_features
+        self.out_features = sum(sizes)
+        self.runs = OPList([
+            GGUFLinear(in_features, sum(sizes[first:end]), quant_type)
+            for first, end, quant_type in gguf_type_runs(sizes, quant_types)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([run.forward(x) for run in self.runs.op_list], dim=-1)
+
+
+def gguf_linear(in_features: int, sizes: list[int], quant_types: list[int]) -> GGUFLinear | GGUFMergedLinear:
+    """The GGUF op for a (possibly fused) projection: a plain :class:`GGUFLinear` when every
+    part shares one ggml type, else a :class:`GGUFMergedLinear`."""
+    if len(set(quant_types)) == 1:
+        return GGUFLinear(in_features, sum(sizes), quant_types[0])
+    return GGUFMergedLinear(in_features, sizes, quant_types)
+
+
+class GGUFLMHead(BaseOP):
+    """Untied LM head over a packed GGUF ``output.weight``; like ``ParallelLMHead`` it
+    projects only the last position of each prefill sequence. TP=1 only."""
+
+    def __init__(self, num_embeddings: int, embedding_dim: int, quant_type: int):
+        self.num_embeddings = num_embeddings
+        self._quant_type = quant_type
+        self.qweight = torch.empty(num_embeddings, row_bytes(embedding_dim, quant_type), dtype=torch.uint8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from freetoken.core import get_global_ctx
+
+        batch = get_global_ctx().batch
+        if batch.is_prefill:
+            x = x[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
+        return fused_mul_mat_gguf(x, self.qweight, self._quant_type)
+
+
 class GGUFEmbedding(BaseOP):
     """Vocab embedding stored as a native GGUF block-quantized table.
 
@@ -167,4 +223,12 @@ class GGUFEmbedding(BaseOP):
         return y
 
 
-__all__ = ["GGUFLinear", "GGUFEmbedding", "fused_mul_mat_gguf"]
+__all__ = [
+    "GGUFLinear",
+    "GGUFMergedLinear",
+    "GGUFLMHead",
+    "GGUFEmbedding",
+    "fused_mul_mat_gguf",
+    "gguf_linear",
+    "gguf_type_runs",
+]

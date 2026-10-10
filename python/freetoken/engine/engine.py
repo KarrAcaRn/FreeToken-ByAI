@@ -2556,9 +2556,18 @@ def _cpu_moe_executor_viable(model_config) -> bool:
         return False
     if moe_wfmt != "mxfp4" and not compiled_extension_supports(act):
         return False
+    if _gguf_experts_need_gpu(model_config):
+        return False
     expert_quant = getattr(model_config, "expert_quant", "none")
     fmt = expert_quant if expert_quant != "none" else (moe_wfmt or "bf16")
     return fmt == "mxfp4" or fmt in _WFMT_IDS
+
+
+def _gguf_experts_need_gpu(model_config) -> bool:
+    """GGUF experts in any type but Q4_0 decode in the ggml CUDA kernels only (no CPU executor kernel)."""
+    from freetoken.models.gguf.experts import uses_mixed_gguf_experts
+
+    return uses_mixed_gguf_experts(model_config)
 
 
 def _pin_budget_bytes(reserved: int = 0) -> int | None:
@@ -2956,6 +2965,11 @@ def _adjust_config(config: EngineConfig):
                     f"benchbw profile recommends hybrid, but the CPU MoE executor does not "
                     f"support this model's expert activation "
                     f"{getattr(model_config, 'hidden_act', None)!r}; staying on offload"
+                )
+            elif _gguf_experts_need_gpu(model_config):
+                logger.info_rank0(
+                    "benchbw profile recommends hybrid, but the CPU MoE executor has no kernel "
+                    "for this GGUF's K-/I-quant experts; staying on offload"
                 )
             elif moe_wfmt != "mxfp4" and not compiled_extension_supports(_act):
                 # Stale prebuilt _cpu_moe.so: an explicit cpu/hybrid pick still

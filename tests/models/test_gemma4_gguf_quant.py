@@ -187,3 +187,18 @@ def test_unquantized_gguf_linear_reads_its_bytes_as_floats():
         op.qweight = weight.view(torch.uint8)
         x = torch.randn(3, 64)
         torch.testing.assert_close(op.forward(x), x @ weight.float().T, atol=1e-2, rtol=1e-2)
+
+
+def test_mixed_type_fused_projection_runs_one_gemm_per_type_run():
+    from freetoken.layers.gguf import GGUFLinear, GGUFMergedLinear, gguf_linear, gguf_type_runs
+
+    assert gguf_type_runs([8, 4, 2, 2], [8, 8, 0, 0]) == [(0, 2, 8), (2, 4, 0)]
+    assert gguf_type_runs([8, 4, 2], [8, 0, 8]) == [(0, 1, 8), (1, 2, 0), (2, 3, 8)]
+    assert isinstance(gguf_linear(256, [8, 4], [12, 12]), GGUFLinear)
+    op = gguf_linear(64, [3, 2, 4], [0, 0, 1])
+    assert isinstance(op, GGUFMergedLinear)
+    assert set(op.state_dict()) == {"runs.0.qweight", "runs.1.qweight"}
+    w32, w16 = torch.randn(5, 64), torch.randn(4, 64).half()
+    op.load_state_dict({"runs.0.qweight": w32.view(torch.uint8), "runs.1.qweight": w16.view(torch.uint8)})
+    x = torch.randn(2, 64)
+    torch.testing.assert_close(op.forward(x), x @ torch.cat([w32, w16.float()]).T, atol=1e-2, rtol=1e-2)

@@ -95,7 +95,7 @@ def expert_bank_row_bytes(fmt: str, hidden_size: int, moe_intermediate_size: int
             "down_scale": (H // B) * fp8_block_scale_pad(H // B, I // B) * 2,
         }
     if fmt == "q4_0":
-        # gemma4/gguf.py _q4_0_expert_specs: GGML Q4_0 rows, 32 elems -> 18 bytes
+        # models/gguf/experts.py q4_0_expert_specs: GGML Q4_0 rows, 32 elems -> 18 bytes
         return {"gate_up": 2 * I * (H // 32 * 18), "down": H * (I // 32 * 18)}
     if fmt in ("nvfp4", "nvfp4_marlin", "nvfp4_b12x"):
         # models/nvfp4_banks.py: packed e2m1 pairs + per-16 fp8-e4m3 scales + fp16
@@ -177,6 +177,8 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         top_k=8,
         moe_intermediate_size=512,
         expert_formats=("bf16",),
+        # llama.cpp GGUF quants: their expert slot width depends on each file's quant mix
+        arch_aliases=("Qwen3_5MoeGGUFForCausalLM",),
     ),
     AotModel(
         name="Qwen/Qwen3.6-35B-A3B-FP8",
