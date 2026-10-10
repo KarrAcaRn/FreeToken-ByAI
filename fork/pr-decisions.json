@@ -20,16 +20,15 @@
     "number": 602,
     "title": "fix(moe): fit Qwen3.8 Flash Next FP8 banks across host and GPU memory",
     "head_sha": "cc175ba9970d",
-    "reviewed_at": "2026-10-04",
-    "decision": "deferred",
-    "revisit": "after-queue",
-    "reason": "Keeps leading FP8-block expert source layers in VRAM when host RAM cannot hold all banks (also mid-load, re-reading MemAvailable). Not judged on its merits yet: the target (Qwen3.8 Flash Next FP8, host RAM short of its banks) cannot run here, and our only MoE is NVFP4 and fits in RAM, so the FP8-only path cannot be exercised. Points for the revisit: the mid-load fallback moves layers to the GPU without checking VRAM; it now conflicts with #601 in build_expert_banks; GPU-resident source layers would also be duplicated by our slot-cache preload (fix/moe-ttft) and should be skipped there.",
+    "reviewed_at": "2026-10-10",
+    "decision": "rejected",
+    "reason": "Keeps leading FP8-block expert source layers in VRAM when host RAM cannot hold all banks (also mid-load, re-reading MemAvailable). Not judged on its merits yet: the target (Qwen3.8 Flash Next FP8, host RAM short of its banks) cannot run here, and our only MoE is NVFP4 and fits in RAM, so the FP8-only path cannot be exercised. Points for the revisit: the mid-load fallback moves layers to the GPU without checking VRAM; it now conflicts with #601 in build_expert_banks; GPU-resident source layers would also be duplicated by our slot-cache preload (fix/moe-ttft) and should be skipped there. REVISITED 2026-10-10 (88 GiB RAM, Qwen3.6-35B-A3B-FP8 offload, RAM capped by a cgroup): merged with fixups (cgroup-clamped available RAM, VRAM check before moving a layer). At a 40 GiB cap next loads fine (decode 89.6 tok/s; page cache is reclaimed), but with the PR the up-front estimate moved 6 layers and the mid-load re-check (available < 2 layers, which naturally happens as the banks fill) moved 15 more, leaving no VRAM for the slot cache and KV: the load failed ('cache budget too small'). At 32 GiB it moved 21 layers and ran out of VRAM at layer 30. The estimate ignores reclaimable page cache and the re-check fires on the load's own progress, so it turns working configs into failures. No decode regression when no layer moves (88.0 vs 87.5 tok/s).",
     "commits": [],
-    "gpu_untested": true,
+    "gpu_untested": false,
     "authors": [
       "云微 <1067852565@qq.com>"
     ],
-    "summary": "FP8 expert layers kept in VRAM when host RAM is short; deferred - the FP8 model and RAM shortage cannot be reproduced here"
+    "summary": "Moves FP8 expert layers to VRAM on low RAM, but misfires: a 40 GiB-capped load that works on next fails with the PR"
   },
   "601": {
     "number": 601,
