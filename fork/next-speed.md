@@ -287,6 +287,36 @@ the first request: the CPU executor was sized for one row per request, a verify 
 `block_size` rows (fixed on next, `edb7d43`); hybrid + DFlash block 3 now runs at 35.1 tok/s,
 the same as with offload, so still slower than plain.
 
+### Hot-expert pinning (own version of upstream #563): studied, not built (2026-10-10)
+
+Half of plain decode is miss copying (see above), so the question was whether pinning hot
+experts in VRAM, as upstream #563 does, cuts the misses. Decode routing was recorded
+in-process (16 chat prompts x 256 greedy tokens, all experts in RAM, `--online-quant fp8`)
+and replayed offline against cache policies. The engine's `OffloadMoeCache` is one slot
+pool shared by all layers with global LRU (`lru_ensure` kernel), which is what the
+simulation models. Pinned sets come from a profile of held-out prompts; `pinXX` = share of
+the cache pinned, the rest LRU.
+
+Flash-Next (48 layers, 512 experts, top-10 = 480 expert accesses per token), misses per
+token:
+
+| cache | LRU | pin25 | pin50 | SLRU50 | ARC | LRFU | Belady (optimum) |
+|---|---|---|---|---|---|---|---|
+| 10% | 152.3 | 167.1 | 191.1 | -4% | -1% | -3% | 82.5 |
+| 15% (engine: ~3700 slots) | 110.8 | 125.1 | 144.0 | -3% | +1% | -1% | 58.1 |
+| 20% | 84.1 | 94.7 | 112.2 | -1% | +5% | -1% | 44.2 |
+| 30% | 54.4 | 59.9 | 68.5 | -1% | +6% | 0% | 28.7 |
+
+Qwen3.6-35B-A3B gives the same picture (20% cache: LRU 74.0, pin25 84.8, Belady 36.6).
+Static pinning loses to plain LRU at every size, even with an in-sample profile; frequency-
+aware policies gain at most 3-5%. The optimum is half of LRU, but the gap is in knowing
+the future, not in hotness. What #563 really buys is host RAM: a pinned expert needs no
+host copy. On a 24 GB card that is small (~2.65 MiB per expert: pin25 of ~3700 slots saves
+~2.4 GiB for +13% misses), and with 88 GiB RAM Flash-Next fits entirely anyway. Decision
+(user, 2026-10-10): not built. Side finding: the startup slot preload (`fill_slots`) loads
+experts 0..n-1 per layer and ignores `--expert-profile`; a profile-based preload would only
+help the first tokens after start.
+
 ## Not done: options that need a decision
 
 - **DFlash block size (settled 2026-10-07: the default stays the draft's 8).** The verify
