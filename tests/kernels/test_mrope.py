@@ -125,3 +125,25 @@ def test_kernel_matches_torch_fallback():
     apply_mrope_torch_fallback(pos3, q2, k2, HEAD, cache, sec)
     assert torch.allclose(q.float(), q2.float(), atol=1e-2, rtol=1e-2)
     assert torch.allclose(k.float(), k2.float(), atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("fallback", ["kernel_module", "layers"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_torch_fallbacks_rotate_fp32_inputs(fallback, dtype):
+    # .float() on an FP32 tensor is the tensor itself: writing the low half first used to
+    # feed the already rotated value into the high half
+    if fallback == "layers":
+        from freetoken.layers.rotary import _mrope_torch as apply
+    else:
+        from freetoken.kernel.triton.rope import apply_mrope_torch_fallback as apply
+
+    c = s = 2 ** -0.5
+    cache = torch.tensor([[1.0, 0.0], [c, s]])  # position 1 rotates by 45 degrees
+    positions = torch.ones(3, 1, dtype=torch.int64)
+    table = torch.zeros(1, dtype=torch.int64)
+    q = torch.tensor([[1.0, 2.0, 5.0, 6.0]], dtype=dtype)  # one head of 4, rotary dims 2
+    k = q.clone()
+    apply(positions, q, k, 4, cache, table)
+    expected = torch.tensor([[1 * c - 2 * s, 2 * c + 1 * s, 5.0, 6.0]])
+    for t in (q, k):
+        assert torch.allclose(t.float(), expected, atol=1e-2), t
