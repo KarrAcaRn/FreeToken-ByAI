@@ -108,3 +108,42 @@ def test_gguf_user_defined_tokens_preserve_atomic_vocab_ids(monkeypatch):
     # USER_DEFINED does not mean HF "special token".
     assert "<think>" not in tokenizer.all_special_tokens
     assert "</think>" not in tokenizer.all_special_tokens
+
+
+def test_qwen35moe_gguf_tokenizer_uses_the_qwen35_split_and_im_end(monkeypatch):
+    """qwen35moe has no transformers converter key (qwen2 builds the BPE), splits combining
+    marks with their letters like the source tokenizer.json, stops on <|im_end|>, and has no
+    <unk> that a default could append to the vocab."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+
+    import freetoken.models.gguf.tokenizer as gguf_tokenizer
+
+    tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "a", "b"]
+    metadata = {
+        "tokenizer.ggml.tokens": tokens,
+        "tokenizer.ggml.token_type": [3, 3, 3, 1, 1],
+        "tokenizer.ggml.pre": "qwen35",
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 2,
+    }
+    backend = Tokenizer(WordLevel(vocab={t: i for i, t in enumerate(tokens)}, unk_token="a"))
+    backend.pre_tokenizer = Whitespace()
+    seen = []
+    monkeypatch.setattr(gguf_tokenizer, "load_gguf_metadata", lambda _path: metadata)
+    monkeypatch.setattr(gguf_tokenizer, "gguf_architecture", lambda _path: "qwen35moe")
+    monkeypatch.setattr(
+        "transformers.integrations.ggml.convert_gguf_tokenizer",
+        lambda arch, _tok: seen.append(arch) or (backend, {}),
+    )
+
+    tokenizer = gguf_tokenizer.load_gguf_tokenizer("qwen.gguf")
+
+    assert seen == ["qwen2"]
+    assert tokenizer.eos_token == "<|im_end|>" and tokenizer.unk_token is None
+    assert len(tokenizer) == len(tokens)
+    assert gguf_tokenizer.gguf_eos_token_ids("qwen.gguf", tokenizer) == {0, 2}
+    # U+0915 U+093F: a letter and its combining vowel sign stay one pre-token (qwen2's split cuts them)
+    pieces = [p for p, _ in backend.pre_tokenizer.pre_tokenize_str("\u0915\u093f x")]
+    assert len(pieces) == 2

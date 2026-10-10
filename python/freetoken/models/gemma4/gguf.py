@@ -23,6 +23,10 @@ from freetoken.models.config import (
     SWAAttentionGroupConfig,
 )
 from freetoken.models.gguf.dequant import GGML_Q4_0, GGML_Q6_K, dequantize, row_bytes
+from freetoken.models.gguf.experts import (
+    gguf_expert_specs as _gguf_expert_specs,
+    uses_mixed_gguf_experts as _uses_mixed_gguf_experts,
+)
 
 if TYPE_CHECKING:
     from freetoken.models.gguf.config import GgufConfigShim
@@ -475,37 +479,6 @@ def convert_gemma4_to_gguf(model, config: ModelConfig) -> None:
 # Routed-expert host banks (native Q4_0) for the offload cache.
 # --------------------------------------------------------------------------------------
 
-def _q4_0_expert_specs(config: ModelConfig) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
-    E = config.num_experts
-    H, I = config.hidden_size, config.moe_intermediate_size
-    return {
-        "gate_up": ((E, 2 * I, row_bytes(H, GGML_Q4_0)), torch.uint8),
-        "down": ((E, H, row_bytes(I, GGML_Q4_0)), torch.uint8),
-    }
-
-
-def _uses_mixed_gguf_experts(config: ModelConfig) -> bool:
-    layout = getattr(config, "gguf_quant_types", None)
-    if layout is None:
-        return False
-    return any(
-        quant_type != GGML_Q4_0
-        for role in ("expert_gate_up", "expert_down")
-        for quant_type in layout[role]
-    )
-
-
-def _gguf_expert_specs(config: ModelConfig) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
-    if not _uses_mixed_gguf_experts(config):
-        return _q4_0_expert_specs(config)
-    layout = config.gguf_quant_types
-    E = config.num_experts
-    return {
-        "gate_up": ((E, max(layout["expert_gate_up_bytes"])), torch.uint8),
-        "down": ((E, max(layout["expert_down_bytes"])), torch.uint8),
-    }
-
-
 def load_q4_0_expert_sources(
     model_path: str, config: ModelConfig, *, layer_sink=None
 ) -> dict[str, list[torch.Tensor]]:
@@ -583,17 +556,9 @@ def load_q4_0_expert_sources(
 
 
 def dummy_q4_0_expert_sources(config: ModelConfig) -> dict[str, list[torch.Tensor]]:
-    """Random Q4_0 expert banks shaped like ``load_q4_0_expert_sources`` output."""
-    from freetoken.moe.host_banks import alloc_layer_banks, pin_banks
+    from freetoken.models.gguf.experts import dummy_gguf_expert_sources
 
-    L = config.num_layers
-    hb = alloc_layer_banks(_gguf_expert_specs(config), L)
-    banks = {name: [b.tensor for b in hb[name]] for name in hb}
-    for t in banks["gate_up"] + banks["down"]:
-        t.random_(0, 256)
-    if torch.cuda.is_available():
-        pin_banks(hb)  # match the other dummies: pin-after-fill (no-op mmap fill on CPU-only)
-    return banks
+    return dummy_gguf_expert_sources(config)
 
 
 __all__ = [

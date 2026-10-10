@@ -2310,16 +2310,20 @@
     "number": 131,
     "title": "GGUF: support all quant types, add qwen35moe",
     "head_sha": "bb432e8c473c",
-    "reviewed_at": "2026-10-04",
-    "decision": "deferred",
-    "reason": "5.9k lines: GGUF support for all quant types, a qwen35moe GGUF path and a DeepSeek-V4 GGUF path. Partly overlaps next (#494 already dequantizes every quant type) and is 53 commits behind next on its files. User's call (2026-10-04): defer. The qwen35moe part would serve e.g. Qwen3.6-35B-A3B GGUFs (and the earlier Whittle question); revisit after the queue as its own project, ideally with a Qwen3.6-35B Q4 GGUF.",
-    "commits": [],
-    "gpu_untested": true,
+    "reviewed_at": "2026-10-10",
+    "decision": "reimplemented",
+    "reason": "5.9k lines: GGUF support for all quant types, a qwen35moe GGUF path and a DeepSeek-V4 GGUF path. Partly overlaps next (#494 already dequantizes every quant type) and is 53 commits behind next on its files. User's call (2026-10-04): defer. The qwen35moe part would serve e.g. Qwen3.6-35B-A3B GGUFs (and the earlier Whittle question); revisit after the queue as its own project, ideally with a Qwen3.6-35B Q4 GGUF. REVISITED 2026-10-10: reimplemented on next (Co-authored-by the PR author) for the qwen35moe part: llama.cpp Qwen3.6-35B-A3B GGUFs (K- and I-quants) load with the converter rewrites undone (log(-A), pre-shifted norms, tiled V heads, ssm_out tiled at run time), plus a fix for unquantized GGUF projections read as raw bytes (71bd63e) and our own prefill speedup (dequant + bf16 GEMM for prefill-sized batches, c8de8e2). Checked: GDN tensors equal the NVFP4 checkpoint's bf16 ones within Q8_0 rounding; UD-Q4_K_M and UD-IQ3_S answer like the NVFP4 model (needle at 3.8k passes), graphs on/off identical; Q4_K_M decode 153-180, IQ3_S 206 tok/s, prefill ~7900-8700 tok/s. Gemma-4-12B q4_0 GGUF: same answers, prefill 1143 -> 5912 tok/s. The PR's kernel default:/quant-table gaps were already fixed on next. Left out: DeepSeek-V4 GGUF (cannot run here), qwen3moe GGUF (no test checkpoint), CPU/hybrid decode for K/I-quant experts, NextN/MTP, TP.",
+    "commits": [
+      "71bd63e",
+      "289f97a",
+      "c8de8e2"
+    ],
+    "gpu_untested": false,
     "authors": [
       "Victor Cruz <vcruz305@gmail.com>"
     ],
-    "revisit": "after-queue",
-    "summary": "User's call: own project later (5.9k lines, partly overlaps #494, 53 commits behind next)"
+    "summary": "llama.cpp Qwen3.6-35B-A3B GGUFs (K/I-quants) load and answer like NVFP4; GGUF prefill up to 5x faster",
+    "fixup": "Own version: qwen35moe GGUF loader, unquantized-projection fix, dequant prefill path; DeepSeek-V4/qwen3moe GGUF left out ([289f97a](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/289f97a), [71bd63e](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/71bd63e), [c8de8e2](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/c8de8e2))"
   },
   "125": {
     "number": 125,

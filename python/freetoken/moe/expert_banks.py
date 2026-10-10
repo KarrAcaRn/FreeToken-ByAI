@@ -361,6 +361,11 @@ def bank_bytes_per_expert(model_config, method=None) -> int | None:
             math.prod(spec.shape) * torch.empty((), dtype=spec.dtype).element_size()
             for spec in method.layout().values() if not spec.resident
         )
+    from freetoken.models.gguf.experts import gguf_expert_specs, uses_mixed_gguf_experts
+
+    if uses_mixed_gguf_experts(model_config):
+        # fixed-width GGUF slots sized by the file's widest layer, not the Q4_0 formula
+        return sum(math.prod(shape[1:]) for shape, _ in gguf_expert_specs(model_config).values())
     expert_quant = getattr(model_config, "expert_quant", "none")
     fmt = expert_quant if expert_quant != "none" else (
         getattr(model_config, "moe_weight_format", None) or "bf16"

@@ -463,6 +463,7 @@ class OffloadMoELayer(MoELayer):
                 down_quant_type=down_type,
                 intermediate_size=self.intermediate_size,
                 hidden_size=self.hidden_size,
+                is_prefill=is_prefill,
             )
         raise AssertionError(
             f"offload experts without a quant method only serve native GGUF banks, got {fmt!r}"
