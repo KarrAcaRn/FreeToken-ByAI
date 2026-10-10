@@ -2682,17 +2682,18 @@
   },
   "491": {
     "number": 491,
-    "title": "refactor(moe): extract hybrid decode orchestration [draft]",
-    "head_sha": "00e4bb17863d",
-    "reviewed_at": "2026-10-04",
+    "title": "refactor(moe): extract hybrid decode orchestration",
+    "head_sha": "43fc3f0d728f",
+    "reviewed_at": "2026-10-10",
     "decision": "deferred",
-    "reason": "Draft: 2.3k-line refactor extracting the hybrid MoE decode orchestration (34 files). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "revisit": "when upstream merges",
     "commits": [],
-    "gpu_untested": true,
+    "gpu_untested": false,
+    "reason": "Pure refactor (hybrid decode schedule moved into HybridDecodeExecutor), no behaviour change; it merged cleanly into next and the moe/engine suites passed, but user rule (2026-10-10): refactor-only PRs are not adopted, to stay close to upstream; it arrives through the sync if upstream takes it.",
+    "summary": "Refactor only (hybrid decode executor extracted), no behaviour change; not adopted, comes via upstream if merged",
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
-    ],
-    "summary": "Draft - revisit when ready"
+    ]
   },
   "400": {
     "number": 400,
@@ -3068,6 +3069,67 @@
     "summary": "DeepSeek-V4.1 encoder SWA replay; model cannot run here, touches shared SWA scheduler code, not judged yet",
     "authors": [
       "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ]
+  },
+  "636": {
+    "number": 636,
+    "title": "feat(quant): opt-in fp8-block QAT for the lm_head",
+    "head_sha": "891c06a46098",
+    "reviewed_at": "2026-10-10",
+    "decision": "adopted-with-fixups",
+    "commits": [
+      "567a164",
+      "64864e7"
+    ],
+    "gpu_untested": false,
+    "reason": "Opt-in (FREETOKEN_FP8_LM_HEAD=1) fp8 block quantization of the bf16 lm_head at load for fp8 checkpoints, reusing the fp8-block GEMV. As submitted the flag crashed while building the lm_head (inherited unusable_reason asserts an FP8_BLOCK scheme), also on the PR's own base. Fixed + regression test. Qwen3.6-35B-A3B-FP8 offload on the 4090: decode 89.2-90.2 -> 94.8-94.9 tok/s (+5%), output the same apart from two bold markers.",
+    "summary": "Opt-in fp8 lm_head for fp8 checkpoints (FREETOKEN_FP8_LM_HEAD=1): Qwen3.6-FP8 decode +5%",
+    "fixup": "The flag crashed at load (inherited fp8_block-only scheme check); kernel overrides it, plus a regression test ([64864e7](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/64864e7))",
+    "authors": [
+      "zhangnju <zhangnju@126.com>"
+    ]
+  },
+  "635": {
+    "number": 635,
+    "title": "perf(moe): avoid intra-op fanout while filling NVFP4 host banks",
+    "head_sha": "127b530a8ff5",
+    "reviewed_at": "2026-10-10",
+    "decision": "rejected",
+    "commits": [],
+    "gpu_untested": false,
+    "reason": "Sets torch to one intra-op thread while NVFP4 host banks fill. Evidence is a copy microbenchmark on a 12-thread host, no startup number. Measured here (Qwen3.6-35B-A3B NVFP4 offload, 8 vCPU, warm page cache, 3 runs each, interleaved): load 39.2/39.9/41.6 s on next vs 43.1/43.2/44.2 s with the PR, i.e. ~8% slower; decode unchanged. Would revisit with real load-time numbers from many-core hosts.",
+    "summary": "One intra-op thread during NVFP4 bank fill: model load ~8% slower here; PR shows only a copy microbenchmark",
+    "authors": [
+      "OpenClaw <openclaw@local>"
+    ]
+  },
+  "630": {
+    "number": 630,
+    "title": "build(deps): move to torch 2.14.1, triton 3.8 and sglang-kernel 0.4.9",
+    "head_sha": "6e92be7fe823",
+    "reviewed_at": "2026-10-10",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "commits": [],
+    "gpu_untested": true,
+    "reason": "torch 2.14.1 / Triton 3.8 / sglang-kernel 0.4.9 bump. The PR itself waits for the Triton 3.8 kernel regressions in #629; our own exp/torch-2.14-cu132 branch measured Qwen3.6 MoE prefill -7% with Triton 3.8, and the user keeps that stack separate until a newer Triton fixes it. Arrives through the upstream sync once merged.",
+    "summary": "torch 2.14.1 + Triton 3.8 bump; waits for the Triton 3.8 regressions (#629), same as our exp/torch-2.14 branch",
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ]
+  },
+  "656": {
+    "number": 656,
+    "title": "fix(moe): refuse e8m0 scale code 0xFF when MXFP4 expert pieces are read [draft]",
+    "head_sha": "176d38cfbe6d",
+    "reviewed_at": "2026-10-10",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": true,
+    "reason": "Draft: refuse NaN e8m0 scale codes (0xFF) in MXFP4 expert pieces at load (gpt-oss, DeepSeek-V4). Deferred while it is a draft: the queue re-lists it once its head moves.",
+    "summary": "Draft - revisit when ready",
+    "authors": [
+      "Léon Avic Simmons <Avicennasis@gmail.com>"
     ]
   }
 }
