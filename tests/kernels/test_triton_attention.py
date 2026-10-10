@@ -788,6 +788,49 @@ def test_triton_backend_stores_kv_and_matches_reference(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
+@pytest.mark.parametrize("extend_len", [1, 2])
+def test_triton_backend_kv_shared_spec_reads_without_storing(monkeypatch, extend_len):
+    from freetoken.attention import AttentionSpec
+    from freetoken.attention.triton import TritonAttentionBackend
+
+    device = torch.device("cuda")
+    head_dim = 256
+    k_cache = torch.randn(3, 1, head_dim, device=device, dtype=torch.bfloat16)
+    v_cache = torch.randn(3, 1, head_dim, device=device, dtype=torch.bfloat16)
+
+    def store_kv(*args):
+        raise AssertionError("a KV-sharing layer must not write its source's cache")
+
+    kv_cache = SimpleNamespace(
+        device=device, dtype=torch.bfloat16, store_kv=store_kv,
+        k_cache=lambda layer_id: k_cache, v_cache=lambda layer_id: v_cache,
+        k_scale=lambda layer_id: None, v_scale=lambda layer_id: None,
+    )
+    ctx = SimpleNamespace(kv_cache=kv_cache, page_table=torch.tensor([[0, 1, 2]], dtype=torch.int32, device=device))
+    monkeypatch.setattr("freetoken.attention.triton.get_global_ctx", lambda: ctx)
+    backend = TritonAttentionBackend(SimpleNamespace())
+    new = torch.arange(3 - extend_len, 3, device=device)
+    batch = SimpleNamespace(
+        padded_reqs=[SimpleNamespace(extend_len=extend_len, device_len=3, cached_len=3 - extend_len, table_idx=0)],
+        positions=new.to(torch.int64),
+        out_loc=new.to(torch.int32),
+    )
+    q = torch.randn(extend_len, 2, head_dim, device=device, dtype=torch.bfloat16)
+    # the source layer already stored these rows; the shared layer hands the same k/v along
+    k, v = k_cache[new].view(extend_len, -1), v_cache[new].view(extend_len, -1)
+    spec = AttentionSpec(sm_scale=head_dim**-0.5, kv_shared=True)
+
+    backend.prepare_metadata(batch)
+    actual = backend.forward(q, k, v, layer_id=7, batch=batch, attn_spec=spec)
+    m = batch.attn_metadata
+    expected = _reference_paged_attention(
+        q.float(), k_cache.float(), v_cache.float(), m.indptr, m.indices, m.q_to_req, m.q_positions,
+        head_dim**-0.5, sliding_window=None,
+    )
+    torch.testing.assert_close(actual.float(), expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton attention needs CUDA")
 def test_triton_backend_applies_the_batch_block_ends_only_when_the_spec_asks(monkeypatch):
     from freetoken.attention import AttentionSpec
     from freetoken.attention.triton import TritonAttentionBackend

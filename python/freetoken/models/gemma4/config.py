@@ -106,6 +106,18 @@ def _attn_geometry(cfg: Any, layer_type: str, *, is_full: bool) -> tuple[int, in
     )
 
 
+def _kv_sharing(cfg: Any) -> tuple[tuple[int, int], ...]:
+    """(layer, source) pairs of the E-series KV sharing: each of the last ``num_kv_shared_layers``
+    layers reads the KV of the last non-shared layer of its attention type."""
+    num_shared = getattr(cfg, "num_kv_shared_layers", 0) or 0
+    first_shared = cfg.num_hidden_layers - num_shared
+    if num_shared <= 0 or first_shared <= 0:
+        return ()
+    types = list(cfg.layer_types)
+    last_owner = {t: i for i, t in enumerate(types[:first_shared])}
+    return tuple((i, last_owner[types[i]]) for i in range(first_shared, cfg.num_hidden_layers))
+
+
 def parse_config(hf_config: Any) -> ModelConfig:
     cfg, top_architectures, top_cfg = _text_config(hf_config)
     rope_params = cfg.rope_parameters
@@ -189,6 +201,11 @@ def parse_config(hf_config: Any) -> ModelConfig:
         embedding_scale=float(cfg.hidden_size) ** 0.5,
         vision_config=_parse_vision_config(top_cfg, cfg.hidden_size),
         image_token_id=getattr(top_cfg, "image_token_id", None),
+        per_layer_input_size=getattr(cfg, "hidden_size_per_layer_input", None) or 0,
+        per_layer_vocab_size=getattr(cfg, "vocab_size_per_layer_input", None) or 0,
+        kv_sharing=_kv_sharing(cfg),
+        double_wide_shared_mlp=bool(getattr(cfg, "use_double_wide_mlp", False)),
+        pad_token_id=getattr(cfg, "pad_token_id", None),
         attention_groups=(
             FullAttentionGroupConfig(
                 name="full",

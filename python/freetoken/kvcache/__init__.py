@@ -195,7 +195,10 @@ def create_kvcache_pool(
             device=device,
             dtype=dtype,
             kv_quant=kv_quant,
+            kv_sharing=getattr(model_config, "kv_sharing", ()),
         )
+    if getattr(model_config, "kv_sharing", ()):
+        raise NotImplementedError("KV-layer sharing is only wired into the hybrid-SWA pool")
 
     from .mha_pool import MHAKVCache
 

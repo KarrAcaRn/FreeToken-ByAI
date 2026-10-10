@@ -230,7 +230,9 @@ class TritonAttentionBackend(BaseAttnBackend):
 
         metadata = batch.attn_metadata
         assert isinstance(metadata, TritonMetadata)
-        self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
+        spec = attn_spec or AttentionSpec()
+        if not spec.kv_shared:
+            self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
 
         k_raw = self.kvcache.k_cache(layer_id)
         v_raw = self.kvcache.v_cache(layer_id)
@@ -248,7 +250,6 @@ class TritonAttentionBackend(BaseAttnBackend):
         v_scale = self.kvcache.v_scale(layer_id)
         assert (k_scale is None) == (v_scale is None), "K and V scales come as a pair"
 
-        spec = attn_spec or AttentionSpec()
         block_ends = batch.mm_block_ends if spec.bidirectional_mm_blocks else None
         indices = metadata.indices
         if spec.sliding_window is not None and metadata.swa_indices is not None:
