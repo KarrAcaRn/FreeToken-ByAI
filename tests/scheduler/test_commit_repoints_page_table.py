@@ -193,7 +193,10 @@ def test_swa_unfinished_commit_keeps_its_pages_under_a_locked_tombstone():
     a = _admit_swa(cm, page_table, 1, shared + list(range(400, 440)))
     assert a.cache_handle.cached_len == len(shared)
     with cm.lazy_free_region():
-        cm.cache_req(a, finished=True)    # trims the shared head's swa; c still full-locks it
+        cm.cache_req(a, finished=True)
+    # the finish keeps the prompt head's swa (#488), so tombstone it through pool pressure
+    # instead; c still full-locks it
+    cm.ensure_swa_slots(10**6)
     assert any(n.swa_tombstone and n.ref_count > 0 for n in cm.prefix_cache._all_nodes())
 
     b = _admit_swa(cm, page_table, 2, shared + list(range(500, 508)))
