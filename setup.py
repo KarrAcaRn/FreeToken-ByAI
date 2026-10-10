@@ -96,8 +96,8 @@ else:
     runtime_include_dirs, runtime_library_dirs = _cuda_runtime_paths()
     runtime_lib = "cudart"
     runtime_link_args = []
-    cxx_std = "-std=c++17"
-    # cl ignores -O3 and -std with a warning (D9002): /O2 is its spelling, and BuildExtension adds /std:c++17.
+    cxx_std = "-std=c++20"
+    # cl ignores -O3 and -std with a warning (D9002): /O2 is its spelling, and BuildExtension adds the /std flag.
     extra_compile = ["/O2"] if IS_WINDOWS else ["-O3", cxx_std]
 
 _check_toolchain()

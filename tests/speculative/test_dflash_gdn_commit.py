@@ -46,7 +46,9 @@ def test_replayed_state_matches_the_kernels_intermediate_state(commit_len):
         state_source=pool, indices=idx, scale=dk ** -0.5,
         cu_seqlens=torch.tensor([0, c], dtype=torch.int32, device=dev),
     )
-    torch.testing.assert_close(pool[slot], ref_states[0, c - 1], rtol=0, atol=0)
+    # fp32-rounding level, not bitwise: two different Triton kernels, and triton >= 3.8 contracts
+    # their arithmetic differently (max diff ~2e-7); a wrong token count is off by O(1)
+    torch.testing.assert_close(pool[slot], ref_states[0, c - 1], rtol=1e-4, atol=1e-6)
     assert torch.equal(pool[0], state0[0]) and torch.equal(pool[2], state0[2])
 
 
