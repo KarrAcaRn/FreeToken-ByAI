@@ -42,7 +42,7 @@ parsers all resolve automatically from the checkpoint and the GPU.
 |---|---|---|
 | `--host` | 127.0.0.1 | Bind address |
 | `--port` | 1919 | Bind port |
-| `--api-key` | disabled | Require `Authorization: Bearer <key>` on every route except `/health` (401 otherwise); `FREETOKEN_API_KEY` is read when the flag is absent |
+| `--api-key` | `$FREETOKEN_API_KEY`, else off | Require the key on every route except `/health`, as `Authorization: Bearer <key>` or `x-api-key: <key>`; other requests get a 401 |
 | `--dist-port` | `--port` + 1 | Internal TP rendezvous port (loopback-only regardless of `--host`) |
 | `--ssl-certfile` | disabled | PEM certificate chain for HTTPS; requires `--ssl-keyfile` |
 | `--ssl-keyfile` | disabled | PEM private key for HTTPS; requires `--ssl-certfile` |
@@ -305,13 +305,16 @@ ft shell --model ~/models/Qwen3.6-35B-A3B   # serve + chat in one process
 ```
 
 - Attach mode talks to `--server URL` (default `http://127.0.0.1:1919`)
+- `--api-key KEY` (default `$FREETOKEN_API_KEY`) attaches to a server started with `--api-key`; with `--model` the shell uses that server's own key
 - `/help` inside the shell lists the commands (`/think`, `/cache`, `/reset`).
 
 ## ft ctl
 
 ```bash
-ft ctl [--base-url http://127.0.0.1:1919] [--timeout 10] [--json] <subcommand>
+ft ctl [--base-url http://127.0.0.1:1919] [--api-key KEY] [--timeout 10] [--json] <subcommand>
 ```
+
+`--api-key` defaults to `$FREETOKEN_API_KEY`.
 
 | Subcommand | Endpoint | Purpose |
 |---|---|---|
@@ -340,6 +343,7 @@ Code and Hermes need no declaration.
 | Flag | Meaning |
 |---|---|
 | `--server URL` | Server to point the agent at (default `http://127.0.0.1:1919`) |
+| `--api-key KEY` | Key of a server started with `--api-key` (default `$FREETOKEN_API_KEY`). The agent gets it in its environment; Hermes and OpenClaw keep it in their config files |
 | `--dry-run` | Print the planned config changes and command, touch nothing |
 | `-y`, `--yes` | Approve install/config prompts |
 | `--config` | Configure without launching |
