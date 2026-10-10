@@ -822,3 +822,46 @@ def test_auto_plan_reserves_an_explicit_kv_page_count(monkeypatch):
     config.num_page_override = 100
     plan()
     assert captured["kv_reserve_tokens"] == 100 * 16
+
+
+def _share_kwargs(**over):
+    # budget = 0.95*20_000 - 1000 - 500 = 17_500 B; 100 B per slot, 10 B per KV token
+    kw = dict(_auto_kwargs(20_000, 0), total_experts=1000)
+    kw.update(over)
+    return kw
+
+
+def test_kv_reserve_share_keeps_a_share_of_the_budget_for_kv():
+    from freetoken.engine.cache_budget import resolve_moe_cache_auto
+
+    size0, pages0, _ = resolve_moe_cache_auto(**_share_kwargs())
+    size, pages, _ = resolve_moe_cache_auto(**_share_kwargs(kv_reserve_share=0.2))
+    assert pages0 * 10 < 0.2 * 17_500 <= pages * 10
+    assert size < size0 and size * 100 + pages * 10 <= 17_500
+
+
+def test_kv_reserve_share_stops_at_the_model_context():
+    from freetoken.engine.cache_budget import resolve_moe_cache_auto
+
+    capped = resolve_moe_cache_auto(**_share_kwargs(kv_reserve_share=0.5, max_kv_tokens=40))
+    uncapped = resolve_moe_cache_auto(**_share_kwargs(kv_reserve_share=0.5))
+    assert capped[0] > uncapped[0]
+    # the token floor still wins over a share that buys less
+    floor = resolve_moe_cache_auto(**_share_kwargs(kv_reserve_share=0.01, kv_reserve_tokens=500))
+    assert floor[1] >= 501
+
+
+def test_kv_reserve_share_flag_is_validated():
+    from unittest.mock import patch
+
+    from freetoken.server.args import parse_args
+
+    class _Config:
+        def to_dict(self):
+            return {"architectures": ["LlamaForCausalLM"], "torch_dtype": "bfloat16"}
+
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: _Config()):
+        args, _ = parse_args(["--model", "/models/anon", "--kv-reserve-share", "0"])
+        assert args.kv_reserve_share == 0.0
+        with pytest.raises(SystemExit):
+            parse_args(["--model", "/models/anon", "--kv-reserve-share", "1.5"])

@@ -130,6 +130,7 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--nvfp4-backend` | — | Deprecated: stands in for `--quant-backend moe.nvfp4=<marlin\|b12x\|triton>` (`flashinfer` means b12x); cannot be combined with `--quant-backend` |
 | `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family strategies) |
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |
+| `--kv-reserve-share` | 0.1 | Share of the cache budget `--moe-cache-auto` keeps for KV, capped at the model context; 0 gives the experts everything but `--kv-reserve-tokens` |
 | `--enable-kv-ladder` | off | With `--moe-cache-auto --max-running-requests 1`: start KV at 2x `--ladder-step-size`, then grow in one-step rungs before requests that could reach the current bound; MoE slots shrink to keep the same VRAM budget, up to the model context limit |
 | `--moe-cpu-threads` | physical cores - 2 | CPU worker threads for the cpu/hybrid executor (auto leaves one core to the engine thread and one to the GPU handshake coordinator) |
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, nvfp4, mxfp4), so fp8 experts cannot use it |

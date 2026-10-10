@@ -55,6 +55,8 @@ class EngineConfig:
     moe_cache_rate: float | None = None
     moe_cache_auto: bool = False
     kv_reserve_tokens: int = 8192  # KV floor for --moe-cache-auto; small by design (MoE-priority)
+    # --moe-cache-auto also reserves this share of the cache budget for KV, up to max_seq_len
+    kv_reserve_share: float = 0.1
     moe_cache_policy: str = "lru"
     moe_prefill_overlap: bool = True
     # Prefill hit/miss split: serve cache-resident experts D2D during prefill
