@@ -135,6 +135,8 @@ def resolve_moe_cache_auto(
     page_size: int,
     max_slots: int | None = None,
     attention_workspace_bytes: int = 0,
+    kv_reserve_share: float = 0.0,
+    max_kv_tokens: int | None = None,
 ) -> tuple[int, int, bool]:
     """Resolve --moe-cache-auto into (moe_cache_size, num_pages, prefill_overlap).
 
@@ -151,6 +153,13 @@ def resolve_moe_cache_auto(
         memory_ratio, baseline_free, weights_bytes, fixed_cache_size, attention_workspace_bytes
     )
     max_slots = total_experts if max_slots is None else min(max_slots, total_experts)
+    if kv_reserve_share > 0 and budget_bytes > 0:
+        # Where KV is cheap next to an expert slot (QSA, hybrid GDN) this share buys a long
+        # context for a few slots; where it is dear it stays a small reserve.
+        share_tokens = int(budget_bytes * kv_reserve_share) // cache_per_page * page_size
+        if max_kv_tokens is not None:
+            share_tokens = min(share_tokens, max_kv_tokens)
+        kv_reserve_tokens = max(kv_reserve_tokens, share_tokens)
     # Every pool keeps page 0 as an unreachable dummy/sentinel. The CLI floor is expressed in
     # usable tokens, so reserve that internal page in addition to the user-visible capacity.
     kv_reserve_pages = div_ceil(kv_reserve_tokens, page_size) + 1

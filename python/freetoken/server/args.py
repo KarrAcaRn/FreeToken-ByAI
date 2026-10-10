@@ -979,6 +979,23 @@ def parse_args(
         ),
     )
 
+    def _share(value: str) -> float:
+        share = float(value)
+        if not 0.0 <= share < 1.0:
+            raise argparse.ArgumentTypeError(f"must be in [0, 1), got {value}")
+        return share
+
+    parser.add_argument(
+        "--kv-reserve-share",
+        type=_share,
+        default=ServerArgs.kv_reserve_share,
+        help=(
+            "Share of the GPU cache budget --moe-cache-auto keeps for the KV cache, capped at "
+            "the model's context length; --kv-reserve-tokens stays a floor. 0 gives the "
+            "experts everything but that floor."
+        ),
+    )
+
     parser.add_argument(
         "--moe-cache-policy",
         default=ServerArgs.moe_cache_policy,

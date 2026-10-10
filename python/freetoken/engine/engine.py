@@ -273,6 +273,8 @@ def plan_moe_cache_auto(
         ),
         page_size=page_tokens,
         max_slots=max_slots,
+        kv_reserve_share=getattr(config, "kv_reserve_share", 0.0),
+        max_kv_tokens=getattr(config, "max_seq_len", None),
     )
 
 
