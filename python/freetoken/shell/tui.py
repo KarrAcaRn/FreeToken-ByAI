@@ -8,7 +8,6 @@ the cache geometry behind the status bar. No engine imports, no torch.
 from __future__ import annotations
 
 import asyncio
-import os
 import contextlib
 import re
 import shutil
@@ -34,7 +33,6 @@ from prompt_toolkit.shortcuts import PromptSession
 from prompt_toolkit.styles import Style
 
 from .client import (
-    LOCAL_API_KEY,
     ContentDelta,
     ReasoningDelta,
     Sampling,
@@ -524,12 +522,8 @@ async def run_shell(
 
     ``connect_grace`` is how long to keep retrying a refused connection before giving up --
     left at 0 when attaching to a server the user says is already running, raised when the
-    caller just started one in this process (see ``server/api_server.py``).
-
-    ``api_key`` is the server's ``--api-key`` when it has one: passed in by shell mode, read
-    from ``FREETOKEN_API_KEY`` when attaching to a running server, else the local placeholder."""
-    key = api_key or os.environ.get("FREETOKEN_API_KEY") or LOCAL_API_KEY
-    client = ShellClient(origin, api_key=key)
+    caller just started one in this process (see ``server/api_server.py``)."""
+    client = ShellClient(origin, api_key=api_key)
     try:
         return await _run_shell(client, origin, connect_grace=connect_grace)
     finally:

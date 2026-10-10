@@ -274,14 +274,15 @@ def test_runtime_identity_route_is_loopback_only_and_fails_closed_when_unbound()
     assert missing.json() == {"error": "runtime identity is not bound"}
 
 
-def test_runtime_identity_still_requires_the_api_key_on_loopback(monkeypatch):
-    from freetoken.server import api_server
+def test_runtime_identity_still_requires_the_api_key_on_loopback():
+    from freetoken.server.api_server import install_api_key
 
     state = _state()
     state.runtime_identity = build_runtime_identity_snapshot(state, [])
-    monkeypatch.setattr(api_server, "_GLOBAL_STATE", state)
-    monkeypatch.setattr(api_server, "_API_KEY", "sekrit")
-    client = TestClient(api_server.app, client=("127.0.0.1", 50000))
+    app = FastAPI(version="test")
+    register_control_routes(app, lambda: state)
+    install_api_key(app, "sekrit")
+    client = TestClient(app, client=("127.0.0.1", 50000))
 
     assert client.get("/v1/runtime/identity").status_code == 401
     ok = client.get("/v1/runtime/identity", headers={"Authorization": "Bearer sekrit"})

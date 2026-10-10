@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import json
 import os
@@ -529,6 +530,39 @@ def install_cors(app: FastAPI, origins_csv: str) -> None:
     )
 
 
+class _ApiKeyMiddleware:
+    def __init__(self, app, api_key: str) -> None:
+        self.app = app
+        self._digest = hashlib.sha256(api_key.encode()).digest()
+
+    def _matches(self, value: str | None) -> bool:
+        # compare digests so the time taken does not depend on the key length
+        return value is not None and hmac.compare_digest(
+            hashlib.sha256(value.encode()).digest(), self._digest
+        )
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] not in ("http", "websocket") or scope["path"] == "/health":
+            return await self.app(scope, receive, send)
+        headers = Headers(scope=scope)
+        scheme, _, token = headers.get("authorization", "").partition(" ")
+        if (scheme.lower() == "bearer" and self._matches(token)) or self._matches(
+            headers.get("x-api-key")
+        ):
+            return await self.app(scope, receive, send)
+        await JSONResponse({"error": "Unauthorized"}, status_code=401)(scope, receive, send)
+
+
+def install_api_key(app: FastAPI, api_key: str | None) -> None:
+    """Require ``api_key`` on every route but /health.
+
+    Run it before install_cors, so CORS answers preflights and adds its headers to 401s."""
+    if api_key is None:
+        return
+    app.add_middleware(_ApiKeyMiddleware, api_key=api_key)
+    logger.info("API key required on every route except /health")
+
+
 app = FastAPI(title="FreeToken API Server", version=__version__, lifespan=lifespan)
 register_openai_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_anthropic_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
@@ -550,23 +584,6 @@ _TRACKED_REQUEST_PREFIXES = (
 # enters generation accounting, and its first-touch tokenizer load would otherwise dominate the
 # /v1/stats p95 and pollute /v1/requests — exclude it before the prefix check below.
 _UNTRACKED_REQUEST_PREFIXES = ("/v1/messages/count_tokens",)
-
-
-# --api-key (ServerArgs.api_key), installed by run_api_server before serving. None means no
-# authentication -- every route answers as before. Module-level rather than closed over so the
-# middleware below can be registered at import time like the others and tests can set it.
-_API_KEY: str | None = None
-# Routes that stay open with a key set: liveness probes (load balancers, Docker healthchecks,
-# the desktop app's load-progress polling) cannot carry a header and reveal nothing but status.
-_API_KEY_OPEN_PATHS = ("/health",)
-
-
-def install_api_key(key: str | None) -> None:
-    """Arm the bearer check for every route but ``_API_KEY_OPEN_PATHS``; ``None``/"" disarms."""
-    global _API_KEY
-    _API_KEY = key or None
-    if _API_KEY is not None:
-        logger.info("API key required (Authorization: Bearer) on every route except /health")
 
 
 def _served_model_name() -> str | None:
@@ -726,52 +743,6 @@ def _resolve_num_swa_pages(state: FrontendManager, req: CacheRebuildRequest) -> 
     swa_page_size = spec.page_size
     window_tokens = int(round(req.swa_full_tokens_ratio * num_pages * page_size))
     return max(1, -(-window_tokens // swa_page_size))  # ceil-div to the pool's page unit
-
-
-class _ApiKeyMiddleware:
-    """Reject any request without ``Authorization: Bearer <api_key>`` when a key is set.
-
-    Added after ``_RecordRequestMiddleware`` so it runs *before* it (Starlette wraps the
-    last-added middleware outermost): a 401 never lands in the request ring or a handler. CORS
-    preflights (OPTIONS) carry no credentials by design and pass through; the CORS middleware
-    installed at startup is outer still, so it answers them. Constant-time compare, and the
-    same body shape the OpenAI-compatible routes use for errors. Pure ASGI for the same
-    disconnect reason as ``_RecordRequestMiddleware``."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        key = _API_KEY
-        if (
-            scope["type"] != "http"
-            or key is None
-            or scope["method"] == "OPTIONS"
-            or scope.get("path", "") in _API_KEY_OPEN_PATHS
-        ):
-            await self.app(scope, receive, send)
-            return
-        scheme, _, token = Headers(scope=scope).get("authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(
-            token.strip().encode("utf-8"), key.encode("utf-8")
-        ):
-            response = JSONResponse(
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
-                content={
-                    "error": {
-                        "message": "Invalid or missing API key (Authorization: Bearer <key>).",
-                        "type": "authentication_error",
-                        "code": 401,
-                    }
-                },
-            )
-            await response(scope, receive, send)
-            return
-        await self.app(scope, receive, send)
-
-
-app.add_middleware(_ApiKeyMiddleware)
 
 
 @app.post("/v1/cache/rebuild")
@@ -1222,10 +1193,10 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
     host = config.server_host
     port = config.server_port
 
+    install_api_key(app, config.api_key)
     # Create/validate FREETOKEN_API_LOG_DIR and start the writer thread up front, so a
     # bad path is reported at boot rather than silently on the first request.
     install_cors(app, config.cors_origins)
-    install_api_key(config.api_key)
     init_request_logging()
     # Hide the frequent health/stats/requests/cache-status polling of the desktop app (and of
     # the shell's status bar) from uvicorn's access log; non-polling access lines are

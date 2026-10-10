@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple
 
 import torch
@@ -39,9 +39,8 @@ def _nvfp4_entry(value: str) -> str:
 class ServerArgs(SchedulerConfig):
     server_host: str = "127.0.0.1"
     server_port: int = 1919
-    # Bearer token every request must carry (except /health). None = no authentication,
-    # today's behaviour. Read from FREETOKEN_API_KEY when --api-key is not given.
-    api_key: str | None = None
+    # kept out of repr: parse_args logs the whole ServerArgs
+    api_key: str | None = field(default=None, repr=False)
     ssl_certfile: str | None = None
     ssl_keyfile: str | None = None
     num_tokenizer: int = 0
@@ -455,11 +454,9 @@ def parse_args(
         "--api-key",
         type=str,
         default=ServerArgs.api_key,
-        help=(
-            "Require `Authorization: Bearer <key>` on every route except /health "
-            "(401 otherwise). Unset: no authentication. When the flag is absent, "
-            "FREETOKEN_API_KEY is read instead so the key need not appear in `ps`."
-        ),
+        help="Require this key on every route except /health, sent as "
+        "'Authorization: Bearer <key>' or 'x-api-key: <key>'. Defaults to $FREETOKEN_API_KEY; "
+        "unset serves without authentication.",
     )
 
     parser.add_argument(
@@ -1190,6 +1187,13 @@ def parse_args(
     if kwargs["distributed_port"] is None:
         kwargs["distributed_port"] = kwargs["server_port"] + 1
 
+    # an empty flag usually means an unset shell variable; refuse it rather than serve open
+    if kwargs["api_key"] == "":
+        parser.error("--api-key is empty; omit it to serve without authentication")
+    from freetoken.launch import resolve_api_key
+
+    kwargs["api_key"] = resolve_api_key(kwargs["api_key"])
+
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])
     for tls_path in ("ssl_certfile", "ssl_keyfile"):
@@ -1202,11 +1206,6 @@ def parse_args(
         if not os.path.isdir(media_root):
             parser.error(f"--allowed-local-media-path {media_root} is not a directory")
         kwargs["allowed_local_media_path"] = media_root
-
-    if kwargs["api_key"] is None:
-        kwargs["api_key"] = os.environ.get("FREETOKEN_API_KEY") or None
-    elif not kwargs["api_key"].strip():
-        parser.error("--api-key must not be empty (omit it to serve without authentication)")
 
     if kwargs["served_model_name"] is None:
         kwargs["served_model_name"] = (

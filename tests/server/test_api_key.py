@@ -1,212 +1,146 @@
-"""--api-key: the bearer gate on the API server, its argument parsing, and the shell client.
-
-The gate is a middleware registered at import time and armed by ``install_api_key`` (what
-``run_api_server`` calls with ``ServerArgs.api_key``). With no key it is inert, so every
-existing test keeps its behaviour. These tests drive the real ``api.app`` through a TestClient
-and flip ``_API_KEY`` directly, the way ``test_rebuild_maintenance`` flips ``_GLOBAL_STATE``.
-"""
+"""--api-key: the gate in front of every route but /health, and where the key comes from."""
 
 from __future__ import annotations
 
-import urllib.request
+import json
+import os
+import stat
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import yaml
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
+from freetoken import launch
+from freetoken.server.api_server import install_api_key, install_cors
 from freetoken.server.args import parse_args
 
-
-class _Config:
-    def to_dict(self) -> dict:
-        return {"architectures": ["DeepseekV4ForCausalLM"], "torch_dtype": "bfloat16"}
+KEY = "sk-test"
+ORIGIN = "http://localhost:1420"
 
 
-def _parse(extra: list[str]):
-    with patch("freetoken.utils.cached_load_hf_config", lambda _path: _Config()):
-        return parse_args(["--model", "/models/anon", *extra])
+def _client(api_key: str | None) -> TestClient:
+    app = FastAPI()
+    app.get("/health")(lambda: {"status": "ok"})
+    app.get("/v1/models")(lambda: {"data": []})
+    install_api_key(app, api_key)
+    install_cors(app, ORIGIN)
+    return TestClient(app)
 
 
-# ------------------------------------------------------------------ argument parsing
+def _parse(*argv: str):
+    hf = SimpleNamespace(to_dict=lambda: {"architectures": ["Qwen3ForCausalLM"], "torch_dtype": "bfloat16"})
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: hf):
+        return parse_args(["--model", "/models/anon", *argv])[0]
 
 
-def test_api_key_defaults_to_none(monkeypatch):
-    monkeypatch.delenv("FREETOKEN_API_KEY", raising=False)
-    args, _ = _parse([])
-    assert args.api_key is None
-
-
-def test_api_key_flag_is_parsed(monkeypatch):
-    monkeypatch.delenv("FREETOKEN_API_KEY", raising=False)
-    args, _ = _parse(["--api-key", "s3cret"])
-    assert args.api_key == "s3cret"
-
-
-def test_api_key_falls_back_to_the_environment(monkeypatch):
-    monkeypatch.setenv("FREETOKEN_API_KEY", "from-env")
-    args, _ = _parse([])
-    assert args.api_key == "from-env"
-
-
-def test_api_key_flag_wins_over_the_environment(monkeypatch):
-    monkeypatch.setenv("FREETOKEN_API_KEY", "from-env")
-    args, _ = _parse(["--api-key", "from-flag"])
-    assert args.api_key == "from-flag"
-
-
-def test_empty_environment_key_means_unset(monkeypatch):
-    monkeypatch.setenv("FREETOKEN_API_KEY", "")
-    args, _ = _parse([])
-    assert args.api_key is None
-
-
-def test_empty_api_key_flag_is_rejected(monkeypatch):
-    monkeypatch.delenv("FREETOKEN_API_KEY", raising=False)
-    with pytest.raises(SystemExit, match="2"):
-        _parse(["--api-key", "  "])
-
-
-def test_shell_mode_accepts_a_key(monkeypatch):
-    # Unlike TLS, a key is fine in shell mode: the attached client carries it (see below).
-    monkeypatch.delenv("FREETOKEN_API_KEY", raising=False)
-    args, run_shell = _parse(["--shell-mode", "--api-key", "s3cret"])
-    assert run_shell is True
-    assert args.api_key == "s3cret"
-
-
-# ------------------------------------------------------------------ the middleware
-
-
-def _serving_state():
-    return SimpleNamespace(
-        maintenance_state="serving",
-        config=SimpleNamespace(served_model_name="anon"),
-        fatal_error=None,
-        ready_at=None,
-        instance_id=None,
-        rebuild_futures={},
-        last_rebuild=None,
-    )
-
-
-@pytest.fixture
-def keyed_client(monkeypatch):
-    import freetoken.server.api_server as api
-
-    monkeypatch.setattr(api, "_API_KEY", "s3cret")
-    monkeypatch.setattr(api, "_GLOBAL_STATE", _serving_state())
-    return TestClient(api.app)
-
-
-def test_no_key_configured_leaves_every_route_open(monkeypatch):
-    import freetoken.server.api_server as api
-
-    monkeypatch.setattr(api, "_API_KEY", None)
-    monkeypatch.setattr(api, "_GLOBAL_STATE", _serving_state())
-    client = TestClient(api.app)
-    assert client.get("/v1").status_code == 200
+@pytest.mark.parametrize(
+    "headers, status",
+    [
+        ({}, 401),
+        ({"Authorization": "Bearer wrong"}, 401),
+        ({"Authorization": f"Basic {KEY}"}, 401),
+        ({"Authorization": KEY}, 401),
+        ({"Authorization": b"Bearer caf\xe9"}, 401),
+        ({"x-api-key": "wrong"}, 401),
+        ({"Authorization": f"Bearer {KEY}"}, 200),
+        ({"Authorization": f"bearer {KEY}"}, 200),
+        ({"x-api-key": KEY}, 200),
+    ],
+)
+def test_key_gates_every_route_but_health(headers, status):
+    client = _client(KEY)
+    response = client.get("/v1/models", headers=headers)
+    assert response.status_code == status
+    if status == 401:
+        assert response.json() == {"error": "Unauthorized"}
     assert client.get("/health").status_code == 200
 
 
-def test_missing_header_is_401_with_a_bearer_challenge(keyed_client):
-    r = keyed_client.get("/v1")
-    assert r.status_code == 401
-    assert r.headers["WWW-Authenticate"] == "Bearer"
-    assert r.json()["error"]["type"] == "authentication_error"
+def test_no_key_serves_open():
+    assert _client(None).get("/v1/models").status_code == 200
 
 
-@pytest.mark.parametrize(
-    "authorization",
-    ["Bearer wrong", "Bearer s3cre", "Bearer s3cret-and-more", "Basic s3cret", "s3cret"],
-)
-def test_wrong_or_malformed_credentials_are_401(keyed_client, authorization):
-    r = keyed_client.get("/v1", headers={"Authorization": authorization})
-    assert r.status_code == 401
+def test_cors_preflight_passes_and_401_carries_cors_headers():
+    client = _client(KEY)
+    preflight = client.options(
+        "/v1/models",
+        headers={"Origin": ORIGIN, "Access-Control-Request-Method": "GET",
+                 "Access-Control-Request-Headers": "authorization"},
+    )
+    assert preflight.status_code == 200
+    denied = client.get("/v1/models", headers={"Origin": ORIGIN})
+    assert denied.status_code == 401
+    assert denied.headers["access-control-allow-origin"] == ORIGIN
 
 
-def test_matching_bearer_passes(keyed_client):
-    r = keyed_client.get("/v1", headers={"Authorization": "Bearer s3cret"})
-    assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
-    # scheme is case-insensitive, surrounding whitespace on the token is not the token
-    r = keyed_client.get("/v1", headers={"Authorization": "bearer  s3cret "})
-    assert r.status_code == 200
+def test_options_outside_a_cors_preflight_needs_the_key():
+    assert _client(KEY).options("/v1/models").status_code == 401
 
 
-def test_health_stays_open_for_liveness_probes(keyed_client):
-    r = keyed_client.get("/health")
-    assert r.status_code == 200
-    assert r.json()["status"] == "ok"
+def test_flag_wins_over_env_and_empty_values_do_not_enable_auth(monkeypatch):
+    monkeypatch.delenv("FREETOKEN_API_KEY", raising=False)
+    assert _parse().api_key is None
+    monkeypatch.setenv("FREETOKEN_API_KEY", "from-env")
+    assert _parse().api_key == "from-env"
+    assert _parse("--api-key", KEY).api_key == KEY
+    monkeypatch.setenv("FREETOKEN_API_KEY", "")
+    assert _parse().api_key is None
+    with pytest.raises(SystemExit):
+        _parse("--api-key", "")
 
 
-@pytest.mark.parametrize(
-    "method, path",
-    [
-        ("POST", "/v1/chat/completions"),
-        ("POST", "/v1/messages"),
-        ("POST", "/v1/responses"),
-        ("GET", "/v1/models"),
-        ("GET", "/v1/stats"),
-        ("GET", "/v1/requests"),
-        ("POST", "/v1/cache/rebuild"),
-        ("POST", "/v1/admin/prepare-stop"),
-        ("POST", "/generate"),
-    ],
-)
-def test_every_other_route_is_gated_before_its_handler(keyed_client, method, path):
-    # No body and no engine behind these: a 401 proves the gate answered first, since the
-    # handler would have produced a 422/503 or needed the state.
-    r = keyed_client.request(method, path)
-    assert r.status_code == 401
+def test_key_stays_out_of_the_logged_config(monkeypatch):
+    monkeypatch.delenv("FREETOKEN_API_KEY", raising=False)
+    assert KEY not in str(_parse("--api-key", KEY))
 
 
-def test_cors_preflight_is_not_challenged(keyed_client):
-    # A preflight carries no credentials by design; the CORS middleware (installed at startup,
-    # outermost) answers it. Without CORS configured FastAPI's own answer is what we see --
-    # anything but a 401 is the assertion.
-    r = keyed_client.options("/v1/chat/completions")
-    assert r.status_code != 401
+@pytest.mark.parametrize("agent", sorted(launch.PREPARERS))
+def test_dry_run_prints_a_placeholder_instead_of_the_key(agent, monkeypatch, capsys):
+    key = 'p"w\\d\xe9'
+    model = launch.ServedModel(model_id="m", models=["m"], context_length=8192)
+    monkeypatch.setattr(launch, "discover_server_model", lambda _server, _key: model)
+    assert launch.main([agent, "--dry-run", "--api-key", key]) == 0
+    out = capsys.readouterr().out
+    assert key not in out and json.dumps(key)[1:-1] not in out
+    if agent in ("claude", "codex", "dsh", "opencode"):
+        assert "<api-key>" in out
 
 
-def test_install_api_key_arms_and_disarms():
-    import freetoken.server.api_server as api
+def test_dsh_keeps_the_key_out_of_the_variable_its_web_search_reads(monkeypatch, tmp_path):
+    monkeypatch.setenv("DSH_HOME", str(tmp_path))
+    monkeypatch.setattr(launch, "_warn_dsh_node_version", lambda: None)
+    ctx = launch.LaunchContext(
+        server=launch.resolve_server_url("http://127.0.0.1:1919"),
+        model=launch.ServedModel(model_id="m", models=["m"], context_length=8192),
+        extra_args=[],
+        dry_run=False,
+        api_key=KEY,
+    )
+    env = launch.prepare_dsh(ctx).env
+    settings = yaml.safe_load((tmp_path / launch.DSH_LAUNCH_SETTINGS_NAME).read_text())
+    assert env["DEEPSEEK_API_KEY"] != KEY
+    assert env[settings["llm-deepseek"]["apiKeyEnv"]] == KEY
 
-    prev = api._API_KEY
+
+@pytest.mark.parametrize("agent", ["hermes", "openclaw"])
+def test_config_files_holding_the_key_are_owner_only(agent, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    old_umask = os.umask(0o022)
     try:
-        api.install_api_key("k")
-        assert api._API_KEY == "k"
-        api.install_api_key("")
-        assert api._API_KEY is None
-        api.install_api_key(None)
-        assert api._API_KEY is None
+        for key in ("sk-first", "sk-second"):
+            ctx = launch.LaunchContext(
+                server=launch.resolve_server_url("http://127.0.0.1:1919"),
+                model=launch.ServedModel(model_id="m", models=["m"], context_length=65536),
+                extra_args=[],
+                dry_run=False,
+                assume_yes=True,
+                api_key=key,
+            )
+            launch.PREPARERS[agent](ctx)
     finally:
-        api._API_KEY = prev
-
-
-# ------------------------------------------------------------------ the shell client
-
-
-def test_shell_client_sends_the_key_on_the_control_plane(monkeypatch):
-    from freetoken.shell.client import ShellClient
-
-    seen: dict = {}
-
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return b'{"status": "ok"}'
-
-    def _urlopen(request, timeout):
-        seen["authorization"] = request.get_header("Authorization")
-        return _Resp()
-
-    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
-    client = ShellClient("http://127.0.0.1:1", api_key="s3cret")
-    assert client._request_json_blocking("GET", "/health", None, 1.0) == {"status": "ok"}
-    assert seen["authorization"] == "Bearer s3cret"
+        os.umask(old_umask)
+    written = [p for p in tmp_path.rglob("*") if p.is_file() and "sk-" in p.read_text()]
+    assert len(written) == 2
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in written)
