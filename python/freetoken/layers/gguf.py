@@ -80,6 +80,9 @@ _DEQUANT = _STANDARD_AND_K | _IQ
 
 # Below this token count, the MMVQ GEMV kernel wins (matches vLLM's heuristic).
 _MMVQ_SAFE = 6
+# From this token count on, dequantizing the weight for a bf16 cuBLAS GEMM beats the vendored
+# MMQ kernel (4x at 128 tokens, 9x at 4096 on an RTX 4090).
+_DEQUANT_MIN_ROWS = 32
 
 
 def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> torch.Tensor:
@@ -97,7 +100,7 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
         return x @ qweight.view(_UNQUANTIZED_DTYPE[qweight_type]).to(x.dtype).T
     if x.shape[0] <= _MMVQ_SAFE and qweight_type in _MMVQ:
         return ggml_mul_mat_vec_a8(qweight, x, qweight_type, out_features)
-    if qweight_type in _MMQ:
+    if x.shape[0] < _DEQUANT_MIN_ROWS and qweight_type in _MMQ:
         return ggml_mul_mat_a8(qweight, x, qweight_type, out_features)
     if qweight_type in _DEQUANT:
         block, type_size = BLOCK_SHAPE[qweight_type]

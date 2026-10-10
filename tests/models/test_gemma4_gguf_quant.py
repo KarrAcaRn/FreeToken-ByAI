@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 
@@ -202,3 +203,40 @@ def test_mixed_type_fused_projection_runs_one_gemm_per_type_run():
     op.load_state_dict({"runs.0.qweight": w32.view(torch.uint8), "runs.1.qweight": w16.view(torch.uint8)})
     x = torch.randn(2, 64)
     torch.testing.assert_close(op.forward(x), x @ torch.cat([w32, w16.float()]).T, atol=1e-2, rtol=1e-2)
+
+
+def test_large_gguf_batches_dequantize_for_a_bf16_gemm(monkeypatch):
+    from freetoken.kernel import gguf as kernel
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+
+    calls = []
+    monkeypatch.setattr(kernel, "ggml_mul_mat_vec_a8", lambda w, x, t, n: calls.append("mmvq") or x.new_zeros(x.shape[0], n))
+    monkeypatch.setattr(kernel, "ggml_mul_mat_a8", lambda w, x, t, n: calls.append("mmq") or x.new_zeros(x.shape[0], n))
+    monkeypatch.setattr(kernel, "ggml_dequantize", lambda w, t, m, n, dtype: calls.append("dequant") or torch.zeros(m, n, dtype=dtype))
+    q8, iq3 = torch.empty(4, 34, dtype=torch.uint8), torch.empty(4, 110, dtype=torch.uint8)
+    for rows, qweight, quant_type in ((6, q8, 8), (16, q8, 8), (32, q8, 8), (16, iq3, 21)):
+        fused_mul_mat_gguf(torch.zeros(rows, 32 if quant_type == 8 else 256), qweight, quant_type)
+    assert calls == ["mmvq", "mmq", "dequant", "dequant"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_gguf_expert_prefill_dequant_path_matches_the_gemv():
+    import gguf
+
+    from freetoken.moe.fused_q4_0 import _DEQUANT_MIN_TOKENS, fused_experts_gguf_q4_0
+
+    torch.manual_seed(0)
+    E, H, I, T, K = 40, 256, 128, _DEQUANT_MIN_TOKENS, 4
+    q8 = gguf.GGMLQuantizationType.Q8_0
+    quant = lambda w: torch.from_numpy(gguf.quants.quantize(w.numpy(), q8)).reshape(E, -1).cuda()  # noqa: E731
+    gate_up, down = quant(torch.randn(E * 2 * I, H) * 0.05), quant(torch.randn(E * H, I) * 0.05)
+    # pad each slot like the fixed-width mixed banks do
+    gate_up = torch.cat([gate_up, torch.zeros(E, 64, dtype=torch.uint8, device="cuda")], dim=1)
+    x = torch.randn(T, H, device="cuda", dtype=torch.bfloat16)
+    ids = torch.randint(0, E - 3, (T, K), device="cuda", dtype=torch.int32)  # some experts unused
+    weights = torch.rand(T, K, device="cuda")
+    kwargs = dict(gate_up_quant_type=8, down_quant_type=8, intermediate_size=I, hidden_size=H)
+    gemv = fused_experts_gguf_q4_0(x, gate_up, down, weights, ids, "silu", is_prefill=False, **kwargs)
+    prefill = fused_experts_gguf_q4_0(x, gate_up, down, weights, ids, "silu", is_prefill=True, **kwargs)
+    cos = torch.nn.functional.cosine_similarity(gemv.float().flatten(), prefill.float().flatten(), dim=0)
+    assert cos > 0.999  # the GEMV quantizes activations to q8_1, the prefill GEMM reads them in bf16
