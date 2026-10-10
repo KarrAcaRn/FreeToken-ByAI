@@ -1555,16 +1555,21 @@
     "number": 300,
     "title": "feat: Automatic KV/MoE Laddering for decode speed vs context-length trade off ( upto 33% faster decode ) ",
     "head_sha": "1b90e9fc97a7",
-    "reviewed_at": "2026-10-03",
-    "decision": "deferred",
-    "reason": "--enable-kv-ladder: start with a small KV cache and grow it at request boundaries by shrinking the GPU expert cache (runtime rebuild), so short requests keep more experts resident. Relevant to our Qwen3.6 MoE work (expert cache vs context, TTFT floor), but needs a rework on next: it reads kwargs['moe_backend'], which next renamed to moe_strategy (crashes as soon as the flag is used), conflicts in scheduler.py and docs, and ships no tests. Revisit after the queue together with the MoE work items.",
-    "commits": [],
-    "gpu_untested": true,
+    "reviewed_at": "2026-10-10",
+    "decision": "adopted-with-fixups",
+    "reason": "Opt-in --enable-kv-ladder: start KV at 2 steps (65k by default) and, before a request whose prompt + max_tokens reaches the bound, grow KV by rungs at an idle point through the runtime cache rebuild, paid for with expert slots. Merged with next's admission checks (image refusal, context errors) kept before the ladder queue. Fixups: the flag check read kwargs['moe_backend'] (renamed on next: crash at startup), it rejected the default --moe-strategy auto, and the queue needed a no-ladder early return; tests added for the policy and the flags. Live on Qwen3.6-35B-A3B NVFP4 (4090, fp8 KV): start 65.6k KV / 8903 slots; a 108k-token needle request grew KV to 131k (8519 slots, ~1 s rebuild) and passed in 19 s; short-request decode 143.6 -> 142.4 tok/s.",
+    "commits": [
+      "250232f",
+      "6f666c6",
+      "41ff810",
+      "a2f8ff7"
+    ],
+    "gpu_untested": false,
     "authors": [
       "Aswinkumar <aswinkumar1999@gmail.com>"
     ],
-    "revisit": "after-queue",
-    "summary": "Needs rework on next (uses renamed moe_backend kwarg, conflicts, no tests); revisit with the MoE work"
+    "summary": "Opt-in KV ladder: KV grows in rungs before long requests, paid with expert slots (108k needle passed)",
+    "fixup": "Flag check read the renamed moe_backend (startup crash), default strategy accepted, no-ladder early return, tests ([6f666c6](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/6f666c6), [41ff810](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/41ff810), [a2f8ff7](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/a2f8ff7))"
   },
   "298": {
     "number": 298,
