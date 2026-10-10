@@ -648,6 +648,8 @@ class Engine:
             kv_reserve_tokens=max(config.kv_reserve_tokens, min_reserve),
             page_size=page_tokens,
             max_slots=method.slot_limit() if method is not None else None,
+            kv_reserve_share=getattr(config, "kv_reserve_share", 0.0),
+            max_kv_tokens=getattr(config, "max_seq_len", None),
         )
 
     def _init_offload_moe_cache(self, config: EngineConfig) -> OffloadMoeCache:
