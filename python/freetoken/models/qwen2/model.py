@@ -79,6 +79,11 @@ class Qwen2ForCausalLM(BaseLLMModel):
         )
         super().__init__()
 
+        from freetoken.models.gguf.dense import convert_dense_to_gguf, is_dense_gguf
+
+        if is_dense_gguf(config):
+            convert_dense_to_gguf(self, config)
+
     def forward(self) -> torch.Tensor:
         output = self.model.forward(get_global_ctx().batch.input_ids)
         logits = self.lm_head.forward(output)

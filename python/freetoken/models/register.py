@@ -303,6 +303,25 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         parse_config="parse_gguf_config",
         iter_weights="iter_gguf_weights",
     ),
+    # dense llama.cpp GGUFs (llama / qwen2 / qwen3): the HF classes with models/gguf/dense.py's loaders
+    "LlamaGGUFForCausalLM": ModelSpec(
+        "freetoken.models.llama",
+        "LlamaForCausalLM",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+    ),
+    "Qwen2GGUFForCausalLM": ModelSpec(
+        "freetoken.models.qwen2",
+        "Qwen2ForCausalLM",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+    ),
+    "Qwen3GGUFForCausalLM": ModelSpec(
+        "freetoken.models.qwen3",
+        "Qwen3ForCausalLM",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+    ),
     "GptOssForCausalLM": ModelSpec(
         "freetoken.models.gpt_oss",
         "GptOssForCausalLM",

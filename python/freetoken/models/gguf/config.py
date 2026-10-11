@@ -20,6 +20,10 @@ GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
     "gemma4": "Gemma4GGUFForCausalLM",
     "qwen35moe": "Qwen3_5MoeGGUFForCausalLM",
     "qwen3moe": "Qwen3MoeGGUFForCausalLM",
+    # dense: Llama 3.x and Mistral (both ``llama``), Qwen2/2.5, Qwen3 (models/gguf/dense.py)
+    "llama": "LlamaGGUFForCausalLM",
+    "qwen2": "Qwen2GGUFForCausalLM",
+    "qwen3": "Qwen3GGUFForCausalLM",
 }
 
 

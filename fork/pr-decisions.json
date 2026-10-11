@@ -3143,5 +3143,35 @@
     "authors": [
       "Léon Avic Simmons <Avicennasis@gmail.com>"
     ]
+  },
+  "659": {
+    "number": 659,
+    "title": "fix(kernel): enable disk row stores on windows",
+    "head_sha": "e9235495b299",
+    "reviewed_at": "2026-10-11",
+    "decision": "adopted",
+    "reason": "Windows bodies for the row store's platform seams (UTF-8 -> wide paths, overlapped ReadFile, _aligned_malloc, nvcuda.dll symbols), all behind _WIN32; on Linux only FileHandle = int is new, so the build and reads are unchanged. Complements #575. setup.py conflict with #575's Windows build resolved in the merge commit (row store uses next's shared extra_compile). Linux: rebuilt, test_row_store + test_ple_disk 11 passed on the RTX 4090 incl. the new Unicode-path, >4 GiB offset and short-read tests. The Windows path itself cannot be tested here.",
+    "commits": [
+      "4b37dade"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "boqi <33243841+wenlive@users.noreply.github.com>"
+    ],
+    "summary": "Windows bodies for the disk row store (PLE tables); Linux path unchanged, tests green on the 4090"
+  },
+  "660": {
+    "number": 660,
+    "title": "feat(moe): support gsq q2_0 routed experts [draft]",
+    "head_sha": "dbabd024595b",
+    "reviewed_at": "2026-10-11",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": true,
+    "authors": [
+      "boqi <33243841+wenlive@users.noreply.github.com>"
+    ],
+    "reason": "Draft: expert-only GSQ Q2_0 GGUF source for Qwen3.8-Flash-Next (64-weight/18-byte blocks, Triton vector kernel, offload cache only), HF trunk kept; the author asks for maintainer feedback on the external-source contract. Deferred while it is a draft: the queue re-lists it once its head moves. Flash-Next runs here (next-speed), so it is testable once ready: the Q2 experts are ~34 GB and fit in RAM.",
+    "summary": "Draft - revisit when ready; GSQ Q2_0 experts for Flash-Next, testable here once ready"
   }
 }

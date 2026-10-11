@@ -19,6 +19,11 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | sm_89: round fp8 activations once (Triton double-rounds fp32 -> e4m3 via fp16) | 8236bb3, test fix 311f629 | Candidate, applies to upstream main as is; see below |
 | GLM DSA bf16 sparse attention fits 99 KiB shared memory (BLOCK_T=16) | 48653bf | Candidate; next's file also carries the fp8/nvfp4 DSA KV PRs, rebase onto main |
 | qwen4_exp chunked QSA prefill test: exact selection, output within bf16 rounding | 801f96b | Candidate, test only; see below |
+| sm_89: keep the per-part FP8 GEMMs with torch >= 2.12 | fae0372, 311f629 | **Ready** as branch `perf/sm89-fp8-gemm-parts` (pushed 2026-10-11); see below |
+| --kv-reserve-share for --moe-cache-auto | b98fc10 | **Ready** as branch `feat/kv-reserve-share-up` (port to main, pushed 2026-10-11); see below |
+| sm_89 tile config for the NVFP4 MoE prefill GEMM, from 1k tokens | 00563b2 (+ M >= 1024 gate on the branch) | **Ready** as branch `perf/nvfp4-prefill-tile-sm89` (pushed 2026-10-11); see below |
+| Cache budget charges the attention workspace | 64d60f5 | Suggest on #562 (open): needs its `fixed_workspace_bytes`; local branch `fix/cache-budget-workspace` |
+| NVFP4 prefill: one dot over joined B rows (triton 3.8) | 2109089 | Suggest on #578 (open, conflicts with main since #630/#653); local branch `perf/nvfp4-prefill-sm89` |
 
 ## Load dense Gemma-4 GGUFs end to end
 
@@ -172,3 +177,55 @@ The seven "known failures" on the 4090 (also on plain upstream main) were three 
 - 801f96b: cuBLAS picks other algorithms for the shorter tail chunk (qkv_proj/o_proj differ by an
   ulp), so `torch.equal` on the chunked QSA prefill failed on correct code. Selection is compared
   exactly (indexer path is bit-identical); skipping the ring refresh still fails both unaligned cuts.
+
+## Upstream PR branches prepared 2026-10-11 (after upstream moved to torch 2.14 / triton 3.8, #630)
+
+All measured on the RTX 4090 against upstream main 74a3877 (torch 2.14.1+cu130, triton 3.8).
+Full suite per branch: only the 5 failures upstream main itself has on sm_89 (e4m3 forced_emu,
+fp8_pertensor part_rows1, 3x qsa chunked_prefill - fixed on next by 8236bb3/801f96b).
+
+### perf(fp8): keep the per-part FP8 GEMMs on sm_89 with torch >= 2.12 too
+
+Branch `perf/sm89-fp8-gemm-parts` (c6c67e3 + 546d12c). PR description draft:
+
+> #243 kept fused FP8 projections off row-wise `_scaled_mm` on sm_89 for torch < 2.12 (stream
+> bug). Since #630 main runs torch 2.14, so sm_89 now takes the row-wise CUTLASS kernel, which is
+> ~2.5x slower there than one tensor-wise cuBLASLt GEMM per fused part at prefill sizes.
+>
+> Qwen3.8-27B NVFP4 on an RTX 4090, 4.2k-token prompt, bf16 KV:
+> prefill 2430 -> 3030 tok/s (+25%), decode 43.7 -> 44.9 tok/s.
+>
+> The per-part path picks its cuBLASLt kernel by M, so a row alone vs in a batch can differ by one
+> bf16 ulp (~1.5% of outputs); `test_batch_size_does_not_change_the_numeric_scheme` keeps bit
+> equality for the row-wise path and checks the per-part path stays W8A8 (W8A16 differs in ~95%).
+> This is the same path sm_89 already used with torch < 2.12.
+
+### feat(engine): --kv-reserve-share for --moe-cache-auto
+
+Branch `feat/kv-reserve-share-up` (25780af; main has no `plan_moe_cache_auto`, the share is applied
+in Engine's `resolve_moe_cache_auto` call). PR description draft:
+
+> --moe-cache-auto reserves only --kv-reserve-tokens (8192) for KV and gives every other byte to
+> expert slots, which caps the context at ~8k tokens even where KV is cheap. --kv-reserve-share
+> (default 0.1, capped at the model's context, 0 = old behaviour) keeps a share of the cache
+> budget for KV.
+>
+> Qwen3.6-35B-A3B NVFP4, RTX 4090, bf16 KV, defaults: KV 8.2k -> 80.6k tokens, expert slots
+> 9193 -> 8358, warm decode unchanged (102.7 tok/s both). (With fp8 KV on our fork: 8.3k -> 159k.)
+
+### perf(moe): sm_89 tile config for the NVFP4 MoE prefill GEMM
+
+Branch `perf/nvfp4-prefill-tile-sm89` (ac00d8f). Differs from next's 00563b2: applies only from
+1024 tokens, because main's (pre-#578) kernel is up to 25% slower with it below 1k on triton 3.8.
+next's #578 kernel does not regress there (measured 2026-10-11, 128..4096 tokens), so next keeps
+the ungated config. PR description draft:
+
+> The prefill config was swept for MiniMax-M2 shapes. On Ada with triton 3.8, BLOCK_M 64 /
+> BLOCK_N 128 / 4 warps / 3 stages runs gate_up + down (Qwen3.6-35B-A3B shapes) at 1k / 4k / 8k
+> tokens in 2.79 / 6.83 / 12.30 ms instead of 3.12 / 9.39 / 17.68 ms (-11% / -27% / -30%);
+> Gemma-4-26B-A4B shapes -23% at 1k, -34% at 2k. Below 1k tokens the default stays (it is up to
+> 25% faster there). Other GPUs unchanged.
+
+End-to-end prefill on main is dominated by offload expert streaming (Qwen3.6 4.2k: ~5300 tok/s
+both), so the kernel numbers are the meaningful ones; with the preloaded slot cache (fix/moe-ttft)
+the gain shows end to end.

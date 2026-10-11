@@ -135,16 +135,16 @@ setup(
                 extra_link_args=runtime_link_args,
             )
         ] if not IS_WINDOWS else []),
-        # disk-backed row store (PLE / Engram tables); Linux-only until the TableFile/BatchReader seams grow Windows bodies
+        # disk-backed row store (PLE / Engram tables)
         *([
             CppExtension(
                 name="freetoken.kernel._row_store",
                 sources=[
                     "python/freetoken/kernel/csrc/row_store/row_store_ext.cpp",
                 ],
-                extra_compile_args=["-O3", cxx_std],
+                extra_compile_args=extra_compile,
             )
-        ] if sys.platform == "linux" else []),
+        ] if sys.platform in ("linux", "win32") else []),
     ],
     cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
 )
