@@ -151,24 +151,30 @@ class GGUFMergedLinear(BaseOP):
     mixed quant levels): one :class:`GGUFLinear` per run of same-typed parts, outputs
     concatenated. Each part reads the same input, so this equals the single fused GEMM."""
 
-    def __init__(self, in_features: int, sizes: list[int], quant_types: list[int]):
+    def __init__(self, in_features: int, sizes: list[int], quant_types: list[int], has_bias: bool = False):
         self.in_features = in_features
         self.out_features = sum(sizes)
         self.runs = OPList([
             GGUFLinear(in_features, sum(sizes[first:end]), quant_type)
             for first, end, quant_type in gguf_type_runs(sizes, quant_types)
         ])
+        self.bias = torch.empty(self.out_features) if has_bias else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.cat([run.forward(x) for run in self.runs.op_list], dim=-1)
+        out = torch.cat([run.forward(x) for run in self.runs.op_list], dim=-1)
+        if self.bias is not None:
+            out = out + self.bias
+        return out
 
 
-def gguf_linear(in_features: int, sizes: list[int], quant_types: list[int]) -> GGUFLinear | GGUFMergedLinear:
+def gguf_linear(
+    in_features: int, sizes: list[int], quant_types: list[int], has_bias: bool = False
+) -> GGUFLinear | GGUFMergedLinear:
     """The GGUF op for a (possibly fused) projection: a plain :class:`GGUFLinear` when every
-    part shares one ggml type, else a :class:`GGUFMergedLinear`."""
+    part shares one ggml type, else a :class:`GGUFMergedLinear`. The bias is the fused one."""
     if len(set(quant_types)) == 1:
-        return GGUFLinear(in_features, sum(sizes), quant_types[0])
-    return GGUFMergedLinear(in_features, sizes, quant_types)
+        return GGUFLinear(in_features, sum(sizes), quant_types[0], has_bias=has_bias)
+    return GGUFMergedLinear(in_features, sizes, quant_types, has_bias=has_bias)
 
 
 def gguf_linear_entries(target: str, parts: list[tuple[torch.Tensor, int]]) -> list[tuple[str, torch.Tensor]]:

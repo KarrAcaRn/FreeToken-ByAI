@@ -383,19 +383,22 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         architecture="LlamaForCausalLM",
         hidden_size=4096,
         kv_groups=((8, 128),),
+        arch_aliases=("LlamaGGUFForCausalLM",),  # llama.cpp GGUF of the same dense layout
     ),
     AotModel(
         name="Qwen/Qwen2-7B",
         architecture="Qwen2ForCausalLM",
         hidden_size=3584,
         kv_groups=((4, 128),),
+        arch_aliases=("Qwen2GGUFForCausalLM",),  # llama.cpp GGUF of the same dense layout
     ),
     AotModel(
         name="Qwen/Qwen3-8B",
         architecture="Qwen3ForCausalLM",
         hidden_size=4096,
         kv_groups=((8, 128),),
-        arch_aliases=("Qwen3VLForConditionalGeneration",),  # Qwen3-VL-8B: same text tower
+        # Qwen3-VL-8B: same text tower; llama.cpp GGUF of the same dense layout
+        arch_aliases=("Qwen3VLForConditionalGeneration", "Qwen3GGUFForCausalLM"),
     ),
     AotModel(
         name="mistralai/Mistral-7B-Instruct-v0.3",
