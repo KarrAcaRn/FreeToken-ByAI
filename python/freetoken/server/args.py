@@ -869,13 +869,14 @@ def parse_args(
 
     parser.add_argument(
         "--online-quant",
-        default="none",
+        default=None,
         choices=["none", "fp8"],
         help=(
-            "Opt-in: quantize the checkpoint's bf16 linear weights (projections, an untied "
-            "lm_head; not routers or gates) to fp8 with one scale per output row at load. "
-            "Halves their bytes, so a bandwidth-bound decode runs faster, but the outputs "
-            "change slightly. Same as --quant-backend linear.none=fp8."
+            "Quantize the checkpoint's bf16 linear weights (projections, an untied lm_head; "
+            "not routers or gates) to fp8 with one scale per output row at load. Halves their "
+            "bytes, so a bandwidth-bound decode runs faster, but the outputs change slightly. "
+            "Same as --quant-backend linear.none=fp8. Default fp8 unless --quant-backend has a "
+            "linear or linear.none entry; 'none' keeps the bf16 weights."
         ),
     )
 
@@ -1258,7 +1259,15 @@ def parse_args(
         if entry:
             kwargs["quant_backend"] = entry
 
-    if kwargs.pop("online_quant") == "fp8":
+    # next-speed default: fp8 bf16 linears, unless the user picked a linear kernel themselves
+    online_quant = kwargs.pop("online_quant")
+    if online_quant is None:
+        from freetoken.layers.quantization import LayerKind, QuantBackend, QuantKind
+
+        tables = dict(QuantBackend.parse(kwargs["quant_backend"]).items)
+        explicit = (LayerKind.LINEAR, None) in tables or (LayerKind.LINEAR, QuantKind.NONE) in tables
+        online_quant = "none" if explicit else "fp8"
+    if online_quant == "fp8":
         kwargs["quant_backend"] = ",".join(x for x in (kwargs["quant_backend"], "linear.none=fp8") if x)
 
     if kwargs["distributed_port"] is None:

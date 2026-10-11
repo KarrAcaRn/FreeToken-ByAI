@@ -127,6 +127,7 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 |---|---|---|
 | `--moe-strategy` | auto | `fused`/`offload`/`cpu`/`hybrid`; auto → offload, or hybrid with a `ft bench bw` profile; fused on unified-memory GPUs (GB10), see [models.md](models.md#unified-memory-gpus-gb10--dgx-spark). `--moe-backend` is the deprecated old spelling |
 | `--quant-backend` | auto | Kernel per quantized layer type, `layer[.kind]=name` entries: `linear=marlin,moe=b12x` or `moe.nvfp4=triton`. A layer-level entry applies to every kind whose table lists the name. `linear.none=torch` keeps bf16 linears off the single-row decode GEMV (`gemv`) |
+| `--online-quant` | fp8 | `fp8` quantizes a checkpoint's bf16 linears (≥1024 outputs, untied lm_head) to fp8 with one scale per row at load, same as `--quant-backend linear.none=fp8`: faster decode, more KV, slightly different outputs. `none` keeps bf16. The default steps aside when `--quant-backend` has a `linear` or `linear.none` entry (next-speed only) |
 | `--nvfp4-backend` | — | Deprecated: stands in for `--quant-backend moe.nvfp4=<marlin\|b12x\|triton>` (`flashinfer` means b12x); cannot be combined with `--quant-backend` |
 | `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family strategies) |
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |

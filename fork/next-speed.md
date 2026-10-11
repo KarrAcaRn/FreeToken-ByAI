@@ -91,7 +91,7 @@ DFlash:
 - The torch profiler overstates host overhead: the GDN-commit graph cut profiled idle
   18% -> 13% but gained ~0.4% unprofiled. Judge launch-overhead work by unprofiled runs.
 
-## Opt-in: `--online-quant fp8`
+## Default: `--online-quant fp8`
 
 Same as `--quant-backend linear.none=fp8`. A checkpoint's bf16 linear weights (projections,
 an untied lm_head) are quantized at load to e4m3 with one fp32 scale per output row and run
@@ -99,8 +99,12 @@ through the W8A16 kernels (GEMV at M=1, the small-M tiles, the triton GEMM for p
 which is within 2-13% of bf16 cuBLAS). Layers with fewer than 1024 outputs (MoE routers,
 GDN `in_proj_ba`, shared-expert gates) stay bf16; tied lm_heads stay bf16; auto kernel
 selection never picks it. `ft info` prices the smaller weights. Outputs change slightly:
-greedy answers on the sample prompts stayed the same and the 16k-token retrieval test holds,
-but this is a numerics change, hence opt-in.
+greedy answers on the sample prompts stayed the same and the 16k-token retrieval test holds.
+
+Since 2026-10-11 `ft serve` on next-speed turns it on by default: it won on every bf16 model
+in the model matrix (decode +20-85%, up to 2x KV). `--online-quant none` keeps the bf16
+weights; an explicit `--quant-backend linear=...` or `linear.none=...` entry also wins over
+the default. The engine's Python API (`ServerArgs` / `EngineConfig`) keeps `quant_backend=None`.
 
 | Model (4k prefill / decode bs=1 / KV tokens) | bf16 weights | --online-quant fp8 |
 |---|---|---|
