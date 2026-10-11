@@ -682,7 +682,7 @@ def _verify_stage1_kernel(
     indptr_ptr, indices_ptr, mid_o_ptr, mid_lse_ptr,
     stride_qt, stride_qh, stride_ks, stride_kh, stride_vs, stride_vh, stride_kss, stride_vss,
     stride_mid_ot, stride_mid_oh, stride_mid_os, stride_lse_t, stride_lse_h, stride_lse_s,
-    Q_LEN: tl.constexpr, GROUP: tl.constexpr, ROW_BLOCKS: tl.constexpr, NUM_SPLITS: tl.constexpr,
+    Q_LEN, GROUP: tl.constexpr, ROW_BLOCKS, NUM_SPLITS: tl.constexpr,  # Q_LEN / ROW_BLOCKS runtime: no recompile per extend length
     BLOCK_R: tl.constexpr, BLOCK_D: tl.constexpr, BLOCK_N: tl.constexpr, MIN_BLOCK_KV: tl.constexpr,
     D: tl.constexpr, HAS_KV_SCALE: tl.constexpr,
 ):
@@ -818,7 +818,9 @@ def verify_paged_attention(
         Q_LEN=q_len, GROUP=group, ROW_BLOCKS=row_blocks, NUM_SPLITS=num_splits,
         BLOCK_R=block_r, BLOCK_D=block_d, BLOCK_N=32, MIN_BLOCK_KV=_MIN_BLOCK_KV,
         D=head_dim, HAS_KV_SCALE=k_scale is not None,
-        num_warps=4, num_stages=2,
+        # head_dim 512 (Gemma 4's global layers): two stages of 64-row tiles need 100.25 KiB of
+        # shared memory, over sm_89's 99 KiB
+        num_warps=4, num_stages=2 if block_d <= 256 else 1,
     )
     o = torch.empty_like(q)
     _verify_stage2_kernel[(T, num_q_heads)](
