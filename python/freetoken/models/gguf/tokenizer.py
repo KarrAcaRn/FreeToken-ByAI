@@ -14,15 +14,16 @@ from tokenizers import AddedToken
 
 from .reader import gguf_architecture, load_gguf_metadata
 
-# GGUF architecture -> transformers GGUF tokenizer-converter key. qwen35moe is a GPT2-style
-# BPE that transformers has no converter key for; the qwen2 converter builds the same BPE.
-_TOKENIZER_ARCH = {"gemma4": "gemma4_text", "qwen35moe": "qwen2"}
+# GGUF architecture -> transformers GGUF tokenizer-converter key. qwen35moe / qwen3moe are
+# GPT2-style BPEs that transformers has no converter key for; the qwen2 converter builds the same BPE.
+_TOKENIZER_ARCH = {"gemma4": "gemma4_text", "qwen35moe": "qwen2", "qwen3moe": "qwen2"}
 
 # Chat turn end first (it becomes eos, so chat generation halts there), then the formal
 # document end; every name present in the vocab is a stop id.
 _STOP_TOKENS = {
     "gemma4": ("<turn|>", "<eos>"),
     "qwen35moe": ("<|im_end|>", "<|endoftext|>"),
+    "qwen3moe": ("<|im_end|>", "<|endoftext|>"),
 }
 
 # tokenizer.ggml.pre -> the split regex of the source tokenizer.json, where the qwen2

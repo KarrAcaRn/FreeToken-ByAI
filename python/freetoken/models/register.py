@@ -296,6 +296,13 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         parse_config="parse_gguf_config",
         iter_weights="iter_gguf_weights",
     ),
+    # llama.cpp qwen3moe GGUF (Qwen3-30B-A3B): the Qwen3-MoE classes with a GGUF config + weight reader
+    "Qwen3MoeGGUFForCausalLM": ModelSpec(
+        "freetoken.models.qwen3_moe",
+        "Qwen3MoeForCausalLM",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+    ),
     "GptOssForCausalLM": ModelSpec(
         "freetoken.models.gpt_oss",
         "GptOssForCausalLM",

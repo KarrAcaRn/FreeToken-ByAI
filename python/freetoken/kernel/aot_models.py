@@ -148,7 +148,8 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         moe_intermediate_size=768,
         expert_formats=("bf16",),
         aliases=("Qwen/Qwen3-30B-A3B-Thinking-2507",),
-        arch_aliases=("Qwen3VLMoeForConditionalGeneration",),  # Qwen3-VL-30B-A3B: same text tower
+        # Qwen3-VL-30B-A3B: same text tower; llama.cpp GGUF quants: expert slot width depends on each file's quant mix
+        arch_aliases=("Qwen3VLMoeForConditionalGeneration", "Qwen3MoeGGUFForCausalLM"),
     ),
     AotModel(
         name="Qwen/Qwen3.5-35B-A3B",

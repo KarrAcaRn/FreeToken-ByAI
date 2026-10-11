@@ -204,3 +204,132 @@ def test_decoder_layer_matches_the_reference_around_attention(layer_idx):
     with torch.no_grad():
         expected = ref(x[None].clone(), ple[None], shared_kv_states={})[0]
     torch.testing.assert_close(ft.forward(x.clone(), ple), expected, atol=5e-2, rtol=5e-2)
+
+
+# --------------------------------------------------------------------------- llama.cpp gemma4 GGUF of an E-series model
+
+
+def _write_eseries_gguf(path, hf, tensors: dict) -> None:
+    """What llama.cpp's converter writes for the E-series: per-layer ``feed_forward_length``, PLE tensors
+    under their llama.cpp names, k/v kept on the shared layers. Layer 0 mixes Q8_0 q/k with a Q4_0 v
+    (the K-quant presets do the same) and keeps its PLE projections F32."""
+    import gguf
+
+    Q8, Q4, F32, F16 = (gguf.GGMLQuantizationType.Q8_0, gguf.GGMLQuantizationType.Q4_0,
+                        gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16)
+    L, P, I = hf.num_hidden_layers, hf.hidden_size_per_layer_input, hf.intermediate_size
+    w = gguf.GGUFWriter(str(path), "gemma4")
+    for key, value in {
+        "block_count": L, "context_length": 256, "embedding_length": hf.hidden_size, "attention.head_count": 2,
+        "attention.head_count_kv": 1, "attention.key_length": 128, "attention.value_length": 128,
+        "attention.key_length_swa": 64, "attention.value_length_swa": 64, "attention.sliding_window": 8,
+        "rope.dimension_count": 128, "rope.dimension_count_swa": 64, "attention.shared_kv_layers": 3,
+        "embedding_length_per_layer_input": P,
+    }.items():
+        w.add_uint32(f"gemma4.{key}", value)
+    w.add_array("gemma4.feed_forward_length", [2 * I if i >= 3 else I for i in range(L)])
+    w.add_array("gemma4.attention.sliding_window_pattern", [t != "full_attention" for t in hf.layer_types])
+    for key, value in {"rope.freq_base": 1e6, "rope.freq_base_swa": 1e4, "attention.layer_norm_rms_epsilon": 1e-6,
+                       "final_logit_softcapping": 30.0}.items():
+        w.add_float32(f"gemma4.{key}", value)
+    w.add_uint32("tokenizer.ggml.padding_token_id", 0)
+
+    def add(name: str, t: torch.Tensor, qtype=F32):
+        arr = t.float().contiguous().numpy()
+        if qtype == F32:
+            w.add_tensor(name, arr)
+        elif qtype == F16:
+            w.add_tensor(name, arr.astype("float16"))
+        else:
+            w.add_tensor(name, gguf.quants.quantize(arr, qtype), raw_dtype=qtype)
+
+    p = "model.language_model."
+    add("token_embd.weight", tensors[p + "embed_tokens.weight"], Q8)
+    add("per_layer_token_embd.weight", tensors[p + "embed_tokens_per_layer.weight"], Q8)
+    add("per_layer_model_proj.weight", tensors[p + "per_layer_model_projection.weight"], F16)
+    add("per_layer_proj_norm.weight", tensors[p + "per_layer_projection_norm.weight"])
+    add("output_norm.weight", tensors[p + "norm.weight"])
+    add("rope_freqs.weight", torch.tensor([1.0] * 16 + [1e30] * 48))  # partial rotary 0.25 of 128
+    names = {
+        "self_attn.q_proj.weight": "attn_q", "self_attn.k_proj.weight": "attn_k", "self_attn.v_proj.weight": "attn_v",
+        "self_attn.o_proj.weight": "attn_output", "mlp.gate_proj.weight": "ffn_gate", "mlp.up_proj.weight": "ffn_up",
+        "mlp.down_proj.weight": "ffn_down", "per_layer_input_gate.weight": "inp_gate", "per_layer_projection.weight": "proj",
+        "self_attn.q_norm.weight": "attn_q_norm", "self_attn.k_norm.weight": "attn_k_norm",
+        "input_layernorm.weight": "attn_norm", "post_attention_layernorm.weight": "post_attention_norm",
+        "pre_feedforward_layernorm.weight": "ffn_norm", "post_feedforward_layernorm.weight": "post_ffw_norm",
+        "post_per_layer_input_norm.weight": "post_norm", "layer_scalar": "layer_output_scale",
+    }
+    for i in range(L):
+        for hf_name, gg in names.items():
+            t = tensors[f"{p}layers.{i}.{hf_name}"]
+            qtype = F32
+            if t.ndim == 2:
+                qtype = Q4 if (i, gg) == (0, "attn_v") else F32 if (i == 0 and gg in ("inp_gate", "proj")) else Q8
+            add(f"blk.{i}.{gg}.weight", t, qtype)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+@pytest.fixture(scope="module")
+def eseries_gguf(tmp_path_factory):
+    torch.manual_seed(3)
+    hf = _hf_config()
+    tensors = _checkpoint_tensors(hf)
+    path = tmp_path_factory.mktemp("gguf") / "gemma4-eseries-tiny.gguf"
+    _write_eseries_gguf(path, hf, tensors)
+    return str(path), hf, tensors
+
+
+def test_gguf_config_reads_the_eseries_fields(eseries_gguf):
+    from freetoken.models.gemma4.gguf import parse_gguf_config
+    from freetoken.utils import cached_load_hf_config
+
+    path, hf, _tensors = eseries_gguf
+    config, ref = parse_gguf_config(cached_load_hf_config(path)), parse_config(hf)
+    for field in ("kv_sharing", "per_layer_input_size", "per_layer_vocab_size", "double_wide_shared_mlp",
+                  "intermediate_size", "pad_token_id", "num_kv_heads", "head_dim"):
+        assert getattr(config, field) == getattr(ref, field), field
+    # the E-series stores attn_v on its full layers, so they are not k_eq_v like the 12B/26B/31B
+    assert not config.attention_group_for_layer(2).k_eq_v
+    assert config.kv_cache_group_specs() == ref.kv_cache_group_specs()
+
+
+def test_gguf_weights_fill_the_eseries_model(eseries_gguf):
+    from freetoken.models.gemma4 import Gemma4ForCausalLM
+    from freetoken.models.gemma4.gguf import iter_gguf_weights, parse_gguf_config
+    from freetoken.models.gguf.dequant import GGML_Q8_0, dequantize
+    from freetoken.utils import cached_load_hf_config
+
+    _init_tp()
+    path, hf, tensors = eseries_gguf
+    loaded = {n: t.clone() for n, t in iter_gguf_weights(path, torch.device("cpu"), include_moe_experts=False, include_non_moe=True)}
+    expected = Gemma4ForCausalLM(parse_gguf_config(cached_load_hf_config(path))).state_dict()
+    assert set(loaded) == set(expected)
+    for key, tensor in expected.items():
+        assert loaded[key].shape == tensor.shape, key
+
+    def q8(packed: torch.Tensor, cols: int) -> torch.Tensor:
+        return dequantize(packed.reshape(-1), GGML_Q8_0, torch.float32).reshape(-1, cols)
+
+    p, tol = "model.language_model.layers.", dict(atol=0.05, rtol=0.05)
+    # Q8_0 q|k and a Q4_0 v cannot share one packed tensor: two runs, still the q, k, v row order
+    torch.testing.assert_close(
+        q8(loaded["model.layers.0.self_attn.qkv_proj.runs.0.qweight"], 128),
+        torch.cat([tensors[p + "0.self_attn.q_proj.weight"], tensors[p + "0.self_attn.k_proj.weight"]]).float(), **tol)
+    assert loaded["model.layers.0.self_attn.qkv_proj.runs.1.qweight"].shape[0] == 64
+    # a shared layer keeps only q; its k / v / k_norm are dropped, its MLP is double-wide
+    torch.testing.assert_close(q8(loaded["model.layers.4.self_attn.q_proj.qweight"], 128),
+                               tensors[p + "4.self_attn.q_proj.weight"].float(), **tol)
+    assert not any(k.startswith("model.layers.4.self_attn.") and ("k_norm" in k or "qkv" in k) for k in loaded)
+    assert loaded["model.layers.3.feed_forward.shared_mlp.gate_up_proj.qweight"].shape[0] == 4 * 96
+    # unquantized PLE tensors load dense, quantized ones stay packed
+    assert torch.equal(loaded["model.layers.0.per_layer_input_gate.weight"], tensors[p + "0.per_layer_input_gate.weight"])
+    assert "model.layers.1.per_layer_input_gate.qweight" in loaded
+    torch.testing.assert_close(loaded["model.per_layer_model_projection.weight"].float(),
+                               tensors["model.language_model.per_layer_model_projection.weight"].float())
+    torch.testing.assert_close(q8(loaded["model.embed_tokens_per_layer.qweight"], 6 * 32),
+                               tensors["model.language_model.embed_tokens_per_layer.weight"].float(), **tol)
+    torch.testing.assert_close(loaded["model.layers.5.post_per_layer_input_norm.weight"],
+                               tensors[p + "5.post_per_layer_input_norm.weight"])

@@ -94,8 +94,9 @@ def test_quant_layout_detects_dense_and_per_layer_expert_types(monkeypatch):
     layout = gguf._gguf_quant_layout("model.gguf", 2, 4)
 
     assert layout["embedding"] == 8
-    assert layout["qkv"] == (8, 8)
-    assert layout["shared_gate_up"] == (8, 8)
+    assert layout["tensors"]["blk.0.attn_v.weight"] == 8 and "blk.1.attn_v.weight" not in layout["tensors"]
+    assert layout["tensors"]["blk.1.ffn_up.weight"] == 8
+    assert not any("_exps." in name for name in layout["tensors"])
     assert layout["expert_gate_up"] == (21, 23)
     assert layout["expert_down"] == (20, 8)
     assert layout["expert_gate_up_bytes"] == (11, 17)
