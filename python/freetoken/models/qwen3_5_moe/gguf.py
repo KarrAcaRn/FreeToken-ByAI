@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Iterator
 
 import torch
 
-from freetoken.layers.gguf import GGUFLinear, gguf_linear, gguf_type_runs
+from freetoken.layers.gguf import GGUFLinear, gguf_linear, gguf_linear_entries
 from freetoken.models.config import (
     FullAttentionGroupConfig,
     LinearGatedDeltaGroupConfig,
@@ -275,17 +275,6 @@ def _dense(t, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
     return dequantize(t.packed().reshape(-1), t.ggml_type, dtype).reshape(t.shape)
 
 
-def _fused(target: str, parts: list[tuple[torch.Tensor, int]]) -> list[tuple[str, torch.Tensor]]:
-    """State-dict entries of a ``gguf_linear`` from its ``(packed rows, ggml type)`` parts."""
-    runs = gguf_type_runs([p.shape[0] for p, _ in parts], [qt for _, qt in parts])
-    if len(runs) == 1:
-        return [(f"{target}.qweight", torch.cat([p for p, _ in parts]))]
-    return [
-        (f"{target}.runs.{j}.qweight", torch.cat([p for p, _ in parts[first:end]]))
-        for j, (first, end, _) in enumerate(runs)
-    ]
-
-
 def iter_gguf_weights(
     model_path: str,
     device,
@@ -386,7 +375,7 @@ def iter_gguf_weights(
             slots[idx] = (packed, t.ggml_type)
             if len(slots) == len(fused_parts[target]):
                 del pending[(layer, target)]
-                yield from _fused(f"{base}.{target}", [slots[i] for i in range(len(slots))])
+                yield from gguf_linear_entries(f"{base}.{target}", [slots[i] for i in range(len(slots))])
         else:
             raise ValueError(f"unmapped qwen35moe GGUF tensor: {name}")
 

@@ -107,3 +107,10 @@ def test_scalar_head_count_kv_is_broadcast_to_every_layer(tmp_path):
     scalar = parse_gguf_config(make_shim({"gemma4.attention.head_count_kv": 2}, tmp_path))
     per_layer = parse_gguf_config(make_shim({}, tmp_path))
     assert scalar.num_kv_heads == per_layer.num_kv_heads == 2
+
+
+def test_eseries_metadata_without_a_tensor_table_is_refused(tmp_path):
+    # PLE / shared-KV tensor names and types live only in the tensor table (an FTW dir strips it)
+    with pytest.raises(NotImplementedError, match="E-series"):
+        parse_gguf_config(make_shim({"gemma4.attention.shared_kv_layers": 2,
+                                     "gemma4.embedding_length_per_layer_input": 32}, tmp_path))

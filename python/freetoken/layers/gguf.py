@@ -171,6 +171,17 @@ def gguf_linear(in_features: int, sizes: list[int], quant_types: list[int]) -> G
     return GGUFMergedLinear(in_features, sizes, quant_types)
 
 
+def gguf_linear_entries(target: str, parts: list[tuple[torch.Tensor, int]]) -> list[tuple[str, torch.Tensor]]:
+    """State-dict entries of the :func:`gguf_linear` at ``target`` from its ``(packed rows, ggml type)`` parts."""
+    runs = gguf_type_runs([p.shape[0] for p, _ in parts], [qt for _, qt in parts])
+    if len(runs) == 1:
+        return [(f"{target}.qweight", torch.cat([p for p, _ in parts]))]
+    return [
+        (f"{target}.runs.{j}.qweight", torch.cat([p for p, _ in parts[first:end]]))
+        for j, (first, end, _) in enumerate(runs)
+    ]
+
+
 class GGUFLMHead(BaseOP):
     """Untied LM head over a packed GGUF ``output.weight``; like ``ParallelLMHead`` it
     projects only the last position of each prefill sequence. TP=1 only."""
@@ -233,5 +244,6 @@ __all__ = [
     "GGUFEmbedding",
     "fused_mul_mat_gguf",
     "gguf_linear",
+    "gguf_linear_entries",
     "gguf_type_runs",
 ]
