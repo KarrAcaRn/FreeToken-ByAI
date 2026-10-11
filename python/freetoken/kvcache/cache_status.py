@@ -182,13 +182,18 @@ def compute_cache_status_meta(engine: "Engine") -> Dict[str, Any]:
     # fixed=0 so it's the whole-cache ceiling (KV + MoE + Mamba + SWA), not the KV+MoE remainder.
     # Lets the desktop show the real ceiling instead of reverse-deriving it from the per-pool
     # limits. 0 when the baseline wasn't captured (fake engines in tests).
+    from freetoken.attention import fixed_workspace_bytes
     from freetoken.engine.cache_budget import net_cache_budget_bytes as _net_budget
 
     try:
         _baseline = int(engine._baseline_free or 0)
         _weights = int(engine._weights_bytes or 0)
         _mr = float(cfg.memory_ratio) if cfg is not None else 1.0
-        meta["cache_budget_bytes"] = max(0, _net_budget(_mr, _baseline, _weights, 0)) if _baseline > 0 else 0
+        # the fit-check charges the attention workspace too (FlashInfer: 256 MiB)
+        _workspace = fixed_workspace_bytes(getattr(cfg, "attention_backend", "") or "")
+        meta["cache_budget_bytes"] = (
+            max(0, _net_budget(_mr, _baseline, _weights, 0, _workspace)) if _baseline > 0 else 0
+        )
     except Exception:  # noqa: BLE001 -- best-effort; readiness must not depend on this
         meta["cache_budget_bytes"] = 0
     return meta

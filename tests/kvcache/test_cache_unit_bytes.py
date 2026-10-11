@@ -248,6 +248,16 @@ def test_status_meta_reports_post_weights_baseline():
     assert meta["free_vram_bytes"] == 6 * 2 ** 30
 
 
+@pytest.mark.parametrize(("backend", "workspace"), [("triton", 0), ("fi", 256 << 20), ("fi,trtllm", 384 << 20)])
+def test_status_budget_charges_the_attention_workspace_like_the_rebuild_check(backend, workspace):
+    # the sliders' ceiling must not offer bytes every rebuild rejects
+    eng = _mha_engine()
+    eng.config = SimpleNamespace(**{**vars(_config()), "memory_ratio": 0.9, "attention_backend": backend})
+    eng._baseline_free, eng._weights_bytes = 20 << 30, 4 << 30
+    meta = compute_cache_status_meta(eng)
+    assert meta["cache_budget_bytes"] == int(0.9 * (20 << 30)) - (4 << 30) - workspace
+
+
 def test_compute_cache_pools_reads_load_time_allocations():
     from freetoken.kvcache.cache_status import compute_cache_pools
 
