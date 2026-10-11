@@ -24,6 +24,9 @@ feature branch from `main` (see the branch layout in the fork notes) once we dec
 | sm_89 tile config for the NVFP4 MoE prefill GEMM, from 1k tokens | 00563b2 (+ M >= 1024 gate on the branch) | **Ready** as branch `perf/nvfp4-prefill-tile-sm89` (pushed 2026-10-11); see below |
 | Cache budget charges the attention workspace | 64d60f5 | Suggest on #562 (open): needs its `fixed_workspace_bytes`; local branch `fix/cache-budget-workspace` |
 | NVFP4 prefill: one dot over joined B rows (triton 3.8) | 2109089 | Suggest on #578 (open, conflicts with main since #630/#653); local branch `perf/nvfp4-prefill-sm89` |
+| CUDA graph at the batch-size cap (5 parallel requests ran eager) | 9abc8538 | Candidate, applies to upstream main as is; see below |
+| GLM-4.5-Air NVFP4: bf16 dense-MLP / shared-expert projections from `ignore` | 5c9105c6 | Suggest on #430 (compressed-tensors GLM loading, needed for this checkpoint) |
+| Dense llama.cpp GGUFs: llama (Llama 3, Mistral), qwen2, qwen3 | 0b59b5eb | Candidate; needs a port (main lacks next's GGUF expert/tokenizer additions); see below |
 
 ## Load dense Gemma-4 GGUFs end to end
 
@@ -229,3 +232,22 @@ the ungated config. PR description draft:
 End-to-end prefill on main is dominated by offload expert streaming (Qwen3.6 4.2k: ~5300 tok/s
 both), so the kernel numbers are the meaningful ones; with the preloaded slot cache (fix/moe-ttft)
 the gain shows end to end.
+
+## CUDA graph at the batch-size cap (9abc8538)
+
+`_determine_cuda_graph_bs` offers 1, 2, 4 and multiples of 8 up to the cap, and the engine clamps
+the cap to --max-running-requests. With 3, 5, 6, 7, 9..15 requests the full batch had no graph and
+decoded eager. Qwen3-0.6B, 5 parallel chats on the RTX 4090: 525 -> ~2770 tok/s total. Fix: the
+cap always gets its own graph (+ test). Applies to upstream main unchanged.
+
+## Dense llama.cpp GGUFs (0b59b5eb)
+
+New `models/gguf/dense.py` for archs llama / qwen2 / qwen3 on the HF classes: llama q/k rows
+un-permuted on the packed bytes, Llama 3 `rope_freqs` as a `freq_factors` rope type (fp32),
+qwen2 fused qkv bias (also on mixed-type fused projections). Tokenizer fixes: Llama 3 byte-level
+BPE via the gpt2 converter + llama-bpe split + BOS; SentencePiece llama prefix-space only at the
+text start; control tokens kept atomic. Encode / chat / decode equal the HF tokenizer.json for
+Llama-3.2-1B, Mistral-7B-v0.3, Qwen2.5-1.5B, Qwen3-0.6B. Decode vs bf16 HF on the 4090:
+Llama-1B Q4_0 718 vs 313, Mistral-7B Q4_K_M 171 vs 61, Qwen2.5-1.5B Q4_K_M 497 vs 246.
+Known left: a Mistral GGUF picks the llama3 tool parser (the registry key is per GGUF arch);
+the Gemma-4 GGUF tokenizer differs from tokenizer.json on some Unicode/long texts (pre-existing).
