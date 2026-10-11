@@ -147,3 +147,35 @@ def test_qwen35moe_gguf_tokenizer_uses_the_qwen35_split_and_im_end(monkeypatch):
     # U+0915 U+093F: a letter and its combining vowel sign stay one pre-token (qwen2's split cuts them)
     pieces = [p for p, _ in backend.pre_tokenizer.pre_tokenize_str("\u0915\u093f x")]
     assert len(pieces) == 2
+
+
+def test_qwen3moe_gguf_tokenizer_builds_the_qwen2_bpe_and_stops_on_im_end(monkeypatch):
+    """transformers has no qwen3moe converter key (only qwen3_moe); the qwen2 one builds the same BPE."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+
+    import freetoken.models.gguf.tokenizer as gguf_tokenizer
+
+    tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "a", "b"]
+    metadata = {
+        "tokenizer.ggml.tokens": tokens,
+        "tokenizer.ggml.token_type": [3, 3, 3, 1, 1],
+        "tokenizer.ggml.pre": "qwen2",
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 0,
+    }
+    backend = Tokenizer(WordLevel(vocab={t: i for i, t in enumerate(tokens)}, unk_token="a"))
+    backend.pre_tokenizer = Whitespace()
+    seen = []
+    monkeypatch.setattr(gguf_tokenizer, "load_gguf_metadata", lambda _path: metadata)
+    monkeypatch.setattr(gguf_tokenizer, "gguf_architecture", lambda _path: "qwen3moe")
+    monkeypatch.setattr(
+        "transformers.integrations.ggml.convert_gguf_tokenizer",
+        lambda arch, _tok: seen.append(arch) or (backend, {}),
+    )
+    tokenizer = gguf_tokenizer.load_gguf_tokenizer("qwen3.gguf")
+
+    assert seen == ["qwen2"]
+    assert tokenizer.eos_token == "<|im_end|>"
+    assert gguf_tokenizer.gguf_eos_token_ids("qwen3.gguf", tokenizer) == {0, 2}

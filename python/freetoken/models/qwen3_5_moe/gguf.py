@@ -32,13 +32,15 @@ from freetoken.models.config import (
     ModelConfig,
     RotaryConfig,
 )
-from freetoken.models.gguf.dequant import dequantize, row_bytes
+from freetoken.models.gguf.dequant import dequantize
+from freetoken.models.gguf.experts import (
+    SPLIT_EXPERT_SUFFIXES,
+    load_split_gguf_expert_sources,
+    split_expert_quant_layout,
+)
 
 if TYPE_CHECKING:
     from freetoken.models.gguf.config import GgufConfigShim
-
-# Routed experts: [E, rows, row_bytes] stacks read by the bank loader, not iter_gguf_weights.
-_EXPERT_SUFFIXES = ("ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight")
 
 
 def _require_tp1(what: str) -> None:
@@ -49,46 +51,6 @@ def _require_tp1(what: str) -> None:
             f"qwen35moe GGUF {what} supports TP=1 only "
             "(GGUF quant layers and expert banks are not tensor-parallel sharded)"
         )
-
-
-def _quant_layout(model_path: str, num_layers: int, hidden: int, moe_inter: int) -> dict:
-    """ggml type of every non-expert tensor plus the per-layer routed-expert types and slot bytes."""
-    from freetoken.models.gguf.reader import iter_gguf_tensors
-
-    tensors: dict[str, int] = {}
-    experts: dict[str, list[int | None]] = {sfx: [None] * num_layers for sfx in _EXPERT_SUFFIXES}
-    for t in iter_gguf_tensors(model_path):
-        if t.name.startswith("blk."):
-            layer = int(t.name.split(".")[1])
-            suffix = t.name.split(".", 2)[2]
-            if layer >= num_layers:
-                continue  # NextN / MTP block
-            if suffix in experts:
-                experts[suffix][layer] = t.ggml_type
-                continue
-        tensors[t.name] = t.ggml_type
-    if not tensors:
-        raise NotImplementedError(
-            f"{model_path}: no GGUF tensor table (a converted FTW dir?); serve the .gguf file directly"
-        )
-    missing = {sfx: [i for i, v in enumerate(types) if v is None] for sfx, types in experts.items()}
-    missing = {sfx: ids for sfx, ids in missing.items() if ids}
-    if missing:
-        raise ValueError(f"qwen35moe GGUF routed-expert tensors missing: {missing}")
-    gate, up, down = (tuple(experts[sfx]) for sfx in _EXPERT_SUFFIXES)
-    split = [i for i in range(num_layers) if gate[i] != up[i]]
-    if split:
-        raise NotImplementedError(
-            f"qwen35moe GGUF: ffn_gate_exps and ffn_up_exps differ in ggml type in layers {split}; "
-            "the fused gate_up expert bank needs one type per layer"
-        )
-    return {
-        "tensors": tensors,
-        "expert_gate_up": gate,
-        "expert_down": down,
-        "expert_gate_up_bytes": tuple(2 * moe_inter * row_bytes(hidden, t) for t in gate),
-        "expert_down_bytes": tuple(hidden * row_bytes(moe_inter, t) for t in down),
-    }
 
 
 def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
@@ -170,7 +132,7 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
         # the GGUF expert provider's tag; gguf_quant_types records the real per-layer types
         expert_quant="q4_0",
         moe_weight_format="q4_0",
-        gguf_quant_types=_quant_layout(shim.model_path, num_layers, hidden, moe_inter),
+        gguf_quant_types=split_expert_quant_layout(shim.model_path, num_layers, hidden, moe_inter, arch),
     )
 
 
@@ -340,7 +302,7 @@ def iter_gguf_weights(
             raise ValueError(f"unmapped qwen35moe GGUF tensor: {name}")
         layer = int(name.split(".")[1])
         suffix = name.split(".", 2)[2]
-        if layer >= config.num_layers or suffix in _EXPERT_SUFFIXES:
+        if layer >= config.num_layers or suffix in SPLIT_EXPERT_SUFFIXES:
             continue  # NextN / MTP block (not served), routed experts (banks)
         base = f"model.layers.{layer}"
 
@@ -388,64 +350,9 @@ def iter_gguf_weights(
 
 
 def load_q4_0_expert_sources(model_path: str, config: ModelConfig, *, layer_sink=None) -> dict[str, list[torch.Tensor]]:
-    """Per-layer host banks of the routed experts' packed ggml bytes, verbatim from the file.
-
-    ``gate_up`` holds each expert's gate rows followed by its up rows (one GEMV computes
-    the fused ``[gate | up]`` the activation splits), ``down`` its down rows. A non-Q4_0
-    layout stores each expert as one fixed-width byte slot. ``layer_sink`` as in the
-    gemma4 loader (the converter; mixed layouts refuse it).
-    """
-    from freetoken.models.gguf.experts import gguf_expert_specs, uses_mixed_gguf_experts
-    from freetoken.models.gguf.reader import iter_gguf_tensors
-    from freetoken.moe.host_banks import LayerCompletionTracker, PinPipeline, alloc_layer_banks
-
+    """Per-layer host banks of the routed experts' packed ggml bytes (``load_split_gguf_expert_sources``)."""
     _require_tp1("expert banks")
-    L, E, H, I = config.num_layers, config.num_experts, config.hidden_size, config.moe_intermediate_size
-    mixed = uses_mixed_gguf_experts(config)
-    if mixed and layer_sink is not None:
-        raise NotImplementedError(
-            "converting non-Q4_0 GGUF expert banks to FTW is not supported; serve the source GGUF directly"
-        )
-    hb = alloc_layer_banks(gguf_expert_specs(config), L)
-    banks = {name: [b.tensor for b in hb[name]] for name in hb}
-    seen: dict[str, set[int]] = {sfx: set() for sfx in _EXPERT_SUFFIXES}
-
-    def _place(t) -> int | None:
-        if not t.name.startswith("blk."):
-            return None
-        layer, suffix = int(t.name.split(".")[1]), t.name.split(".", 2)[2]
-        if suffix not in seen or layer >= L:
-            return None
-        packed = t.packed().reshape(E, -1)
-        width = packed.shape[1]
-        if suffix == "ffn_down_exps.weight":
-            dst = banks["down"][layer].view(E, -1)[:, :width]
-        else:
-            # gate and up share a type (checked in _quant_layout), so up starts one gate width in
-            start = width if suffix == "ffn_up_exps.weight" else 0
-            dst = banks["gate_up"][layer].view(E, -1)[:, start : start + width]
-        dst.copy_(packed)
-        seen[suffix].add(layer)
-        return layer
-
-    def _load(sink) -> None:
-        tracker = LayerCompletionTracker(3, hb, sink) if sink is not None else None  # gate + up + down
-        for t in iter_gguf_tensors(model_path):
-            layer = _place(t)
-            if layer is not None and tracker is not None:
-                tracker.note(layer)
-
-    if layer_sink is not None:
-        _load(layer_sink)
-    elif torch.cuda.is_available():
-        with PinPipeline() as pins:
-            _load(pins)
-    else:
-        _load(None)
-
-    missing = {sfx: sorted(set(range(L)) - got) for sfx, got in seen.items() if got != set(range(L))}
-    assert not missing, f"missing GGUF expert layers: {missing}"
-    return banks
+    return load_split_gguf_expert_sources(model_path, config, layer_sink=layer_sink)
 
 
 def dummy_q4_0_expert_sources(config: ModelConfig) -> dict[str, list[torch.Tensor]]:

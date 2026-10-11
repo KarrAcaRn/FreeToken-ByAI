@@ -320,7 +320,8 @@ def _meta_state_dict(folder: str) -> dict[str, torch.Tensor]:
     from freetoken.models import create_model
     from freetoken.utils.torch_utils import torch_dtype
 
-    strategy = "offload" if cached_load_hf_config(folder).architectures[0].startswith("Qwen3_5Moe") else "auto"
+    arch = cached_load_hf_config(folder).architectures[0]
+    strategy = "offload" if arch.startswith("Qwen3_5Moe") or "GGUF" in arch else "auto"
     config = EngineConfig(model_path=folder, tp_info=try_get_tp_info(), dtype=torch.bfloat16, moe_strategy=strategy,
                           mm=MultimodalConfig(disabled_encoders=frozenset(ENCODER_KINDS)))
     object.__setattr__(config.model_config, "moe_strategy", strategy)
