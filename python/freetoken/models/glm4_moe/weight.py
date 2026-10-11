@@ -109,6 +109,16 @@ def _iter_nvfp4_resident(
         yield f"{dst_prefix}.input_scale", reader.get(f"{src_prefix}.input_scale").reshape(()).to(torch.float32)
 
 
+def _iter_resident_linear(reader: _ShardReader, prefix: str) -> Iterator[tuple[str, torch.Tensor]]:
+    """A dense-MLP / shared-expert projection: native NVFP4 when the checkpoint quantized it,
+    bf16 when the export lists it under ``ignore`` (gesong2077/GLM-4.5-Air-NVFP4 keeps them all
+    bf16), matching the Linear the quant config built for that name."""
+    if reader.has(f"{prefix}.weight_scale"):
+        yield from _iter_nvfp4_resident(reader, prefix, prefix)
+    else:
+        yield f"{prefix}.weight", reader.get(f"{prefix}.weight").to(torch.bfloat16)
+
+
 def _iter_attn_df11(
     reader: _ShardReader, prefix: str, device: torch.device
 ) -> Iterator[tuple[str, torch.Tensor]]:
@@ -134,7 +144,7 @@ def iter_weights(
 
     - qkvo: lossless DF11 (+ bf16 .bias) so the ~25GB of bf16 attention fits a 32 GB VRAM target.
     - leading dense MLP layers + each MoE layer's shared expert: native NVFP4 (dequant in
-      forward), faithful and smallest footprint.
+      forward) where the checkpoint quantized them, else bf16.
     - embedding: row-contiguous DF11, decode only looked-up rows. router gate (+
       e_score_correction_bias), norms, lm_head pass through.
     - MTP layer (index num_layers) and routed experts are skipped.
@@ -182,9 +192,9 @@ def _iter_resident_weights(reader, config, primary) -> Iterator[tuple[str, torch
 
         m = f"model.layers.{layer}.mlp"
         if layer < dense:
-            # dense SwiGLU MLP as native NVFP4, separate gate/up/down.
+            # dense SwiGLU MLP, separate gate/up/down.
             for proj in ("gate_proj", "up_proj", "down_proj"):
-                yield from _iter_nvfp4_resident(reader, f"{m}.{proj}", f"{m}.{proj}")
+                yield from _iter_resident_linear(reader, f"{m}.{proj}")
         else:
             # router (bf16 gate + fp32 selection bias) and shared expert.
             yield f"{m}.gate.weight", reader.get(f"{m}.gate.weight")
@@ -194,7 +204,7 @@ def _iter_resident_weights(reader, config, primary) -> Iterator[tuple[str, torch
             )
             s = f"{m}.shared_experts"
             for proj in ("gate_proj", "up_proj", "down_proj"):
-                yield from _iter_nvfp4_resident(reader, f"{s}.{proj}", f"{s}.{proj}")
+                yield from _iter_resident_linear(reader, f"{s}.{proj}")
 
     # bf16 embedding -> row-contiguous DF11 (~30% smaller), decode only looked-up rows.
     embed = reader.get("model.embed_tokens.weight").to(torch.bfloat16)
