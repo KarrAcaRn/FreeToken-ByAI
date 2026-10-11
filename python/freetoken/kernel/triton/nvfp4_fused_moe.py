@@ -318,6 +318,7 @@ def _prefill_nvfp4_moe_kernel(
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
     EVEN_K: tl.constexpr,
+    JOIN_B: tl.constexpr = False,
 ):
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
@@ -369,9 +370,15 @@ def _prefill_nvfp4_moe_kernel(
         else:
             k_mask = kb * 2 * BLOCK_SIZE_KB + offs_k < K
             a = tl.load(a_ptrs, mask=token_mask[:, None] & k_mask[None, :], other=0.0)
-        a_lo, a_hi = tl.split(tl.reshape(a, (BLOCK_SIZE_M, BLOCK_SIZE_KB, 2)))
-        accumulator += tl.dot(a_lo, b_lo)
-        accumulator += tl.dot(a_hi, b_hi)
+        if JOIN_B:
+            # triton >= 3.8 routes tl.split of a through shared memory twice; interleaving
+            # the B rows (lo nibble = even k) lets one dot take a as loaded
+            b = tl.reshape(tl.permute(tl.join(b_lo, b_hi), (0, 2, 1)), (2 * BLOCK_SIZE_KB, BLOCK_SIZE_N))
+            accumulator += tl.dot(a, b)
+        else:
+            a_lo, a_hi = tl.split(tl.reshape(a, (BLOCK_SIZE_M, BLOCK_SIZE_KB, 2)))
+            accumulator += tl.dot(a_lo, b_lo)
+            accumulator += tl.dot(a_hi, b_hi)
         a_ptrs += BLOCK_SIZE_KB * 2 * stride_ak
 
     # the placement's 2^-14 and the scale's 2^7 leave the products 2^-7 short

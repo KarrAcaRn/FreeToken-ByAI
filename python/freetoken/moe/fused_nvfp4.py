@@ -233,7 +233,7 @@ def fused_experts_decode_nvfp4_serial(
     )
 
 
-def _prefill_config(M: int) -> Dict[str, int]:
+def _prefill_config(M: int, rows_per_expert: float = 0.0) -> Dict[str, int]:
     # ``BLOCK_SIZE_M`` is coupled to host-side ``moe_align_block_size`` (token padding),
     # so it cannot be picked by triton.autotune; these were chosen by an offline sweep
     # over (BLOCK_M, BLOCK_N, BLOCK_KB, num_warps, num_stages) for the MiniMax-M2 shapes.
@@ -242,6 +242,10 @@ def _prefill_config(M: int) -> Dict[str, int]:
                     GROUP_SIZE_M=1, num_warps=8, num_stages=4)
     sm89 = _sm89_prefill_config()
     if sm89 is not None:
+        if sm89["BLOCK_SIZE_N"] == 128 and rows_per_expert >= 80:
+            # triton >= 3.8, compute bound: half-width byte tiles and one dot over the joined
+            # B rows; below ~80 rows per expert the GEMMs load weights and KB 32 stays ahead
+            return dict(sm89, BLOCK_SIZE_KB=16, JOIN_B=True)
         return dict(sm89)
     return dict(BLOCK_SIZE_M=32, BLOCK_SIZE_N=64, BLOCK_SIZE_KB=32,
                 GROUP_SIZE_M=8, num_warps=8, num_stages=4)
@@ -276,6 +280,8 @@ def _prefill_gemm(
     mul_routed_weight: bool,
     cfg: Dict[str, Any],
 ) -> None:
+    cfg = dict(cfg)
+    join_b = cfg.pop("JOIN_B", False)
     N = packed.shape[1]
     K = packed.shape[2] * 2
     EM = sorted_ids.shape[0]
@@ -297,6 +303,7 @@ def _prefill_gemm(
         top_k=kernel_top_k,
         compute_type=_tl_dtype(c.dtype),
         EVEN_K=(K // 2) % cfg["BLOCK_SIZE_KB"] == 0,
+        JOIN_B=join_b,
         **cfg,
     )
 
@@ -325,7 +332,7 @@ def fused_experts_nvfp4(
     two_i = gate_up_packed.shape[1]
     inter = two_i // 2
     dev, dt = hidden_states.device, hidden_states.dtype
-    cfg = _prefill_config(M)
+    cfg = _prefill_config(M, M * top_k / num_experts)
 
     sorted_ids, expert_ids, ntpp = moe_align_block_size(topk_ids, cfg["BLOCK_SIZE_M"], num_experts)
     tw = topk_weights.reshape(-1).contiguous()

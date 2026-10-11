@@ -374,10 +374,18 @@ def test_triton_prefill_dequant_reads_every_code_and_scale_exactly():
     [(H, I, 96), (272, 80, 96)],
     ids=["tiled-k", "k-not-a-tile-multiple"],
 )
-def test_triton_prefill_large_batch_matches_dequant_reference(hidden, inter, tokens):
+@pytest.mark.parametrize("join_b", [False, True], ids=["split-a", "join-b"])
+def test_triton_prefill_large_batch_matches_dequant_reference(hidden, inter, tokens, join_b, monkeypatch):
     """A batch past the small-batch tile (> 64 tokens) through the Triton prefill grouped GEMM,
-    at a K the byte tile divides and at one it does not (272 and 80 leave 8 bytes over)."""
+    at a K the byte tile divides and at one it does not (272 and 80 leave 8 bytes over), with
+    a split per dot and with the joined B rows of one dot (the triton >= 3.8 sm_89 path)."""
+    from freetoken.moe import fused_nvfp4
     from freetoken.moe.fused_nvfp4 import fused_experts_nvfp4
+
+    if join_b:
+        cfg = dict(BLOCK_SIZE_M=64, BLOCK_SIZE_N=128, BLOCK_SIZE_KB=16, GROUP_SIZE_M=8,
+                   num_warps=4, num_stages=3, JOIN_B=True)
+        monkeypatch.setattr(fused_nvfp4, "_prefill_config", lambda *_: dict(cfg))
 
     device = torch.device("cuda")
     sources = _make_native_sources(device, seed=13, hidden=hidden, inter=inter)
@@ -604,3 +612,15 @@ def test_b12x_pack_keeps_per_layer_banks_and_flat_alphas():
     assert len(cache.bank_sources["gate_up"]) == L
     assert sum(t.shape[0] for t in cache.bank_sources["gate_up"]) == total
     assert cache.gate_up_alpha.shape == (total,)
+
+
+def test_prefill_config_joins_b_only_when_compute_bound_on_new_triton(monkeypatch):
+    from freetoken.moe import fused_nvfp4
+
+    old = dict(BLOCK_SIZE_M=64, BLOCK_SIZE_N=64, BLOCK_SIZE_KB=32, GROUP_SIZE_M=8, num_warps=4, num_stages=3)
+    new = dict(old, BLOCK_SIZE_N=128)
+    monkeypatch.setattr(fused_nvfp4, "_sm89_prefill_config", lambda: new)
+    assert fused_nvfp4._prefill_config(4096, 128.0) == dict(new, BLOCK_SIZE_KB=16, JOIN_B=True)
+    assert fused_nvfp4._prefill_config(1024, 32.0) == new
+    monkeypatch.setattr(fused_nvfp4, "_sm89_prefill_config", lambda: old)
+    assert "JOIN_B" not in fused_nvfp4._prefill_config(4096, 128.0)
