@@ -241,7 +241,9 @@ def _determine_cuda_graph_bs(
         return []
 
     candidates = [1, 2, 4] + list(range(8, cuda_graph_max_bs + 1, 8))
-    return [bs for bs in candidates if bs <= cuda_graph_max_bs]
+    # the cap itself too: --max-running-requests clamps it, and a full batch of 5 (or 3, 6, ...)
+    # above the last candidate would otherwise run eager
+    return sorted({bs for bs in candidates if bs <= cuda_graph_max_bs} | {cuda_graph_max_bs})
 
 
 def get_free_memory(device: torch.device) -> int:
