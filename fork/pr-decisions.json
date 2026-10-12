@@ -3076,13 +3076,13 @@
   "657": {
     "number": 657,
     "title": "feat(models): add bounded encoder swa replay behind --swa-encoder-replay",
-    "head_sha": "5b2f3c05675a",
-    "reviewed_at": "2026-10-10",
+    "head_sha": "39e9e6a54247",
+    "reviewed_at": "2026-10-12",
     "decision": "deferred",
     "revisit": "after-queue",
     "commits": [],
     "gpu_untested": true,
-    "reason": "DeepSeek-V4.1 encoder SWA replay (on by default: bounded). Not judged on its merits yet: V4.1 is far too large for this machine and the author could not run a real checkpoint either; it also changes shared scheduler/SWA radix code (cache.py, prefill.py, swa_radix_cache.py) that needs careful review against next's SWA changes (#488, #651).",
+    "reason": "DeepSeek-V4.1 encoder SWA replay (on by default: bounded). Not judged on its merits yet: V4.1 is far too large for this machine and the author could not run a real checkpoint either; it also changes shared scheduler/SWA radix code (cache.py, prefill.py, swa_radix_cache.py) that needs careful review against next's SWA changes (#488, #651). 2026-10-12: head moved (39e9e6a: in bounded mode SWA eviction tombstones a free leaf in place and keeps its full KV for replay). Only active with the V4.1 bounded replay mode, so the blocker is unchanged; deferred again.",
     "summary": "DeepSeek-V4.1 encoder SWA replay; model cannot run here, touches shared SWA scheduler code, not judged yet",
     "authors": [
       "Mukkesh Ganesh <mukmckenzie@gmail.com>"
