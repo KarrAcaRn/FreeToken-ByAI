@@ -134,7 +134,7 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--kv-reserve-share` | 0.1 | Share of the cache budget `--moe-cache-auto` keeps for KV, capped at the model context; 0 gives the experts everything but `--kv-reserve-tokens` |
 | `--enable-kv-ladder` | off | With `--moe-cache-auto --max-running-requests 1`: start KV at 2x `--ladder-step-size`, then grow in one-step rungs before requests that could reach the current bound; MoE slots shrink to keep the same VRAM budget, up to the model context limit |
 | `--moe-cpu-threads` | physical cores - 2 | CPU worker threads for the cpu/hybrid executor (auto leaves one core to the engine thread and one to the GPU handshake coordinator) |
-| `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, nvfp4, mxfp4), so fp8 experts cannot use it |
+| `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, fp8_block, nvfp4, mxfp4) |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--disable-moe-prefill-hit-d2d` | hit-D2D on | Stream all of a prefill's experts over PCIe instead of copying the cache-resident ones device-side (the split needs CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |

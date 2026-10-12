@@ -26,7 +26,6 @@ from freetoken.layers import set_rope_device
 from freetoken.layers.quantization import (
     CompressedTensorsConfig,
     Fp8BlockConfig,
-    KernelSelectionError,
     ModelOptConfig,
     Mxfp4Config,
     NoQuantConfig,

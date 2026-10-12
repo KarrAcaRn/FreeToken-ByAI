@@ -72,3 +72,23 @@ def test_fp8_block_moe_epilogues_match_the_reference(activation, alpha, limit):
     # W8A8 prefill quantizes the activations per 128-group, so the tolerance is the fp8 activation error
     assert torch.nn.functional.cosine_similarity(prefill.flatten(), ref.flatten(), dim=0) > 0.99
     assert (prefill - ref).abs().max() <= 8e-2 * ref.abs().max() + 1e-3
+
+
+def test_fp8_block_decode_skips_negative_slots():
+    from freetoken.kernel.triton.fp8_blockscale_moe import fused_experts_decode_fp8_blockscale
+
+    gate_up, gate_up_scale, down, down_scale = _experts()
+    w, ids = _routing()
+    x = torch.randn(M, H, device="cuda", dtype=torch.bfloat16)
+    # hybrid decode hands CPU-assigned routes to the GPU as slot -1; they must add nothing
+    inactive = torch.zeros_like(ids, dtype=torch.bool)
+    inactive[::2, 0] = True
+    inactive[1::2, 1] = True
+    full = fused_experts_decode_fp8_blockscale(x, gate_up, gate_up_scale, down, down_scale, w, ids)
+    masked_w = torch.where(inactive, 0.0, w)
+    expect = fused_experts_decode_fp8_blockscale(x, gate_up, gate_up_scale, down, down_scale, masked_w, ids)
+    got = fused_experts_decode_fp8_blockscale(
+        x, gate_up, gate_up_scale, down, down_scale, w, torch.where(inactive, -1, ids)
+    )
+    assert not torch.equal(full, expect)
+    torch.testing.assert_close(got, expect, rtol=0, atol=0)

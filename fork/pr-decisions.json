@@ -584,7 +584,8 @@
       "taking-lying-flat <1615405@qq.com>"
     ],
     "summary": "API accepted presence/frequency penalties but ignored them; they are now applied",
-    "fixup": "Counts rebuilt each step from generated tokens (overlap-safe), [-2, 2] enforced with 400, tests"
+    "fixup": "Counts rebuilt each step from generated tokens (overlap-safe), [-2, 2] enforced with 400, tests",
+    "upstream": "merged"
   },
   "525": {
     "number": 525,
@@ -601,7 +602,8 @@
     ],
     "revisit_with": 499,
     "revisit": "after-queue",
-    "summary": "Stacked on #499"
+    "summary": "Stacked on #499",
+    "upstream": "closed"
   },
   "507": {
     "number": 507,
@@ -818,7 +820,8 @@
     "authors": [
       "alvarorsouza-arch <alvaro.r.souza@gmail.com>"
     ],
-    "summary": "Host-RAM KV tier works, but on 24 GB plain fp8 KV reaches the 262k cap and is faster (150k: 103 s vs 156 s); not adopted"
+    "summary": "Host-RAM KV tier works, but on 24 GB plain fp8 KV reaches the 262k cap and is faster (150k: 103 s vs 156 s); not adopted",
+    "upstream": "closed"
   },
   "502": {
     "number": 502,
@@ -1293,7 +1296,9 @@
       "ChenyuHe <hechenyu@zju.edu.cn>"
     ],
     "summary": "Adds block-FP8 CPU expert GEMV (from #36) with padded scale strides, an avx512f tier and float64 parity tests",
-    "fixup": "Wires the fp8 kernel to the CPU executor (cpu_format, cpu_ok): after #418 cpu/hybrid refused every FP8 MoE, so the new GEMV was unreachable; checked on real Qwen3.6-35B-A3B-FP8 experts"
+    "fixup": "Wires the fp8 kernel to the CPU executor (cpu_format, cpu_ok): after #418 cpu/hybrid refused every FP8 MoE, so the new GEMV was unreachable; checked on real Qwen3.6-35B-A3B-FP8 experts",
+    "upstream": "closed",
+    "after_upstream_close": "Closed upstream because its commits landed in #662 (merged 2026-10-12, co-authored by the #399 author); the 2026-10-12 sync replaced next's #399 code with #662's version (4eb62615), nothing to revert."
   },
   "36": {
     "number": 36,
@@ -2722,17 +2727,18 @@
   },
   "378": {
     "number": 378,
-    "title": "fix(rocm): make CPU MoE graph replay safe [draft]",
-    "head_sha": "b395144d9bdb",
-    "reviewed_at": "2026-10-04",
+    "title": "fix(rocm): make CPU/Hybrid MoE graph replay safe",
+    "head_sha": "de45a143bbf1",
+    "reviewed_at": "2026-10-12",
     "decision": "deferred",
-    "reason": "Draft (ROCm): graph-replay safety for the CPU/hybrid MoE backends on ROCm. ROCm cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "revisit": "after-queue",
+    "reason": "Now ready (no longer draft), rebased on main 95ac86f. ROCm fix for #350: probes the HIP stream-memop handshake under real graph capture/replay, uses HIP signal memory and explicit batch-memop graph nodes, disables CUDA graphs for CPU/hybrid when the probe fails, agrees across TP ranks. 1236 lines incl. engine.py and a large cpu_moe_ext.cpp change. Overlaps next's own ROCm memop path (c3621710: hipmemops_graph_probe), so adopting it means reconciling both. ROCm cannot be run here; not judged on its merits yet.",
     "commits": [],
     "gpu_untested": true,
     "authors": [
       "zihaomu <zihaomu@outlook.com>"
     ],
-    "summary": "Draft - revisit when ready; ROCm cannot be tested here"
+    "summary": "ROCm: make CPU/hybrid MoE graph replay safe (probe + HIP signal memory); ROCm cannot be tested here, overlaps our ROCm memop probe"
   },
   "293": {
     "number": 293,
@@ -3173,5 +3179,23 @@
     ],
     "reason": "Draft: expert-only GSQ Q2_0 GGUF source for Qwen3.8-Flash-Next (64-weight/18-byte blocks, Triton vector kernel, offload cache only), HF trunk kept; the author asks for maintainer feedback on the external-source contract. Deferred while it is a draft: the queue re-lists it once its head moves. Flash-Next runs here (next-speed), so it is testable once ready: the Q2 experts are ~34 GB and fit in RAM.",
     "summary": "Draft - revisit when ready; GSQ Q2_0 experts for Flash-Next, testable here once ready"
+  },
+  "665": {
+    "number": 665,
+    "title": "perf(moe): skip inactive block-fp8 decode routes",
+    "head_sha": "fd97636d4d3b",
+    "reviewed_at": "2026-10-12",
+    "decision": "adopted-with-fixups",
+    "reason": "Hybrid decode hands CPU-assigned routes to the GPU as slot -1 with weight 0; the block-fp8 Triton decode kernel read slot 0 for them (clamp) and did the full GEMV for nothing. The PR stores zeros and returns early for slot < 0 and sets supports_inactive_slots, as mxfp4 already does. Our follow-up adds a GPU test (negative slots add nothing even with a nonzero weight; bit-exact vs zeroed weights; fails before the PR). Qwen3.6-35B-A3B-FP8 hybrid at 10% expert cache on the RTX 4090: decode 41.4/42.7 vs 42.1/41.1 tok/s without the PR (CPU-bound here, so no measurable gain), prefill ~3120, same answers.",
+    "commits": [
+      "0c6c0a79",
+      "cc3df117"
+    ],
+    "gpu_untested": false,
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ],
+    "summary": "Block-fp8 GPU decode skips the routes hybrid decode hands to the CPU instead of computing them with weight 0",
+    "fixup": "GPU test that negative slots add nothing (fails before the PR)"
   }
 }
