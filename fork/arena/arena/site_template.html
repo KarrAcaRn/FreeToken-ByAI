@@ -1,0 +1,320 @@
+<title>KI-Prüfstand</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: test-bench sheet - header with run facts, leaderboard, task matrix, detail drawer, task catalogue. */
+:root {
+  --bg: #f3f5f4;
+  --panel: #ffffff;
+  --ink: #18201d;
+  --muted: #5b6862;
+  --line: #d6ddd9;
+  --accent: #a8510d;
+  --accent-soft: #f6e6d6;
+  --pass: #1d7a46;
+  --pass-bg: #dcefe3;
+  --fail: #b3261e;
+  --fail-bg: #f8dedb;
+  --skip: #7d8782;
+  --skip-bg: #e8ecea;
+  --warn-bg: #fbefc9;
+  --warn: #7a5a00;
+  --f-display: "Barlow Semi Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121715; --panel: #1a211e; --ink: #e4ebe7; --muted: #95a39c; --line: #2c3632;
+    --accent: #e39a52; --accent-soft: #3a2a1b; --pass: #6fd39b; --pass-bg: #173826; --fail: #f08a80;
+    --fail-bg: #43201d; --skip: #8d9893; --skip-bg: #232b28; --warn-bg: #3a3215; --warn: #e8c766;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121715; --panel: #1a211e; --ink: #e4ebe7; --muted: #95a39c; --line: #2c3632;
+  --accent: #e39a52; --accent-soft: #3a2a1b; --pass: #6fd39b; --pass-bg: #173826; --fail: #f08a80;
+  --fail-bg: #43201d; --skip: #8d9893; --skip-bg: #232b28; --warn-bg: #3a3215; --warn: #e8c766;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font: 400 15px/1.5 var(--f-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 64px;
+}
+.wrap { max-width: 1240px; margin: 0 auto; display: grid; gap: 36px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; line-height: 1.1; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.6rem; font-weight: 600; }
+h3 { font-size: 1.15rem; font-weight: 600; }
+.eyebrow { font: 600 0.72rem/1 var(--f-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); }
+.muted { color: var(--muted); }
+.mono, .num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+header { display: grid; gap: 14px; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 0.9rem; }
+.facts b { font-family: var(--f-mono); font-weight: 600; }
+.banner { background: var(--warn-bg); color: var(--warn); padding: 10px 14px; border-radius: 6px; font-weight: 600; }
+section { display: grid; gap: 14px; min-width: 0; }
+.sec-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  font: 600 0.85rem/1 var(--f-body); padding: 7px 12px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip:focus-visible, button:focus-visible, td.cell:focus-visible, th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+th { font: 600 0.72rem/1.2 var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); background: var(--panel); position: sticky; top: 0; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sorted { color: var(--accent); }
+td.r, th.r { text-align: right; }
+.model-name { font-weight: 600; }
+.group { font-size: 0.78rem; color: var(--muted); }
+.bar { display: inline-block; width: 70px; height: 6px; background: var(--skip-bg); border-radius: 3px; vertical-align: middle; margin-left: 8px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--pass); }
+.rank { font-family: var(--f-mono); color: var(--muted); width: 2.5em; }
+/* matrix */
+.matrix th.task { white-space: normal; min-width: 92px; max-width: 120px; vertical-align: bottom; text-transform: none; letter-spacing: 0; font: 600 0.78rem/1.25 var(--f-body); color: var(--ink); }
+.matrix th.cat { text-align: center; color: var(--accent); border-bottom: 2px solid var(--accent); }
+.matrix th.task .lvl { display: block; font: 400 0.68rem/1.4 var(--f-mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+td.cell { text-align: center; cursor: pointer; padding: 6px; }
+.pill { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; min-width: 70px; padding: 5px 6px; border-radius: 6px; font: 600 0.8rem/1.15 var(--f-mono); }
+.pill small { font-weight: 400; font-size: 0.68rem; opacity: 0.85; }
+.pill.pass { background: var(--pass-bg); color: var(--pass); }
+.pill.fail { background: var(--fail-bg); color: var(--fail); }
+.pill.skip, .pill.none { background: var(--skip-bg); color: var(--skip); }
+.pill.err { background: var(--warn-bg); color: var(--warn); }
+.pill.stale { outline: 1px dashed var(--muted); }
+td.cell.active .pill { outline: 2px solid var(--accent); }
+/* detail */
+#detail { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; display: grid; gap: 14px; }
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+.kv div { display: grid; gap: 2px; }
+.kv span { font: 600 0.68rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.kv b { font: 600 1.05rem/1.2 var(--f-mono); font-variant-numeric: tabular-nums; }
+pre { margin: 0; padding: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; overflow: auto; max-height: 420px; font: 0.8rem/1.45 var(--f-mono); white-space: pre-wrap; word-break: break-word; }
+.imgs { display: flex; flex-wrap: wrap; gap: 16px; }
+.imgs figure { margin: 0; display: grid; gap: 6px; }
+.imgs img { background: repeating-conic-gradient(var(--skip-bg) 0 25%, var(--panel) 0 50%) 0 0 / 16px 16px; border: 1px solid var(--line); border-radius: 4px; max-width: 100%; width: 240px; height: auto; }
+figcaption { font-size: 0.8rem; color: var(--muted); }
+.close { justify-self: start; }
+button { font: 600 0.85rem/1 var(--f-body); padding: 8px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+/* tasks */
+.tasks { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.task { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.task .meta { display: flex; gap: 8px; flex-wrap: wrap; font: 600 0.7rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.task .meta .c { color: var(--accent); }
+details summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.82rem; color: var(--muted); align-items: center; }
+.legend .pill { min-width: 0; }
+.method { max-width: 72ch; display: grid; gap: 8px; color: var(--muted); font-size: 0.92rem; }
+.empty { padding: 28px; text-align: center; color: var(--muted); background: var(--panel); border: 1px dashed var(--line); border-radius: 8px; }
+@media (max-width: 640px) { body { padding-block: 18px 40px; } .wrap { gap: 28px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">FreeToken · eigene Prüfaufgaben</span>
+    <h1>KI-Prüfstand</h1>
+    <p class="muted" style="margin:0;max-width:70ch">Alle lokal getesteten Modelle bekommen dieselben Aufgaben. Gemessen wird, ob die Aufgabe gelöst wurde, wie lange es dauerte, wie schnell das Modell Tokens erzeugt und wie viele Tokens es dafür brauchte.</p>
+    <div id="banner" class="banner" hidden></div>
+    <div class="facts" id="facts"></div>
+  </header>
+
+  <section>
+    <div class="sec-head">
+      <h2>Rangliste</h2>
+      <div class="chips" id="cats" role="group" aria-label="Kategorie"></div>
+    </div>
+    <div class="scroll"><table id="board"></table></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Ergebnisse je Aufgabe</h2>
+      <div class="legend">
+        <span class="pill pass">✓</span>gelöst
+        <span class="pill fail">✗</span>nicht gelöst
+        <span class="pill skip">–</span>nicht anwendbar
+        <span class="pill err">!</span>Fehler
+        <span class="pill none stale">?</span>veraltet
+      </div>
+    </div>
+    <p class="muted" style="margin:0">Feld anklicken für Messwerte, Prüfergebnis und die Antwort des Modells.</p>
+    <div class="scroll"><table class="matrix" id="matrix"></table></div>
+    <div id="detail" hidden></div>
+  </section>
+
+  <section>
+    <h2>Aufgaben</h2>
+    <div class="tasks" id="tasks"></div>
+  </section>
+
+  <section class="method">
+    <h2 style="color:var(--ink)">Messmethode</h2>
+    <p>Jede Aufgabe läuft einmal pro Modell mit Temperatur 0 über die OpenAI-kompatible Schnittstelle von <span class="mono">ft serve</span>, gestreamt und ohne parallele Anfragen. <b>Zeit</b> ist die Spanne von der Anfrage bis zum letzten Token. <b>tok/s</b> sind die erzeugten Tokens ab dem ersten Token geteilt durch die Zeit danach, also reine Erzeugungsgeschwindigkeit ohne Prefill. <b>Tokens</b> zählt alle erzeugten Tokens inklusive Denkphase (reasoning).</p>
+    <p>Programmieraufgaben werden in einer abgeschotteten Umgebung (bubblewrap, ohne Netz) gegen versteckte Tests ausgeführt. SVG-Bilder werden gerendert und pixelweise mit einer Referenz verglichen. Textaufgaben prüfen die letzte Zeile <span class="mono">ANTWORT:</span> auf die erwarteten Begriffe. Ändert sich eine Aufgabe, gelten alte Ergebnisse als veraltet und zählen nicht mehr in der Rangliste.</p>
+  </section>
+</div>
+
+<script id="data" type="application/json">/*DATA*/</script>
+<script>
+const D = JSON.parse(document.getElementById("data").textContent);
+const CAT = D.categories;
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmt = (v, d = 0) => v == null || Number.isNaN(v) ? "–" : Number(v).toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtS = (s) => s == null ? "–" : s < 60 ? fmt(s, 1) + " s" : fmt(s / 60, 1) + " min";
+const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+let cat = "all";
+try { cat = localStorage.getItem("arena-cat") || "all"; } catch (e) {}
+if (cat !== "all" && !CAT[cat]) cat = "all";
+let sortKey = "passed", sortDir = -1, active = null;
+
+const byTask = Object.fromEntries(D.tasks.map((t) => [t.id, t]));
+const res = {};
+for (const r of D.results) res[r.model + "|" + r.task] = r;
+const state = (r, t) => !r ? "none" : r.fingerprint !== t.fingerprint ? "stale" : r.status === "ok" ? (r.passed ? "pass" : "fail") : r.status === "skipped" ? "skip" : "err";
+
+function facts() {
+  const ok = D.results.filter((r) => r.status === "ok");
+  const last = D.results.map((r) => r.time).filter(Boolean).sort().pop();
+  const commits = [...new Set(D.results.map((r) => r.commit).filter(Boolean))];
+  $("#facts").innerHTML = [
+    ["Modelle", D.models.length], ["Aufgaben", D.tasks.length], ["Läufe", ok.length],
+    ["Letzter Lauf", last ? last.replace("T", " ").slice(0, 16) : "–"],
+    ["FreeToken", commits.length ? commits.join(", ") : "–"], ["Hardware", D.hardware || "–"],
+  ].map(([k, v]) => `<span>${k} <b>${esc(v)}</b></span>`).join("");
+  if (D.banner) { $("#banner").textContent = D.banner; $("#banner").hidden = false; }
+}
+
+function chips() {
+  const opts = [["all", "Alle"], ...Object.entries(CAT).filter(([k]) => D.tasks.some((t) => t.category === k))];
+  $("#cats").innerHTML = opts.map(([k, v]) => `<button class="chip" data-cat="${k}" aria-pressed="${k === cat}">${esc(v)}</button>`).join("");
+  $("#cats").onclick = (e) => {
+    const b = e.target.closest("[data-cat]"); if (!b) return;
+    cat = b.dataset.cat; try { localStorage.setItem("arena-cat", cat); } catch (e) {}
+    render();
+  };
+}
+
+function visibleTasks() { return D.tasks.filter((t) => cat === "all" || t.category === cat); }
+
+function stats(m) {
+  const ts = visibleTasks();
+  let passed = 0, tried = 0, score = 0, tok = 0, time = 0; const tps = [];
+  for (const t of ts) {
+    const r = res[m.id + "|" + t.id];
+    if (!r || r.fingerprint !== t.fingerprint || r.status !== "ok") continue;
+    tried++; passed += r.passed ? 1 : 0; score += r.score; tok += r.completion_tokens || 0; time += r.total_s || 0;
+    if (r.decode_tps) tps.push(r.decode_tps);
+  }
+  const applicable = ts.filter((t) => { const r = res[m.id + "|" + t.id]; return !(r && r.status === "skipped" && r.fingerprint === t.fingerprint); }).length;
+  return { passed, tried, applicable, score: tried ? score / tried : null, tps: median(tps), tok, time, tokPer: tried ? tok / tried : null };
+}
+
+function board() {
+  const cols = [
+    ["rank", "#", false], ["name", "Modell", true], ["passed", "Gelöst", true], ["score", "Ø Punkte", true],
+    ["tps", "Median tok/s", true], ["tokPer", "Ø Tokens", true], ["time", "Zeit gesamt", true],
+  ];
+  const rows = D.models.map((m) => ({ m, s: stats(m) }));
+  const key = (x) => sortKey === "name" ? x.m.label.toLowerCase() : sortKey === "passed" ? x.s.passed * 1000 + (x.s.score || 0) : x.s[sortKey] ?? -Infinity;
+  rows.sort((a, b) => (key(a) > key(b) ? 1 : key(a) < key(b) ? -1 : 0) * sortDir);
+  const head = "<tr>" + cols.map(([k, l, s]) => `<th class="${s ? "sortable" : ""} ${k === sortKey ? "sorted" : ""} ${["passed","score","tps","tokPer","time"].includes(k) ? "r" : ""}" ${s ? `data-k="${k}" tabindex="0"` : ""}>${l}${k === sortKey ? (sortDir > 0 ? " ↑" : " ↓") : ""}</th>`).join("") + "</tr>";
+  const body = rows.map(({ m, s }, i) => `<tr>
+    <td class="rank">${i + 1}</td>
+    <td><div class="model-name">${esc(m.label)}</div><div class="group">${esc(m.group || "")}</div></td>
+    <td class="r num">${s.passed}/${s.applicable}<span class="bar"><i style="width:${s.applicable ? (100 * s.passed / s.applicable) : 0}%"></i></span></td>
+    <td class="r num">${s.score == null ? "–" : fmt(100 * s.score, 0) + " %"}</td>
+    <td class="r num">${fmt(s.tps, 1)}</td>
+    <td class="r num">${fmt(s.tokPer, 0)}</td>
+    <td class="r num">${s.tried ? fmtS(s.time) : "–"}</td></tr>`).join("");
+  $("#board").innerHTML = D.models.length ? `<thead>${head}</thead><tbody>${body}</tbody>` : `<tbody><tr><td class="muted">Noch keine Modelle in models.toml.</td></tr></tbody>`;
+  const sortBy = (k) => { if (sortKey === k) sortDir *= -1; else { sortKey = k; sortDir = k === "name" || k === "time" || k === "tokPer" ? 1 : -1; } board(); };
+  $("#board").querySelectorAll("th[data-k]").forEach((th) => {
+    th.onclick = () => sortBy(th.dataset.k);
+    th.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortBy(th.dataset.k); } };
+  });
+}
+
+function matrix() {
+  const ts = visibleTasks();
+  if (!ts.length) { $("#matrix").innerHTML = `<tbody><tr><td class="empty">Noch keine Aufgaben. Lege einen Ordner unter <span class="mono">aufgaben/</span> an (Vorlagen in <span class="mono">vorlagen/</span>).</td></tr></tbody>`; return; }
+  const groups = []; for (const t of ts) { const g = groups[groups.length - 1]; if (g && g.c === t.category) g.n++; else groups.push({ c: t.category, n: 1 }); }
+  let h = `<thead><tr><th></th>${groups.map((g) => `<th class="cat" colspan="${g.n}">${esc(CAT[g.c])}</th>`).join("")}</tr>`;
+  h += `<tr><th>Modell</th>${ts.map((t) => `<th class="task" title="${esc(t.summary)}">${esc(t.title)}<span class="lvl">${esc(t.level)}</span></th>`).join("")}</tr></thead><tbody>`;
+  for (const m of D.models) {
+    h += `<tr><td><div class="model-name">${esc(m.label)}</div></td>`;
+    for (const t of ts) {
+      const r = res[m.id + "|" + t.id]; const s = state(r, t);
+      const sym = { pass: "✓", fail: "✗", skip: "–", err: "!", none: "", stale: "?" }[s];
+      const sub = s === "pass" || s === "fail" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
+      const extra = s === "fail" && r.score > 0 ? ` ${fmt(100 * r.score, 0)}%` : "";
+      const key = m.id + "|" + t.id;
+      h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${sym}${extra}<small>${sub}</small></span></td>`;
+    }
+    h += "</tr>";
+  }
+  $("#matrix").innerHTML = h + "</tbody>";
+  $("#matrix").querySelectorAll("td.cell").forEach((td) => {
+    td.onclick = () => showDetail(td.dataset.key);
+    td.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showDetail(td.dataset.key); } };
+  });
+}
+
+const svgImg = (svg) => `<img alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}">`;
+
+function showDetail(key) {
+  active = key; matrix();
+  const [mid, tid] = key.split("|");
+  const m = D.models.find((x) => x.id === mid), t = byTask[tid], r = res[key];
+  const el = $("#detail"); el.hidden = false;
+  let h = `<div class="sec-head"><div><span class="eyebrow">${esc(CAT[t.category])} · ${esc(t.level)}</span><h3>${esc(m.label)} – ${esc(t.title)}</h3></div><button class="close" id="close">Schließen</button></div>`;
+  if (!r) h += `<p class="muted">Diese Kombination wurde noch nicht ausgeführt.</p>`;
+  else if (r.status !== "ok") h += `<p>${r.status === "skipped" ? "Nicht anwendbar" : "Fehler"}: ${esc(r.reason)}</p>`;
+  else {
+    if (r.fingerprint !== t.fingerprint) h += `<div class="banner">Die Aufgabe wurde seit diesem Lauf geändert; das Ergebnis ist veraltet.</div>`;
+    h += `<div class="kv">
+      <div><span>Ergebnis</span><b style="color:var(--${r.passed ? "pass" : "fail"})">${r.passed ? "gelöst" : "nicht gelöst"}</b></div>
+      <div><span>Punkte</span><b>${fmt(100 * r.score, 1)} %</b></div>
+      <div><span>Zeit</span><b>${fmtS(r.total_s)}</b></div>
+      <div><span>Erstes Token</span><b>${fmtS(r.ttft_s)}</b></div>
+      <div><span>Erzeugung</span><b>${fmt(r.decode_tps, 1)} tok/s</b></div>
+      <div><span>Prefill</span><b>${fmt(r.prefill_tps, 0)} tok/s</b></div>
+      <div><span>Tokens rein</span><b>${fmt(r.prompt_tokens)}</b></div>
+      <div><span>Tokens raus</span><b>${fmt(r.completion_tokens)}</b></div>
+    </div>
+    <p style="margin:0"><b>Prüfung:</b> ${esc(r.detail)}</p>`;
+    if (r.artifact && r.artifact.svg) {
+      h += `<div class="imgs"><figure>${svgImg(r.artifact.svg)}<figcaption>Antwort des Modells</figcaption></figure>`;
+      if (t.reference_svg) h += `<figure>${svgImg(t.reference_svg)}<figcaption>Referenz</figcaption></figure>`;
+      h += `</div>`;
+    }
+    h += `<details><summary>Antwort des Modells (${fmt((r.answer || "").length)} Zeichen${r.reasoning_chars ? `, dazu ${fmt(r.reasoning_chars)} Zeichen Denkphase` : ""})</summary><pre>${esc(r.answer)}</pre></details>`;
+    h += `<p class="muted mono" style="margin:0;font-size:.78rem">${esc(r.time || "")} · ${esc(r.branch || r.engine || "")} ${esc(r.commit || "")}${r.finish_reason === "length" ? " · Tokenlimit erreicht" : ""}</p>`;
+  }
+  el.innerHTML = h;
+  $("#close").onclick = () => { el.hidden = true; active = null; matrix(); };
+  el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
+}
+
+function tasks() {
+  $("#tasks").innerHTML = visibleTasks().map((t) => `<article class="task">
+    <div class="meta"><span class="c">${esc(CAT[t.category])}</span><span>${esc(t.level)}</span><span>${esc(t.check_type)}</span>${t.needs.length ? `<span>braucht ${esc(t.needs.join(", "))}</span>` : ""}</div>
+    <h3>${esc(t.title)}</h3><p style="margin:0">${esc(t.summary)}</p>
+    ${t.input_svg ? `<div class="imgs"><figure>${svgImg(t.input_svg)}<figcaption>Ausgangsbild</figcaption></figure></div>` : ""}
+    ${t.images.map((src) => `<div class="imgs"><figure><img alt="Eingabebild" src="${src}"><figcaption>Eingabebild</figcaption></figure></div>`).join("")}
+    <details><summary>Prompt anzeigen</summary><pre>${esc(t.prompt)}</pre></details>
+  </article>`).join("") || `<div class="empty">Noch keine Aufgaben.</div>`;
+}
+
+function render() { chips(); board(); matrix(); tasks(); if (active) { const [, tid] = active.split("|"); if (visibleTasks().some((t) => t.id === tid)) showDetail(active); else { $("#detail").hidden = true; active = null; } } }
+facts(); render();
+</script>

@@ -1,0 +1,47 @@
+title = "Fehler im Delphi-Code finden"
+category = "code"
+level = "mittel"
+summary = "Code-Review: zwei Delphi-Funktionen, gesucht sind der nie gesetzte Rückgabewert und das Speicherleck der StringList."
+max_tokens = 8192
+prompt = """
+Welche Fehler befinden sich in folgendem Code?
+
+```delphi
+function CreateStringFromStringlist(aStringList :TStringList; aSeperator : String = #13#10) : String;
+var
+  s : String;
+  Antwort: string;
+begin
+  for s in aStringList
+    do Antwort := ConcatStrings(Antwort, s, aSeperator);
+end;
+
+function CountLinesWithOccurences(const Subtext : string; Text : string): integer;
+begin
+  var SL := CreateStringListFromString(Text);
+  result := 0;
+  for var s in SL do
+   if CountOccurences(Subtext, s) > 0
+    then inc(result);
+ end;
+```
+"""
+
+# Freitext-Antwort: jede Gruppe ist ein Fehler, der irgendwo in der Antwort erkannt werden muss.
+[check]
+type = "answer"
+
+[[check.groups]]
+name = "Result wird in CreateStringFromStringlist nie gesetzt"
+regex = '''result\W{0,3}[^.]{0,60}?(nie|nicht|kein\w*|never|not)[^.]{0,50}?(zugewiesen|gesetzt|belegt|befüllt|zurückgegeben|assigned|set|returned)|(nie|nicht|keine?)[^.]{0,40}?(zugewiesen|gesetzt|zurückgegeben|zuweisung)[^.]{0,60}?(result|rückgabe|ergebnis|funktionswert)|result\s*:=\s*antwort|exit\s*\(\s*antwort|antwort[^.]{0,100}?(nie|nicht|keine?|never)[^.]{0,60}?(zurückgegeben|zugewiesen|übergeben|returned|assigned)|(rückgabewert|funktionsergebnis|funktionswert|return value)[^.]{0,80}?(nie|nicht|undefiniert|leer|zufällig|fehlt|never)|gibt[^.]{0,40}?(nichts|keinen wert|leer\w*)[^.]{0,30}?zurück|(fehlende?|fehlt)[^.]{0,30}?(zuweisung|result)|(never|not|nie|nicht)\s+(assign\w*|set\w*|return\w*)[^.]{0,40}?result'''
+
+[[check.groups]]
+name = "StringList in CountLinesWithOccurences wird nicht freigegeben"
+regex = '''speicherleck|memory[ -]?leak|\bleak|(nicht|nie|kein\w*|never|not)[^.]{0,60}?(freigegeben|frei gegeben|freed|zerstört|destroyed)|\.free\b|freeandnil|\.destroy\b|\bfinally\b'''
+
+# Falsche Begründung: Result ist nicht mit '' initialisiert, die Funktion liefert den alten Wert der Zielvariable.
+[[check.groups]]
+name = "behauptet, die Funktion liefere einen leeren String"
+must_not = true
+regex = '''(liefert|liefern|gibt|zurückgegeben|zurückgeliefert|returns?|returned|bekommt|erhält)[^.,]{0,40}?(leere[nrs]?\s+(string|zeichenkette)|leerstring|empty\s+string|'')|(leere[nrs]?\s+(string|zeichenkette)|leerstring|empty\s+string|'')[^.,]{0,30}?(zurück|returned|als (ergebnis|rückgabe))|result[^.,]{0,30}?(bleibt|ist|stays|remains)[^.,]{0,15}?(leer|''|empty)'''
+unless_before = '''\b(nicht|kein\w*|nie|not|no|statt|anstatt|unlike|instead|zwingend)\b'''

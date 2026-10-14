@@ -1,0 +1,14 @@
+title = "Balkendiagramm ablesen"
+category = "image"
+level = "leicht"
+summary = "Höchsten Balken samt Wert aus einem PNG ablesen. Nur Modelle mit Bildeingabe (vision)."
+max_tokens = 4096
+images = ["diagramm.png"]   # Bilder machen die Aufgabe automatisch zu needs = ["vision"]
+prompt = """
+In welchem Monat ist der Wert im Diagramm am höchsten und wie hoch ist er?
+Schließe mit genau einer Zeile 'ANTWORT: Monat Wert' ab.
+"""
+
+[check]
+type = "answer"
+all = ["apr", "71"]

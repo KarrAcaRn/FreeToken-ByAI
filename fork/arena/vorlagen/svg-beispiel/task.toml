@@ -1,0 +1,21 @@
+title = "Ampel zeichnen"
+category = "image"
+level = "leicht"
+summary = "Ampel als SVG nach Koordinaten zeichnen; Pixelvergleich mit reference.svg."
+max_tokens = 4096
+prompt = """
+Erzeuge ein SVG-Bild mit width=100, height=220 und viewBox '0 0 100 220'. Inhalt: weißer Hintergrund; ein
+dunkelgraues (#333333) Rechteck von (20,10) mit Breite 60 und Höhe 200; darin drei Kreise mit Radius 22 und
+Mittelpunkt x=50: rot (#ff0000) bei y=45, gelb (#ffcc00) bei y=110, grün (#00cc44) bei y=175. Alle Formen
+gefüllt, ohne Rand.
+
+Antworte mit genau einem vollständigen SVG-Dokument in einem Codeblock (```svg ... ```).
+"""
+
+[check]
+type = "svg_reference"
+reference = "reference.svg"
+width = 100
+height = 220
+min_match = 0.98         # Anteil übereinstimmender Flächenpixel (Kanten zählen nicht)
+# color_tolerance = 48   # max. Abweichung pro Farbkanal (0-255)
