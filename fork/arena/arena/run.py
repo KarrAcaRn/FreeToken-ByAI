@@ -25,8 +25,12 @@ ROOT = Path(__file__).resolve().parent.parent
 RESULTS = Path(os.environ.get("ARENA_RESULTS", ROOT / "results" / "runs.jsonl"))
 
 
-def load_models() -> dict:
-    return tomllib.loads((ROOT / "models.toml").read_text())
+MIN_CONTEXT = 100_000  # below this a model is not usable for real work (user, 2026-10-15)
+
+
+def load_models(include_removed: bool = False) -> dict:
+    models = tomllib.loads((ROOT / "models.toml").read_text())
+    return models if include_removed else {k: v for k, v in models.items() if not v.get("removed")}
 
 
 def latest_results() -> dict:
@@ -222,7 +226,8 @@ def main():
     ids = [k for k, v in models.items() if not v.get("skip")] if not a.model or "all" in a.model else a.model
     for mid in ids:
         if mid not in models:
-            raise SystemExit(f"unbekanntes Modell {mid}; bekannt: {', '.join(models)}")
+            why = load_models(include_removed=True).get(mid, {}).get("removed")
+            raise SystemExit(f"{mid} ist gestrichen: {why}" if why else f"unbekanntes Modell {mid}; bekannt: {', '.join(models)}")
         m = models[mid]
         done = latest_results()
         todo = [t for t in tasks if a.force or (done.get((mid, t.id)) or {}).get("fingerprint") != t.fingerprint
@@ -242,6 +247,12 @@ def main():
         try:
             ctx = get_json(url + "/models")["data"][0].get("context_length")
             print(f"[{mid}] bereit nach {load_s} s, Kontext {ctx}")
+            if not ctx or ctx < m.get("min_context", MIN_CONTEXT):
+                print(f"[{mid}] Kontext {ctx} unter {MIN_CONTEXT}: Flags in models.toml anpassen oder das Modell streichen")
+                for t in todo:
+                    append({"model": mid, "task": t.id, "fingerprint": t.fingerprint, "status": "error",
+                            "reason": f"Kontext {ctx} unter {MIN_CONTEXT} Tokens", "time": dt.datetime.now().isoformat(timespec="seconds")})
+                continue
             meta = {"engine": "freetoken", "commit": git_rev(tree), "branch": Path(tree).name, "load_s": load_s, "ctx": ctx}
             run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True)
         finally:

@@ -23,7 +23,7 @@ def main():
     models_cfg = load_models()
     results = list(latest_results().values())
     task_ids = {t.id for t in tasks}
-    results = [r for r in results if r["task"] in task_ids]
+    results = [r for r in results if r["task"] in task_ids and r["model"] in models_cfg]
     with_results = {r["model"] for r in results}
     models = [{"id": k, "label": v.get("label", k), "group": v.get("group", "")}
               for k, v in models_cfg.items() if k in with_results or (not with_results and not v.get("skip"))]
