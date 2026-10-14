@@ -128,7 +128,7 @@ def serve(model_id: str, m: dict, port: int, log: Path):
     venv = os.path.expanduser("~/claude/FreeToken-ByAI/.venv/bin")
     env = dict(os.environ, PATH=f"{venv}:/usr/local/cuda/bin:" + os.environ["PATH"], CUDA_HOME="/usr/local/cuda",
                PYTHONPATH=f"{tree}/python")
-    cmd = [f"{venv}/ft", "serve", paths[0], "--port", str(port), "--served-model-name", model_id] + shlex.split(m.get("flags", ""))
+    cmd = [f"{venv}/ft", "serve", "--model-path", paths[0], "--port", str(port), "--served-model-name", model_id] + shlex.split(m.get("flags", ""))
     log.parent.mkdir(parents=True, exist_ok=True)
     print(f"[{model_id}] {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, env=env, stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
