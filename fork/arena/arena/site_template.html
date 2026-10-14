@@ -89,6 +89,8 @@ td.cell { text-align: center; cursor: pointer; padding: 6px; }
 .pill.pass { background: var(--pass-bg); color: var(--pass); }
 .pill.fail { background: var(--fail-bg); color: var(--fail); }
 .pill.skip, .pill.none { background: var(--skip-bg); color: var(--skip); }
+.pill.view { background: var(--skip-bg); color: var(--muted); padding: 4px; }
+.pill .thumb { width: 64px; height: 64px; object-fit: contain; display: block; background: repeating-conic-gradient(var(--line) 0 25%, var(--panel) 0 50%) 0 0 / 10px 10px; border-radius: 4px; }
 .pill.err { background: var(--warn-bg); color: var(--warn); }
 .pill.stale { outline: 1px dashed var(--muted); }
 td.cell.active .pill { outline: 2px solid var(--accent); }
@@ -144,6 +146,7 @@ details summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
         <span class="pill pass">✓ 75%<sup>N</sup></span>gelöst nach Nachfrage (zählt 0,75)
         <span class="pill fail">✗</span>nicht gelöst
         <span class="pill skip">–</span>nicht anwendbar
+        <span class="pill view">▣</span>Bild ohne Bewertung
         <span class="pill err">!</span>Fehler
         <span class="pill none stale">?</span>veraltet
       </div>
@@ -182,7 +185,7 @@ let sortKey = "passed", sortDir = -1, active = null;
 const byTask = Object.fromEntries(D.tasks.map((t) => [t.id, t]));
 const res = {};
 for (const r of D.results) res[r.model + "|" + r.task] = r;
-const state = (r, t) => !r ? "none" : r.fingerprint !== t.fingerprint ? "stale" : r.status === "ok" ? (r.passed ? "pass" : "fail") : r.status === "skipped" ? "skip" : "err";
+const state = (r, t) => !r ? "none" : r.fingerprint !== t.fingerprint ? "stale" : r.status === "ok" ? (r.passed == null ? "view" : r.passed ? "pass" : "fail") : r.status === "skipped" ? "skip" : "err";
 
 function facts() {
   const ok = D.results.filter((r) => r.status === "ok");
@@ -214,11 +217,14 @@ function stats(m) {
   for (const t of ts) {
     const r = res[m.id + "|" + t.id];
     if (!r || r.fingerprint !== t.fingerprint || r.status !== "ok") continue;
-    tried++; passed += r.passed ? r.score : 0; viaFollowup += r.passed && r.followup ? 1 : 0; score += r.score; tok += r.completion_tokens || 0; time += r.total_s || 0;
     if (r.decode_tps) tps.push(r.decode_tps);
+    tok += r.completion_tokens || 0; time += r.total_s || 0;
+    if (!t.graded || r.passed == null) continue;
+    tried++; passed += r.passed ? r.score : 0; viaFollowup += r.passed && r.followup ? 1 : 0; score += r.score;
   }
-  const applicable = ts.filter((t) => { const r = res[m.id + "|" + t.id]; return !(r && r.status === "skipped" && r.fingerprint === t.fingerprint); }).length;
-  return { passed, viaFollowup, tried, applicable, score: tried ? score / tried : null, tps: median(tps), tok, time, tokPer: tried ? tok / tried : null };
+  const applicable = ts.filter((t) => t.graded).filter((t) => { const r = res[m.id + "|" + t.id]; return !(r && r.status === "skipped" && r.fingerprint === t.fingerprint); }).length;
+  const ran = ts.filter((t) => { const r = res[m.id + "|" + t.id]; return r && r.fingerprint === t.fingerprint && r.status === "ok"; }).length;
+  return { passed, viaFollowup, tried, applicable, ran, score: tried ? score / tried : null, tps: median(tps), tok, time, tokPer: ran ? tok / ran : null };
 }
 
 function board() {
@@ -237,7 +243,7 @@ function board() {
     <td class="r num">${s.score == null ? "–" : fmt(100 * s.score, 0) + " %"}</td>
     <td class="r num">${fmt(s.tps, 1)}</td>
     <td class="r num">${fmt(s.tokPer, 0)}</td>
-    <td class="r num">${s.tried ? fmtS(s.time) : "–"}</td></tr>`).join("");
+    <td class="r num">${s.ran ? fmtS(s.time) : "–"}</td></tr>`).join("");
   $("#board").innerHTML = D.models.length ? `<thead>${head}</thead><tbody>${body}</tbody>` : `<tbody><tr><td class="muted">Noch keine Modelle in models.toml.</td></tr></tbody>`;
   const sortBy = (k) => { if (sortKey === k) sortDir *= -1; else { sortKey = k; sortDir = k === "name" || k === "time" || k === "tokPer" ? 1 : -1; } board(); };
   $("#board").querySelectorAll("th[data-k]").forEach((th) => {
@@ -256,11 +262,12 @@ function matrix() {
     h += `<tr><td><div class="model-name">${esc(m.label)}</div></td>`;
     for (const t of ts) {
       const r = res[m.id + "|" + t.id]; const s = state(r, t);
-      const sym = { pass: "✓", fail: "✗", skip: "–", err: "!", none: "", stale: "?" }[s];
-      const sub = s === "pass" || s === "fail" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
+      const sym = { pass: "✓", fail: "✗", skip: "–", err: "!", none: "", stale: "?", view: "" }[s];
+      const thumb = s === "view" && r.artifact && r.artifact.svg ? `<img class="thumb" alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(r.artifact.svg)}">` : "";
+      const sub = s === "pass" || s === "fail" || s === "view" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
       const extra = ((s === "fail" && r.score > 0) || (s === "pass" && r.score < 1) ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "");
       const key = m.id + "|" + t.id;
-      h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${sym}${extra}<small>${sub}</small></span></td>`;
+      h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${thumb}${sym}${extra}<small>${sub}</small></span></td>`;
     }
     h += "</tr>";
   }
@@ -284,8 +291,8 @@ function showDetail(key) {
   else {
     if (r.fingerprint !== t.fingerprint) h += `<div class="banner">Die Aufgabe wurde seit diesem Lauf geändert; das Ergebnis ist veraltet.</div>`;
     h += `<div class="kv">
-      <div><span>Ergebnis</span><b style="color:var(--${r.passed ? "pass" : "fail"})">${r.passed ? (r.followup ? "gelöst nach Nachfrage" : "gelöst") : "nicht gelöst"}</b></div>
-      <div><span>Punkte</span><b>${fmt(100 * r.score, 1)} %${r.followup && r.followup.score_factor ? ` <small class="muted">(x${fmt(r.followup.score_factor, 2)})</small>` : ""}</b></div>
+      <div><span>Ergebnis</span><b style="color:var(--${r.passed == null ? "muted" : r.passed ? "pass" : "fail"})">${r.passed == null ? "ohne Bewertung" : r.passed ? (r.followup ? "gelöst nach Nachfrage" : "gelöst") : "nicht gelöst"}</b></div>
+      <div ${r.score == null ? "hidden" : ""}><span>Punkte</span><b>${fmt(100 * r.score, 1)} %${r.followup && r.followup.score_factor ? ` <small class="muted">(x${fmt(r.followup.score_factor, 2)})</small>` : ""}</b></div>
       <div><span>Zeit</span><b>${fmtS(r.total_s)}</b></div>
       <div><span>Erstes Token</span><b>${fmtS(r.ttft_s)}</b></div>
       <div><span>Erzeugung</span><b>${fmt(r.decode_tps, 1)} tok/s</b></div>

@@ -112,7 +112,8 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
         append(rec)
         if rec["status"] == "ok":
             fu = " nach Nachfrage" if rec.get("followup") else ""
-            print(f"  {t.id}: {'BESTANDEN' if rec['passed'] else 'nicht bestanden'}{fu} score={rec['score']} "
+            verdict = "zur Ansicht" if rec["passed"] is None else "BESTANDEN" if rec["passed"] else "nicht bestanden"
+            print(f"  {t.id}: {verdict}{fu} score={rec['score']} "
                   f"{rec['completion_tokens']} tok, {rec['total_s']} s, {rec['decode_tps']} tok/s - {rec['detail'][:100]}")
         else:
             print(f"  {t.id}: {rec['status']} - {rec['reason']}")

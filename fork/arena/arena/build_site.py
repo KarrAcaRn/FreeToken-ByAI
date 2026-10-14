@@ -33,7 +33,8 @@ def main():
     tdata = []
     for t in tasks:
         d = {"id": t.id, "title": t.title, "category": t.category, "level": t.level, "summary": t.summary,
-             "check_type": t.check_type, "needs": sorted(t.needs), "fingerprint": t.fingerprint,
+             "check_type": t.check_type, "graded": t.check_type != "svg_view", "needs": sorted(t.needs),
+             "fingerprint": t.fingerprint,
              "prompt": t.prompt if len(t.prompt) <= PROMPT_PREVIEW else
              t.prompt[:PROMPT_PREVIEW] + f"\n\n[... {len(t.prompt) - PROMPT_PREVIEW} weitere Zeichen ...]",
              "images": [f"data:{mimetypes.guess_type(p.name)[0] or 'image/png'};base64," + base64.b64encode(p.read_bytes()).decode()

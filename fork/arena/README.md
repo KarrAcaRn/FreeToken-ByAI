@@ -106,6 +106,16 @@ min_match = 0.98                   # ab diesem Anteil gilt die Aufgabe als gelö
 color_tolerance = 48               # erlaubte Abweichung pro Farbkanal (0-255)
 ```
 
+**`svg_view`**: Keine Bewertung. Das letzte `<svg>` der Antwort wird auf der Seite als kleines Bild gezeigt (in der
+Matrix direkt als Vorschau). Als Hinweise erscheinen der Hintergrund (transparent / einfarbig / uneinheitlich) und ob
+die Texte aus `expect_text` im SVG stehen. Solche Aufgaben zählen nicht in die Rangliste, Zeit und Tokens schon.
+
+```toml
+[check]
+type = "svg_view"
+expect_text = ["Owayo Eulers"]
+```
+
 **`answer`**: Geprüft wird die letzte Zeile `ANTWORT: ...` (fehlt sie, die ganze Antwort). Groß-/Kleinschreibung
 ist egal, Tausenderpunkte werden ignoriert (`4.850` = `4850`). Bitte im Prompt um diese Zeile.
 
