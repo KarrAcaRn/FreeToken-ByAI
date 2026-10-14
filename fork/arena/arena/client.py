@@ -59,6 +59,7 @@ def chat(base_url: str, model: str, messages: list, max_tokens: int, api_key: st
         "completion_tokens": out_tok,
         "ttft_s": round(t_first - t0, 3),
         "total_s": round(t_end - t0, 3),
+        "decode_s": round(decode_s, 3),
         # The first token arrives with the prefill, so decode speed counts the remaining ones.
         "decode_tps": round((out_tok - 1) / decode_s, 1) if out_tok > 1 and decode_s > 0 else None,
         "prefill_tps": round(usage["prompt_tokens"] / (t_first - t0), 1) if usage.get("prompt_tokens") and t_first > t0 else None,

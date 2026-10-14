@@ -77,15 +77,39 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                 rec.update(status="error", reason=repr(e)[:300])
             else:
                 c = t.check(r["content"])
+                turns = [r]
+                answer = r["content"]
+                asked = None
+                fu = next((f for f in t.followups if not c.passed and c.missing is not None
+                           and any(m in c.missing for m in f["when_missing"])
+                           and all(x in (c.found or []) for x in f["when_found"])), None)
+                if fu is not None:
+                    msgs = t.messages() + [{"role": "assistant", "content": r["content"]},
+                                           {"role": "user", "content": fu["prompt"]}]
+                    try:
+                        r2 = chat(url, served, msgs, t.max_tokens, api_key=api_key)
+                    except Exception as e:
+                        asked = {"prompt": fu["prompt"], "error": repr(e)[:300]}
+                    else:
+                        turns.append(r2)
+                        answer = r["content"] + "\n\n--- Nachfrage: " + fu["prompt"] + " ---\n\n" + r2["content"]
+                        first = c
+                        c = t.check(answer)
+                        asked = {"prompt": fu["prompt"], "first_score": first.score, "first_detail": first.detail}
+                tok = sum(x["completion_tokens"] or 0 for x in turns)
+                dec = sum(x["decode_s"] for x in turns)
                 rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,
-                           answer=r["content"][-20000:], reasoning_chars=len(r["reasoning"]),
-                           **{k: r[k] for k in ("finish_reason", "prompt_tokens", "completion_tokens", "ttft_s",
-                                                "total_s", "decode_tps", "prefill_tps")})
-                if r["finish_reason"] == "length" and not c.passed:
+                           answer=answer[-20000:], reasoning_chars=sum(len(x["reasoning"]) for x in turns),
+                           followup=asked, finish_reason=turns[-1]["finish_reason"], prompt_tokens=r["prompt_tokens"],
+                           completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
+                           decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
+                           prefill_tps=r["prefill_tps"])
+                if turns[-1]["finish_reason"] == "length" and not c.passed:
                     rec["detail"] += f" (Tokenlimit {t.max_tokens} erreicht)"
         append(rec)
         if rec["status"] == "ok":
-            print(f"  {t.id}: {'BESTANDEN' if rec['passed'] else 'nicht bestanden'} score={rec['score']} "
+            fu = " nach Nachfrage" if rec.get("followup") else ""
+            print(f"  {t.id}: {'BESTANDEN' if rec['passed'] else 'nicht bestanden'}{fu} score={rec['score']} "
                   f"{rec['completion_tokens']} tok, {rec['total_s']} s, {rec['decode_tps']} tok/s - {rec['detail'][:100]}")
         else:
             print(f"  {t.id}: {rec['status']} - {rec['reason']}")

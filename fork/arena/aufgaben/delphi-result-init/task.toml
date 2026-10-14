@@ -35,3 +35,9 @@ name = "behauptet, Result sei automatisch leer"
 must_not = true
 regex = '''result[^.,]{0,40}?(automatisch|immer|always|automatically|garantiert)[^.,]{0,40}?(leer|''|empty|initiali\w*)|(strings?|result)[^.,]{0,30}?(werden|wird|are|is)[^.,]{0,20}?(automatisch|immer|always|automatically)[^.,]{0,20}?(mit ''|leer|empty|initiali\w*)'''
 unless_before = '''\b(nicht|kein\w*|nie|not|no|statt|anstatt|unlike|instead|zwingend|nur|only)\b'''
+
+# Nennt die Antwort nur die Ursache, darf sich das Modell erklären. Geprüft wird danach Antwort + Erklärung.
+[[followups]]
+when_found = ["Result wird vor der Schleife nicht mit '' initialisiert"]
+when_missing = ["Folge: an den alten Wert der Zielvariable wird angehängt"]
+prompt = "Warum führt das in diesem Fall zu einem Fehler? Erkläre, was dabei in Delphi intern passiert."

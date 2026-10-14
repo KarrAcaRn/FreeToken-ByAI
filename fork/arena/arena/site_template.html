@@ -84,6 +84,7 @@ td.r, th.r { text-align: right; }
 .matrix th.task .lvl { display: block; font: 400 0.68rem/1.4 var(--f-mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 td.cell { text-align: center; cursor: pointer; padding: 6px; }
 .pill { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; min-width: 70px; padding: 5px 6px; border-radius: 6px; font: 600 0.8rem/1.15 var(--f-mono); }
+.pill sup { font-size: 0.62rem; margin-left: 1px; }
 .pill small { font-weight: 400; font-size: 0.68rem; opacity: 0.85; }
 .pill.pass { background: var(--pass-bg); color: var(--pass); }
 .pill.fail { background: var(--fail-bg); color: var(--fail); }
@@ -140,6 +141,7 @@ details summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
       <h2>Ergebnisse je Aufgabe</h2>
       <div class="legend">
         <span class="pill pass">✓</span>gelöst
+        <span class="pill pass">✓<sup>N</sup></span>gelöst nach Nachfrage
         <span class="pill fail">✗</span>nicht gelöst
         <span class="pill skip">–</span>nicht anwendbar
         <span class="pill err">!</span>Fehler
@@ -208,15 +210,15 @@ function visibleTasks() { return D.tasks.filter((t) => cat === "all" || t.catego
 
 function stats(m) {
   const ts = visibleTasks();
-  let passed = 0, tried = 0, score = 0, tok = 0, time = 0; const tps = [];
+  let passed = 0, tried = 0, score = 0, tok = 0, time = 0, viaFollowup = 0; const tps = [];
   for (const t of ts) {
     const r = res[m.id + "|" + t.id];
     if (!r || r.fingerprint !== t.fingerprint || r.status !== "ok") continue;
-    tried++; passed += r.passed ? 1 : 0; score += r.score; tok += r.completion_tokens || 0; time += r.total_s || 0;
+    tried++; passed += r.passed ? 1 : 0; viaFollowup += r.passed && r.followup ? 1 : 0; score += r.score; tok += r.completion_tokens || 0; time += r.total_s || 0;
     if (r.decode_tps) tps.push(r.decode_tps);
   }
   const applicable = ts.filter((t) => { const r = res[m.id + "|" + t.id]; return !(r && r.status === "skipped" && r.fingerprint === t.fingerprint); }).length;
-  return { passed, tried, applicable, score: tried ? score / tried : null, tps: median(tps), tok, time, tokPer: tried ? tok / tried : null };
+  return { passed, viaFollowup, tried, applicable, score: tried ? score / tried : null, tps: median(tps), tok, time, tokPer: tried ? tok / tried : null };
 }
 
 function board() {
@@ -231,7 +233,7 @@ function board() {
   const body = rows.map(({ m, s }, i) => `<tr>
     <td class="rank">${i + 1}</td>
     <td><div class="model-name">${esc(m.label)}</div><div class="group">${esc(m.group || "")}</div></td>
-    <td class="r num">${s.passed}/${s.applicable}<span class="bar"><i style="width:${s.applicable ? (100 * s.passed / s.applicable) : 0}%"></i></span></td>
+    <td class="r num">${s.viaFollowup ? `<span class="group" title="davon nach Nachfrage">${s.viaFollowup}× N</span> ` : ""}${s.passed}/${s.applicable}<span class="bar"><i style="width:${s.applicable ? (100 * s.passed / s.applicable) : 0}%"></i></span></td>
     <td class="r num">${s.score == null ? "–" : fmt(100 * s.score, 0) + " %"}</td>
     <td class="r num">${fmt(s.tps, 1)}</td>
     <td class="r num">${fmt(s.tokPer, 0)}</td>
@@ -256,7 +258,7 @@ function matrix() {
       const r = res[m.id + "|" + t.id]; const s = state(r, t);
       const sym = { pass: "✓", fail: "✗", skip: "–", err: "!", none: "", stale: "?" }[s];
       const sub = s === "pass" || s === "fail" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
-      const extra = s === "fail" && r.score > 0 ? ` ${fmt(100 * r.score, 0)}%` : "";
+      const extra = (s === "fail" && r.score > 0 ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "");
       const key = m.id + "|" + t.id;
       h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${sym}${extra}<small>${sub}</small></span></td>`;
     }
@@ -282,7 +284,7 @@ function showDetail(key) {
   else {
     if (r.fingerprint !== t.fingerprint) h += `<div class="banner">Die Aufgabe wurde seit diesem Lauf geändert; das Ergebnis ist veraltet.</div>`;
     h += `<div class="kv">
-      <div><span>Ergebnis</span><b style="color:var(--${r.passed ? "pass" : "fail"})">${r.passed ? "gelöst" : "nicht gelöst"}</b></div>
+      <div><span>Ergebnis</span><b style="color:var(--${r.passed ? "pass" : "fail"})">${r.passed ? (r.followup ? "gelöst nach Nachfrage" : "gelöst") : "nicht gelöst"}</b></div>
       <div><span>Punkte</span><b>${fmt(100 * r.score, 1)} %</b></div>
       <div><span>Zeit</span><b>${fmtS(r.total_s)}</b></div>
       <div><span>Erstes Token</span><b>${fmtS(r.ttft_s)}</b></div>
@@ -292,6 +294,7 @@ function showDetail(key) {
       <div><span>Tokens raus</span><b>${fmt(r.completion_tokens)}</b></div>
     </div>
     <p style="margin:0"><b>Prüfung:</b> ${esc(r.detail)}</p>`;
+    if (r.followup) h += `<p style="margin:0"><b>Nachfrage:</b> „${esc(r.followup.prompt)}“ – gestellt, weil die erste Antwort nur ${fmt(100 * (r.followup.first_score ?? 0), 0)} % erreichte (${esc(r.followup.first_detail || r.followup.error || "")}).</p>`;
     if (r.artifact && r.artifact.svg) {
       h += `<div class="imgs"><figure>${svgImg(r.artifact.svg)}<figcaption>Antwort des Modells</figcaption></figure>`;
       if (t.reference_svg) h += `<figure>${svgImg(t.reference_svg)}<figcaption>Referenz</figcaption></figure>`;

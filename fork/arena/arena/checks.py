@@ -16,6 +16,8 @@ class Check:
     score: float
     detail: str = ""
     artifact: dict | None = None  # e.g. {"svg": "..."}, shown on the site
+    found: list | None = None  # names of answer groups that matched (follow-ups key on these)
+    missing: list | None = None
 
 
 def final_answer(text: str) -> str:
@@ -66,7 +68,8 @@ def answer(cfg: dict, task_dir: Path):
             detail += " | fehlt: " + ", ".join(missing)
         if bad:
             detail += " | verboten: " + ", ".join(bad)
-        return Check(score == 1.0, round(score, 3), detail)
+        return Check(score == 1.0, round(score, 3), detail,
+                     found=[x for x, ok in parts if ok], missing=missing)
 
     return check
 

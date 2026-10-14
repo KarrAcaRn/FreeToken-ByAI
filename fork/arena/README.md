@@ -142,6 +142,21 @@ regex = '''(liefert|gibt|returns?)[^.,]{0,40}?(leere[nrs]?\s+string|empty\s+stri
 unless_before = '''\b(nicht|kein\w*|nie|not|statt)\b'''
 ```
 
+### Nachfrage
+
+Nennt ein Modell nur einen Teil der Antwort, kann es sich in einer zweiten Runde erklären. Die Nachfrage wird im
+selben Gespräch gestellt, wenn nach der ersten Antwort alle `when_missing`-Gruppen fehlen und alle
+`when_found`-Gruppen gefunden wurden (Gruppennamen aus `[[check.groups]]`). Geprüft wird danach erste Antwort plus
+Erklärung, Strafgruppen gelten also auch für die Erklärung. Zeit und Tokens beider Runden zählen zusammen. Auf der
+Seite steht so ein Ergebnis als "gelöst nach Nachfrage" (✓<sup>N</sup>). Beispiel: `aufgaben/delphi-result-init`.
+
+```toml
+[[followups]]
+when_found = ["Result wird vor der Schleife nicht mit '' initialisiert"]
+when_missing = ["Folge: an den alten Wert der Zielvariable wird angehängt"]
+prompt = "Warum führt das in diesem Fall zu einem Fehler? Erkläre, was dabei in Delphi intern passiert."
+```
+
 ### Musterlösung
 
 Leg zu jeder Aufgabe eine `musterloesung.md` ab, also so, wie eine perfekte Modellantwort aussähe. `arena.check`

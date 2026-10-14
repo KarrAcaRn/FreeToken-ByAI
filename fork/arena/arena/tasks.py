@@ -27,6 +27,7 @@ class Task:
     check_type: str
     fingerprint: str  # changes whenever any file of the task changes; old results then show as outdated
     dir: Path
+    followups: list  # [{"prompt", "when_missing": [...], "when_found": [...]}], see README
 
     def messages(self) -> list:
         if not self.images:
@@ -66,6 +67,8 @@ def load_task(d: Path) -> Task:
         level=cfg.get("level", "mittel"), prompt=prompt.strip(), images=images, needs=frozenset(needs),
         max_tokens=int(cfg.get("max_tokens", 8192)), check=CHECKERS[chk["type"]](chk, d),
         check_type=chk["type"], fingerprint=_fingerprint(d), dir=d,
+        followups=[{"prompt": f["prompt"].strip(), "when_missing": f.get("when_missing", []),
+                    "when_found": f.get("when_found", [])} for f in cfg.get("followups", [])],
     )
 
 
