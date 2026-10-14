@@ -1,0 +1,19 @@
+title = "Delta E 2000 in Delphi"
+category = "code"
+level = "schwer"
+summary = "Delphi-Funktion für den Farbabstand CIEDE2000 zwischen zwei RGB-Farben (sRGB -> Lab -> Delta E 2000)."
+max_tokens = 12288
+prompt = """
+Schreibe mir eine Delphi-Funktion, die den Farbabstand Delta E 2000 zwischen zwei Farben berechnet.
+Als Farben bekommt die Funktion zwei RGB-Werte.
+
+Vorgaben:
+- Signatur: function DeltaE2000(R1, G1, B1, R2, G2, B2: Byte): Double;
+- Die RGB-Werte sind sRGB mit 8 Bit je Kanal (Weißpunkt D65). Umrechnung über XYZ nach CIELAB, danach CIEDE2000 mit kL = kC = kH = 1.
+- Nur Standard-Units (z. B. SysUtils, Math), keine VCL.
+- Antworte mit genau einem Codeblock (```delphi ... ```), der die Funktion und alle Hilfsfunktionen enthält, ohne Testprogramm.
+"""
+
+[check]
+type = "pascal_tests"
+tests = "tests.pas"

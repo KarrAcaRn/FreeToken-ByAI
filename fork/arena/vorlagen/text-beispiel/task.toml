@@ -1,0 +1,24 @@
+title = "Kilometerpauschale finden"
+category = "text"
+level = "mittel"
+summary = "Gültigen Wert finden, obwohl eine ältere Regel im Dokument steht (Änderungsprotokoll)."
+max_tokens = 4096
+attach = ["dokument.md"]   # {{dokument.md}} im Prompt wird durch den Dateiinhalt ersetzt
+prompt = """
+Lies das folgende Dokument und beantworte danach die Frage. Antworte nur auf Basis des Dokuments. Steht die
+Antwort nicht im Dokument, antworte mit NICHT ENTHALTEN.
+
+<dokument>
+{{dokument.md}}
+</dokument>
+
+Frage: Wie hoch ist die aktuell gültige Kilometerpauschale für Dienstfahrten mit dem Privatwagen?
+Schließe mit genau einer Zeile 'ANTWORT: ...' ab.
+"""
+
+[check]
+type = "answer"        # geprüft wird die letzte Zeile 'ANTWORT: ...'
+all = ["0,38"]          # muss alles enthalten (Groß-/Kleinschreibung egal, 4.850 == 4850)
+# any = ["38 cent", "0,38"]   # mindestens eins davon
+none = ["0,30"]         # darf nicht enthalten
+# regex = "0[,.]38"
