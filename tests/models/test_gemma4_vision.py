@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import glob
 import os
 
@@ -67,6 +68,30 @@ def test_host_streamed_weights_compute_the_same_output():
     tower.place_weights("gpu")
     assert tower.state_dict()["encoder.layers.0.self_attn.q_proj.weight"].device.type == "cuda"
     assert torch.equal(tower.forward(feature, positions), resident)
+
+
+def test_clipped_linears_load_their_bounds_and_clamp():
+    vc = dataclasses.replace(_tiny_vc(), use_clipped_linears=True)
+    clipped, _ = _build(vc)
+    plain, _ = _build(_tiny_vc())
+    sd = clipped.state_dict()
+    bounds = [k for k in sd if k.endswith((".input_min", ".input_max", ".output_min", ".output_max"))]
+    assert len(bounds) == 2 * 7 * 4  # checkpoint names: <proj>.input_min etc. next to <proj>.weight
+    for k in bounds:
+        sd[k].fill_(float("inf") if k.endswith("max") else float("-inf"))
+    plain.load_state_dict({k: v for k, v in sd.items() if k not in bounds})
+    feature = torch.randn(1, 18, 768, dtype=torch.bfloat16, device="cuda")
+    positions = _grid_positions(6, 3)[None].cuda()
+    assert torch.equal(clipped.forward(feature, positions), plain.forward(feature, positions))
+
+    q = clipped.encoder.layers.op_list[0].self_attn.q_proj
+    q.output_min.fill_(-1e-3)
+    q.output_max.fill_(1e-3)
+    x = torch.randn(5, 32, dtype=torch.bfloat16, device="cuda")
+    assert q.forward(x).abs().max().item() <= 1e-3
+    q.input_min.fill_(0.0)
+    q.input_max.fill_(0.0)
+    assert torch.count_nonzero(q.forward(x)) == 0
 
 
 @pytest.mark.needs_weights

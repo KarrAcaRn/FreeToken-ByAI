@@ -26,6 +26,9 @@ def main():
             print(f"?       {t.id}: lädt ({t.category}, {t.check_type}), aber ohne musterloesung.md ungeprüft")
             continue
         c = t.check(ms.read_text())
+        if c.passed is None:
+            print(f"OK      {t.id}: Musterlösung rendert - {c.detail}")
+            continue
         print(f"{'OK     ' if c.passed else 'FEHLER '} {t.id}: Musterlösung {'besteht' if c.passed else 'besteht NICHT'} - {c.detail}")
         bad += not c.passed
     sys.exit(1 if bad else 0)

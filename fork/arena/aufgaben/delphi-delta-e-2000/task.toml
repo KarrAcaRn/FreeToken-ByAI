@@ -2,7 +2,7 @@ title = "Delta E 2000 in Delphi"
 category = "code"
 level = "schwer"
 summary = "Delphi-Funktion für den Farbabstand CIEDE2000 zwischen zwei RGB-Farben (sRGB -> Lab -> Delta E 2000)."
-max_tokens = 12288
+max_tokens = 32768
 prompt = """
 Schreibe mir eine Delphi-Funktion, die den Farbabstand Delta E 2000 zwischen zwei Farben berechnet.
 Als Farben bekommt die Funktion zwei RGB-Werte.
@@ -17,3 +17,17 @@ Vorgaben:
 [check]
 type = "pascal_tests"
 tests = "tests.pas"
+
+# Kompiliert die Antwort nicht, bekommt das Modell die Compilermeldungen zurück und darf bis zu 3-mal nachbessern.
+# Jeder weitere Durchgang kostet 0,1 Punkte.
+[retries]
+max = 3
+penalty = 0.1
+on = ["compile"]
+prompt = """
+Der Code kompiliert nicht (Free Pascal im Delphi-Modus, -Mdelphi). Die Zeilennummern beziehen sich auf das Testprogramm, in das deine Funktion eingesetzt wurde; die betroffene Zeile steht jeweils darunter.
+
+{detail}
+
+Korrigiere den Code und antworte wieder mit genau einem Codeblock (```delphi ... ```), der die Funktion und alle Hilfsfunktionen enthält, ohne Testprogramm.
+"""

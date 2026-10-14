@@ -1,0 +1,43 @@
+title = "Nicht initialisiertes Result"
+category = "code"
+level = "mittel"
+summary = "Delphi: Result wird vor dem Anhängen nicht auf '' gesetzt, die Funktion erweitert den alten Wert der Zielvariable."
+max_tokens = 32768
+prompt = """
+Was ist an dieser Funktion falsch?
+
+```delphi
+function CreateStringFromStringlist(aStringList :TStringList; aSeperator : String = #13#10) : String;
+var
+  s : String;
+begin
+  for s in aStringList
+    do Result := ConcatStrings(Result, s, aSeperator);
+end;
+```
+"""
+
+# Freitext-Antwort: jede Gruppe ist ein Punkt, der irgendwo in der Antwort erkannt werden muss.
+[check]
+type = "answer"
+
+[[check.groups]]
+name = "Result wird vor der Schleife nicht mit '' initialisiert"
+regex = '''result\s*:=\s*''|result\s*:=\s*emptystr|result[^.]{0,60}?(nicht|nie|kein\w*|never|not)[^.]{0,40}?(initiali\w*|vorbelegt|geleert|gelöscht|zurückgesetzt|cleared|reset)|(nicht|nie|kein\w*|never|not|un)[^.]{0,20}?initiali\w*[^.]{0,60}?result|uninitiali\w*[^.]{0,40}?result|result[^.]{0,40}?uninitiali\w*|(fehlende?|fehlt|missing)[^.]{0,30}?initiali\w*|initiali\w*[^.]{0,40}?,\s*(aber\s+)?result(\s+aber)?\s+nicht'''
+
+[[check.groups]]
+name = "Folge: an den alten Wert der Zielvariable wird angehängt"
+regex = '''erweiter\w*|anhäng\w*|angehängt|append\w*|(alte[nrs]?|vorherige[nrs]?|bisherige[nrs]?|vorhandene[nrs]?|previous|existing|old)\s+(wert|inhalt|string|value|content)|(an|auf)[^.]{0,60}?(hängt|angehängt|anhängen|erweitert)|(hängt|angehängt|erweitert|appends?|appended|prepended)[^.]{0,80}?(an|aufrufer|ziel|caller|existing|previous)|(inhalt|wert)[^.]{0,40}?(des|der)[^.]{0,20}?(aufrufer|zielvariable)|(var|out)-?\s*parameter|versteckte[nrs]? parameter|hidden (var )?parameter'''
+
+# Falsche Begründung: Result wird bei Strings nicht automatisch mit '' initialisiert.
+[[check.groups]]
+name = "behauptet, Result sei automatisch leer"
+must_not = true
+regex = '''result[^.,]{0,40}?(automatisch|immer|always|automatically|garantiert)[^.,]{0,40}?(leer|''|empty|initiali\w*)|(strings?|result)[^.,]{0,30}?(werden|wird|are|is)[^.,]{0,20}?(automatisch|immer|always|automatically)[^.,]{0,20}?(mit ''|leer|empty|initiali\w*)'''
+unless_before = '''\b(nicht|kein\w*|nie|not|no|statt|anstatt|unlike|instead|zwingend|nur|only)\b'''
+
+# Nennt die Antwort nur die Ursache, darf sich das Modell erklären. Geprüft wird danach Antwort + Erklärung.
+[[followups]]
+when_found = ["Result wird vor der Schleife nicht mit '' initialisiert"]
+when_missing = ["Folge: an den alten Wert der Zielvariable wird angehängt"]
+prompt = "Warum führt das in diesem Fall zu einem Fehler? Erkläre, was dabei in Delphi intern passiert."

@@ -168,6 +168,11 @@ class WeightReport:
     # per decoder layer, the bytes per category --dense-offload-layers would move (empty: MoE or
     # no plain decoder stack)
     dense_layers: list[Counter[str]] = field(default_factory=list)
+    # device bytes at the worst moment of the load: every tensor lands on the GPU before
+    # --embed-device cpu, host-streamed encoders or finalize copies change it (0: not computed)
+    load_peak: int = 0
+    # vision bytes on the GPU right after load_state_dict (what --text-model-only takes off load_peak)
+    vision_loaded: int = 0
 
     @property
     def gpu_total(self) -> int:
@@ -235,6 +240,8 @@ def resident_weights(model, config) -> WeightReport:
         report.gpu["rope"] = rope
     report.dense_layers = _dense_layer_bytes(model, state)
     vision = report.gpu.get("vision", 0)
+    report.vision_loaded = vision
+    streamed_out = staging_in = 0
     if vision and config.active_encoders:
         streamed, staging = _streamed_encoder_bytes(model, state)
         if streamed:
@@ -242,7 +249,27 @@ def resident_weights(model, config) -> WeightReport:
             if config.mm.encoder_weights == "host":
                 report.gpu["vision"] = report.vision_gpu_if_host
                 report.host["vision"] = streamed
+                streamed_out, staging_in = streamed, staging
+    # The engine loads every tensor onto the GPU first; host-streamed encoder blocks leave before
+    # finalize_quant, which then holds one layer's source and its finalized copy at once. The
+    # embedding table --embed-device cpu moves out only after all of that.
+    loaded = sum(gpu.values()) + rope
+    report.load_peak = max(loaded, loaded - streamed_out + staging_in + _largest_finalize_copy(model))
     return report
+
+
+def _largest_finalize_copy(model) -> int:
+    """Bytes of the biggest weight whose kernel rewrites it in finalize (nvfp4 transposes, fp8 repacks):
+    during that call the source and the new copy are both on the device."""
+    from freetoken.layers.quantization.linear.base import LinearKernel
+
+    biggest = 0
+    for _, o in _walk(model):
+        kernel = getattr(getattr(o, "quant_method", None), "kernel", None)
+        w = getattr(o, "weight", None)
+        if kernel is not None and isinstance(w, torch.Tensor) and type(kernel).finalize is not LinearKernel.finalize:
+            biggest = max(biggest, _nbytes(w))
+    return biggest
 
 
 def _dense_layer_bytes(model, state: dict[str, torch.Tensor]) -> list[Counter[str]]:
@@ -447,7 +474,8 @@ class ForecastInputs:
     activation_per_token: int = 0
     load_overhead: int = LOAD_OVERHEAD_BYTES
 
-    def forecast(self, config=None, *, weight_delta: int = 0, per_expert: int | None = None) -> Forecast:
+    def forecast(self, config=None, *, weight_delta: int = 0, per_expert: int | None = None,
+                 peak_delta: int = 0) -> Forecast:
         return forecast_memory(
             self.config if config is None else config,
             self.weights.gpu_total + weight_delta,
@@ -456,12 +484,13 @@ class ForecastInputs:
             max_slots=self.max_slots,
             activation_per_token=self.activation_per_token,
             load_overhead=self.load_overhead,
+            load_peak=self.weights.load_peak + peak_delta if self.weights.load_peak else 0,
         )
 
 
 def forecast_memory(config, weights_bytes: int, free_before: int | None, *, per_expert_bytes: int = 0,
                     max_slots: int | None = None, activation_per_token: int = 0,
-                    load_overhead: int = LOAD_OVERHEAD_BYTES) -> Forecast:
+                    load_overhead: int = LOAD_OVERHEAD_BYTES, load_peak: int = 0) -> Forecast:
     """Forecast the startup geometry of a resolved ``config`` (after ``_adjust_config``) with
     ``weights_bytes`` resident and ``free_before`` device bytes free before the load.
 
@@ -500,6 +529,11 @@ def forecast_memory(config, weights_bytes: int, free_before: int | None, *, per_
     if free_before is None:
         return fc
 
+    if load_peak > free_before:
+        fc.verdict = "does not fit"
+        fc.reasons.append(f"loading peaks at {_gib(load_peak)} on the device (every tensor lands there before "
+                          f"finalize and host moves), {_gib(free_before)} free")
+        return fc
     solve = lambda w: _solve(config, pool_cls, free_before, w, fc.per_expert_bytes, max_slots, state_bytes)  # noqa: E731
     lower = solve(weights_bytes)
     if not lower.ok:
@@ -572,6 +606,7 @@ class Change:
     weight_delta: int = 0
     per_expert: int | None = None
     note: str = ""
+    peak_delta: int = 0  # change of the load peak (most flags act after the load and leave it alone)
 
 
 def _set(**values):
@@ -629,7 +664,8 @@ def _tips_cache_type(inp: ForecastInputs) -> Iterable[Change]:
 def _tips_encoders(inp: ForecastInputs) -> Iterable[Change]:
     vision = inp.weights.gpu.get("vision", 0)
     if vision:
-        yield Change("--text-model-only", "encoders", 4, weight_delta=-vision, note="no image input")
+        yield Change("--text-model-only", "encoders", 4, weight_delta=-vision, note="no image input",
+                     peak_delta=-inp.weights.vision_loaded)
         host = inp.weights.vision_gpu_if_host
         if inp.config.mm.encoder_weights == "gpu" and host is not None and host < vision:
             yield Change("--mm-encoder-weights host", "encoder_weights", 1, weight_delta=host - vision,
@@ -772,12 +808,13 @@ class Tip:
 
 def _evaluate(inp: ForecastInputs, changes: tuple[Change, ...]) -> Forecast:
     config = copy.copy(inp.config)
-    delta, per_expert = 0, None
+    delta, peak, per_expert = 0, 0, None
     for c in changes:
         c.apply(config)
         delta += c.weight_delta
+        peak += c.peak_delta
         per_expert = c.per_expert if c.per_expert is not None else per_expert
-    return inp.forecast(config, weight_delta=delta, per_expert=per_expert)
+    return inp.forecast(config, weight_delta=delta, per_expert=per_expert, peak_delta=peak)
 
 
 def _rank(fc: Forecast) -> tuple:

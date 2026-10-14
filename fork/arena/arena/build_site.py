@@ -23,7 +23,7 @@ def main():
     models_cfg = load_models()
     results = list(latest_results().values())
     task_ids = {t.id for t in tasks}
-    results = [r for r in results if r["task"] in task_ids]
+    results = [r for r in results if r["task"] in task_ids and r["model"] in models_cfg]
     with_results = {r["model"] for r in results}
     models = [{"id": k, "label": v.get("label", k), "group": v.get("group", "")}
               for k, v in models_cfg.items() if k in with_results or (not with_results and not v.get("skip"))]
@@ -33,7 +33,8 @@ def main():
     tdata = []
     for t in tasks:
         d = {"id": t.id, "title": t.title, "category": t.category, "level": t.level, "summary": t.summary,
-             "check_type": t.check_type, "needs": sorted(t.needs), "fingerprint": t.fingerprint,
+             "check_type": t.check_type, "graded": t.check_type != "svg_view", "needs": sorted(t.needs),
+             "fingerprint": t.fingerprint,
              "prompt": t.prompt if len(t.prompt) <= PROMPT_PREVIEW else
              t.prompt[:PROMPT_PREVIEW] + f"\n\n[... {len(t.prompt) - PROMPT_PREVIEW} weitere Zeichen ...]",
              "images": [f"data:{mimetypes.guess_type(p.name)[0] or 'image/png'};base64," + base64.b64encode(p.read_bytes()).decode()
