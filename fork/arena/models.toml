@@ -98,7 +98,7 @@ flags = "--kv-cache-dtype fp8 --text-model-only --embed-device cpu --max-running
 label = "Qwen3.8 27B (NVFP4)"
 group = "Groß (dicht)"
 path = "models--RadixArk--Qwen3.8-27B-NVFP4/snapshots/*"
-flags = "--kv-cache-dtype fp8 --text-model-only --memory-ratio 0.95 --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"  # ~100k Kontext
+flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.95 --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"  # fp8-KV: 99.5k, knapp unter 100k; nvfp4 ~190k
 
 [qwen3_8-27b-dflash]
 label = "Qwen3.8 27B (NVFP4 + DFlash)"
