@@ -66,11 +66,32 @@ class _VisionRotary:
         return cos, sin
 
 
+class _ClippedLinear(LinearReplicated):
+    """Linear whose input and output are clamped to per-layer scalars from the checkpoint (use_clipped_linears: E2B/E4B)."""
+
+    def __init__(self, input_size: int, output_size: int):
+        super().__init__(input_size, output_size, has_bias=False)
+        self.input_min = torch.empty(())
+        self.input_max = torch.empty(())
+        self.output_min = torch.empty(())
+        self.output_max = torch.empty(())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = torch.clamp(x, self.input_min, self.input_max)
+        return torch.clamp(super().forward(x), self.output_min, self.output_max)
+
+
+def _vision_linear(vc: VisionConfig, input_size: int, output_size: int) -> LinearReplicated:
+    if vc.use_clipped_linears:
+        return _ClippedLinear(input_size, output_size)
+    return LinearReplicated(input_size, output_size, has_bias=False)
+
+
 class Gemma4VisionMLP(BaseOP):
     def __init__(self, vc: VisionConfig):
-        self.gate_proj = LinearReplicated(vc.hidden_size, vc.intermediate_size, has_bias=False)
-        self.up_proj = LinearReplicated(vc.hidden_size, vc.intermediate_size, has_bias=False)
-        self.down_proj = LinearReplicated(vc.intermediate_size, vc.hidden_size, has_bias=False)
+        self.gate_proj = _vision_linear(vc, vc.hidden_size, vc.intermediate_size)
+        self.up_proj = _vision_linear(vc, vc.hidden_size, vc.intermediate_size)
+        self.down_proj = _vision_linear(vc, vc.intermediate_size, vc.hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         act = F.gelu(self.gate_proj.forward(x), approximate="tanh")
@@ -89,10 +110,10 @@ class Gemma4VisionAttention(BaseOP):
         self.num_kv_heads = vc.num_kv_heads
         q_dim = self.num_heads * self.head_dim
         kv_dim = self.num_kv_heads * self.head_dim
-        self.q_proj = LinearReplicated(vc.hidden_size, q_dim, has_bias=False)
-        self.k_proj = LinearReplicated(vc.hidden_size, kv_dim, has_bias=False)
-        self.v_proj = LinearReplicated(vc.hidden_size, kv_dim, has_bias=False)
-        self.o_proj = LinearReplicated(q_dim, vc.hidden_size, has_bias=False)
+        self.q_proj = _vision_linear(vc, vc.hidden_size, q_dim)
+        self.k_proj = _vision_linear(vc, vc.hidden_size, kv_dim)
+        self.v_proj = _vision_linear(vc, vc.hidden_size, kv_dim)
+        self.o_proj = _vision_linear(vc, q_dim, vc.hidden_size)
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=vc.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=vc.rms_norm_eps)
         self.v_norm = GemmaRMSNorm(self.head_dim, eps=vc.rms_norm_eps, with_scale=False)
@@ -190,8 +211,6 @@ class Gemma4VisionModel(BaseOP):
     """Pixels -> soft tokens. Output is ``[num_valid_soft_tokens, hidden]`` (padding stripped)."""
 
     def __init__(self, vc: VisionConfig):
-        if vc.use_clipped_linears:
-            raise NotImplementedError("the gemma4 vision tower does not apply clipped linears")
         self.patch_embedder = Gemma4VisionPatchEmbedder(vc)
         self.encoder = Gemma4VisionEncoder(vc)
         self._standardize = vc.standardize
