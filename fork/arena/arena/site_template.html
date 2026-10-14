@@ -141,7 +141,7 @@ details summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
       <h2>Ergebnisse je Aufgabe</h2>
       <div class="legend">
         <span class="pill pass">✓</span>gelöst
-        <span class="pill pass">✓<sup>N</sup></span>gelöst nach Nachfrage
+        <span class="pill pass">✓ 75%<sup>N</sup></span>gelöst nach Nachfrage (zählt 0,75)
         <span class="pill fail">✗</span>nicht gelöst
         <span class="pill skip">–</span>nicht anwendbar
         <span class="pill err">!</span>Fehler
@@ -214,7 +214,7 @@ function stats(m) {
   for (const t of ts) {
     const r = res[m.id + "|" + t.id];
     if (!r || r.fingerprint !== t.fingerprint || r.status !== "ok") continue;
-    tried++; passed += r.passed ? 1 : 0; viaFollowup += r.passed && r.followup ? 1 : 0; score += r.score; tok += r.completion_tokens || 0; time += r.total_s || 0;
+    tried++; passed += r.passed ? r.score : 0; viaFollowup += r.passed && r.followup ? 1 : 0; score += r.score; tok += r.completion_tokens || 0; time += r.total_s || 0;
     if (r.decode_tps) tps.push(r.decode_tps);
   }
   const applicable = ts.filter((t) => { const r = res[m.id + "|" + t.id]; return !(r && r.status === "skipped" && r.fingerprint === t.fingerprint); }).length;
@@ -233,7 +233,7 @@ function board() {
   const body = rows.map(({ m, s }, i) => `<tr>
     <td class="rank">${i + 1}</td>
     <td><div class="model-name">${esc(m.label)}</div><div class="group">${esc(m.group || "")}</div></td>
-    <td class="r num">${s.viaFollowup ? `<span class="group" title="davon nach Nachfrage">${s.viaFollowup}× N</span> ` : ""}${s.passed}/${s.applicable}<span class="bar"><i style="width:${s.applicable ? (100 * s.passed / s.applicable) : 0}%"></i></span></td>
+    <td class="r num">${s.viaFollowup ? `<span class="group" title="davon nach Nachfrage">${s.viaFollowup}× N</span> ` : ""}${fmt(s.passed, Number.isInteger(s.passed) ? 0 : 2)}/${s.applicable}<span class="bar"><i style="width:${s.applicable ? (100 * s.passed / s.applicable) : 0}%"></i></span></td>
     <td class="r num">${s.score == null ? "–" : fmt(100 * s.score, 0) + " %"}</td>
     <td class="r num">${fmt(s.tps, 1)}</td>
     <td class="r num">${fmt(s.tokPer, 0)}</td>
@@ -258,7 +258,7 @@ function matrix() {
       const r = res[m.id + "|" + t.id]; const s = state(r, t);
       const sym = { pass: "✓", fail: "✗", skip: "–", err: "!", none: "", stale: "?" }[s];
       const sub = s === "pass" || s === "fail" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
-      const extra = (s === "fail" && r.score > 0 ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "");
+      const extra = ((s === "fail" && r.score > 0) || (s === "pass" && r.score < 1) ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "");
       const key = m.id + "|" + t.id;
       h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${sym}${extra}<small>${sub}</small></span></td>`;
     }
@@ -285,7 +285,7 @@ function showDetail(key) {
     if (r.fingerprint !== t.fingerprint) h += `<div class="banner">Die Aufgabe wurde seit diesem Lauf geändert; das Ergebnis ist veraltet.</div>`;
     h += `<div class="kv">
       <div><span>Ergebnis</span><b style="color:var(--${r.passed ? "pass" : "fail"})">${r.passed ? (r.followup ? "gelöst nach Nachfrage" : "gelöst") : "nicht gelöst"}</b></div>
-      <div><span>Punkte</span><b>${fmt(100 * r.score, 1)} %</b></div>
+      <div><span>Punkte</span><b>${fmt(100 * r.score, 1)} %${r.followup && r.followup.score_factor ? ` <small class="muted">(x${fmt(r.followup.score_factor, 2)})</small>` : ""}</b></div>
       <div><span>Zeit</span><b>${fmtS(r.total_s)}</b></div>
       <div><span>Erstes Token</span><b>${fmtS(r.ttft_s)}</b></div>
       <div><span>Erzeugung</span><b>${fmt(r.decode_tps, 1)} tok/s</b></div>

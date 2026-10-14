@@ -95,7 +95,10 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                         answer = r["content"] + "\n\n--- Nachfrage: " + fu["prompt"] + " ---\n\n" + r2["content"]
                         first = c
                         c = t.check(answer)
-                        asked = {"prompt": fu["prompt"], "first_score": first.score, "first_detail": first.detail}
+                        c.score = round(c.score * fu["score_factor"], 3)
+                        c.detail += f" (nach Nachfrage x{fu['score_factor']:g})"
+                        asked = {"prompt": fu["prompt"], "first_score": first.score, "first_detail": first.detail,
+                                 "score_factor": fu["score_factor"]}
                 tok = sum(x["completion_tokens"] or 0 for x in turns)
                 dec = sum(x["decode_s"] for x in turns)
                 rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,

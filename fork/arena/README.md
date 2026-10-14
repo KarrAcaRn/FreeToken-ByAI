@@ -148,13 +148,16 @@ Nennt ein Modell nur einen Teil der Antwort, kann es sich in einer zweiten Runde
 selben Gespräch gestellt, wenn nach der ersten Antwort alle `when_missing`-Gruppen fehlen und alle
 `when_found`-Gruppen gefunden wurden (Gruppennamen aus `[[check.groups]]`). Geprüft wird danach erste Antwort plus
 Erklärung, Strafgruppen gelten also auch für die Erklärung. Zeit und Tokens beider Runden zählen zusammen. Auf der
-Seite steht so ein Ergebnis als "gelöst nach Nachfrage" (✓<sup>N</sup>). Beispiel: `aufgaben/delphi-result-init`.
+Seite steht so ein Ergebnis als "gelöst nach Nachfrage" (✓<sup>N</sup>). Die Punkte werden mit `score_factor`
+multipliziert (Standard 0.75): gelöst nach Nachfrage zählt in der Rangliste 0,75 statt 1. Beispiel:
+`aufgaben/delphi-result-init`.
 
 ```toml
 [[followups]]
 when_found = ["Result wird vor der Schleife nicht mit '' initialisiert"]
 when_missing = ["Folge: an den alten Wert der Zielvariable wird angehängt"]
 prompt = "Warum führt das in diesem Fall zu einem Fehler? Erkläre, was dabei in Delphi intern passiert."
+# score_factor = 0.75
 ```
 
 ### Musterlösung

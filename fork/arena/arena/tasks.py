@@ -68,7 +68,8 @@ def load_task(d: Path) -> Task:
         max_tokens=int(cfg.get("max_tokens", 8192)), check=CHECKERS[chk["type"]](chk, d),
         check_type=chk["type"], fingerprint=_fingerprint(d), dir=d,
         followups=[{"prompt": f["prompt"].strip(), "when_missing": f.get("when_missing", []),
-                    "when_found": f.get("when_found", [])} for f in cfg.get("followups", [])],
+                    "when_found": f.get("when_found", []), "score_factor": float(f.get("score_factor", 0.75))}
+                   for f in cfg.get("followups", [])],
     )
 
 
