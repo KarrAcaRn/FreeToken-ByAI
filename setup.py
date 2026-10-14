@@ -87,11 +87,13 @@ IS_WINDOWS = sys.platform == "win32"
 if IS_ROCM:
     runtime_include_dirs, runtime_library_dirs, runtime_lib = _rocm_paths()
     runtime_link_args = [f"-Wl,-rpath,{runtime_library_dirs[0]}"]
-    # These extensions contain host code only. BuildExtension supplies the ROCm
+    # Host sources. BuildExtension supplies the ROCm
     # platform defines to the C++ compiler; offload architecture flags belong on
     # HIP device sources and would be rejected by the host compiler here.
     cxx_std = _rocm_cxx_std()
     extra_compile = ["-O3", cxx_std]
+    # Device sources (.cu, built by hipcc); BuildExtension adds the offload architectures.
+    device_compile = ["-O3", cxx_std]
 else:
     runtime_include_dirs, runtime_library_dirs = _cuda_runtime_paths()
     runtime_lib = "cudart"
@@ -99,6 +101,11 @@ else:
     cxx_std = "-std=c++20"
     # cl ignores -O3 and -std with a warning (D9002): /O2 is its spelling, and BuildExtension adds the /std flag.
     extra_compile = ["/O2"] if IS_WINDOWS else ["-O3", cxx_std]
+    # Device sources (.cu, built by nvcc): SASS for each major arch, which also runs on the newer minors of that major,
+    # plus PTX for the oldest arch nvcc 13 supports, which the driver builds for any other GPU at load.
+    # Naming archs also stops torch from picking them, which fails on a build machine without a GPU.
+    device_compile = ["-O3", cxx_std] + [f"-gencode=arch=compute_{a},code=sm_{a}" for a in (75, 80, 90, 100, 120)]
+    device_compile.append("-gencode=arch=compute_75,code=compute_75")
 
 _check_toolchain()
 
@@ -127,11 +134,17 @@ setup(
                 name="freetoken.kernel._cpu_moe",
                 sources=[
                     "python/freetoken/kernel/csrc/cpu_moe/cpu_moe_ext.cpp",
+                    f"python/freetoken/kernel/csrc/cpu_moe/gpu_sync_{'hip' if IS_ROCM else 'cuda'}.cpp",
+                    "python/freetoken/kernel/csrc/cpu_moe/gpu_sync_io.cu",
+                    *sorted(
+                        str(p.relative_to(ROOT))
+                        for p in (ROOT / "python/freetoken/kernel/csrc/cpu_moe/kernels").glob("*.cpp")
+                    ),
                 ],
                 include_dirs=[KERNEL_INCLUDE, *runtime_include_dirs],
                 library_dirs=runtime_library_dirs,
                 libraries=[runtime_lib],
-                extra_compile_args=extra_compile + ["-pthread"],
+                extra_compile_args={"cxx": extra_compile + ["-pthread"], "nvcc": device_compile},
                 extra_link_args=runtime_link_args,
             )
         ] if not IS_WINDOWS else []),
