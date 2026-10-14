@@ -134,6 +134,15 @@ def serve(model_id: str, m: dict, port: int, log: Path):
     proc = subprocess.Popen(cmd, env=env, stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
     base = f"http://127.0.0.1:{port}"
     t0 = time.time()
+    try:
+        wait_ready(proc, base, m, log, t0)
+    except BaseException:
+        stop(proc)  # a failed frontend can stay up and hold the port for every following model
+        raise
+    return proc, base + "/v1", round(time.time() - t0), tree
+
+
+def wait_ready(proc, base: str, m: dict, log: Path, t0: float):
     while True:
         if proc.poll() is not None:
             raise RuntimeError(f"ft serve beendet (rc {proc.returncode}), siehe {log}")
@@ -148,7 +157,6 @@ def serve(model_id: str, m: dict, port: int, log: Path):
         if time.time() - t0 > m.get("load_timeout", 1800):
             raise RuntimeError("Ladezeit überschritten")
         time.sleep(3)
-    return proc, base + "/v1", round(time.time() - t0), tree
 
 
 def stop(proc):

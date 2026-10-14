@@ -25,15 +25,13 @@ flags = "--kv-cache-dtype fp8"
 label = "Gemma 4 E2B"
 group = "Klein (dicht)"
 path = "models--google--gemma-4-E2B-it/snapshots/*"
-flags = "--kv-cache-dtype fp8"
-caps = ["vision"]
+flags = "--kv-cache-dtype fp8 --text-model-only"  # #467-Vision lehnt E2B/E4B ab (clipped linears)
 
 [gemma4-e4b]
 label = "Gemma 4 E4B"
 group = "Klein (dicht)"
 path = "models--google--gemma-4-E4B-it/snapshots/*"
-flags = "--kv-cache-dtype fp8"
-caps = ["vision"]
+flags = "--kv-cache-dtype fp8 --text-model-only"  # #467-Vision lehnt E2B/E4B ab (clipped linears)
 
 [mistral-7b]
 label = "Mistral 7B Instruct v0.3"
