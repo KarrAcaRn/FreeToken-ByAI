@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RESULTS = Path(os.environ.get("ARENA_RESULTS", ROOT / "results" / "runs.jsonl"))
 
 
-MIN_CONTEXT = 100_000  # below this a model is not usable for real work (user, 2026-10-15)
+MIN_CONTEXT = 80_000  # below this a model is not usable for real work (user, 2026-10-15: first 100k, then 80k)
 
 
 def load_models(include_removed: bool = False) -> dict:

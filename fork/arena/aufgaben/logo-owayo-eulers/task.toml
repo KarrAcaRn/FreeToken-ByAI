@@ -2,7 +2,7 @@ title = "Logo Owayo Eulers"
 category = "image"
 level = "mittel"
 summary = "Logo für eine Eishockeymannschaft mit Eule und Schlägern, ohne Hintergrund. Wird nur gezeigt, nicht bewertet."
-max_tokens = 12288
+max_tokens = 32768
 prompt = """
 Erstelle ein Logo für eine Eishockeymannschaft. Das Logo soll eine Eule und Eishockeyschläger enthalten.
 Das Team heißt "Owayo Eulers". Der Hintergrund des Logos soll einfarbig sein, am besten besitzt das Logo gar keinen Hintergrund.

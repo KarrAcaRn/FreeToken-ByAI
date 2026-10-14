@@ -2,7 +2,7 @@
 # caps = Fähigkeiten (vision = Bildeingabe), worktree = welcher FreeToken-Stand den Server stellt
 # (Standard ~/claude/ft-speed-wt = Branch next-speed).
 # "--model all" lässt alle Einträge mit skip = true aus. removed = "Grund" streicht ein Modell ganz (kein Lauf, nicht
-# auf der Seite). Jedes Modell braucht mindestens 100k Kontext (MIN_CONTEXT in run.py), sonst bricht der Lauf ab.
+# auf der Seite). Jedes Modell braucht mindestens 80k Kontext (MIN_CONTEXT in run.py), sonst bricht der Lauf ab.
 
 [qwen3-0_6b]
 label = "Qwen3 0.6B"
@@ -98,14 +98,14 @@ flags = "--kv-cache-dtype fp8 --text-model-only --embed-device cpu --max-running
 label = "Qwen3.8 27B (NVFP4)"
 group = "Groß (dicht)"
 path = "models--RadixArk--Qwen3.8-27B-NVFP4/snapshots/*"
-flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.95 --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"  # fp8-KV: 99.5k, knapp unter 100k; nvfp4 ~190k
+flags = "--kv-cache-dtype fp8 --text-model-only --memory-ratio 0.95 --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"  # 99.5k Kontext (nvfp4-KV: ~190k, langsamer)
 
 [qwen3_8-27b-dflash]
 label = "Qwen3.8 27B (NVFP4 + DFlash)"
 group = "Groß (dicht)"
 path = "models--RadixArk--Qwen3.8-27B-NVFP4/snapshots/*"
-flags = "--kv-cache-dtype fp8 --text-model-only --memory-ratio 0.95 --embed-device cpu --speculative-algorithm dflash --speculative-draft-model-path /home/basti/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4 --speculative-draft-quant fp8"
-removed = "höchstens ~81k Kontext (Draft-Modell braucht VRAM, auch mit nvfp4-KV)"
+# Draft-Modell braucht VRAM: nur mit nvfp4-KV, 1 Anfrage, kleinen Prefill-Blöcken ~81k Kontext (Prognose)
+flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.97 --embed-device cpu --max-running-requests 1 --max-prefill-length 2048 --cuda-graph-max-bs 1 --speculative-algorithm dflash --speculative-draft-model-path /home/basti/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4 --speculative-draft-quant fp8"
 
 [glm4_5-air]
 label = "GLM-4.5-Air (NVFP4)"
