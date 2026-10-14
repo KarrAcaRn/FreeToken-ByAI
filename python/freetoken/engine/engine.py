@@ -700,16 +700,6 @@ class Engine:
 
             run_preflight(config, self.model, init_free_memory)
         self._load_weights(config)
-        if config.active_encoders:
-            from freetoken.models.blocks import SupportsMultimodal
-
-            if not isinstance(self.model, SupportsMultimodal):
-                raise TypeError(
-                    f"{type(self.model).__name__} has encoders registered but lacks the SupportsMultimodal hooks; "
-                    "run with --text-model-only"
-                )
-            # before the residency snapshot, so streamed blocks are not charged as resident weights
-            self.model.place_encoder_weights(config.mm.encoder_weights)
         # before the residency snapshot, so the freed table goes to the KV pool
         embed_host_bytes = self._move_embeddings_to_host() if config.embed_device == "cpu" else 0
         # The draft loads with the weights, before the residency snapshot, so the KV budget sees it.
@@ -991,6 +981,19 @@ class Engine:
             raise ValueError(f"{config.model_path} keeps its routed experts as dense weights (an older `ft checkpoint --moe-backend fused`); reconvert it with `ft checkpoint`")
         with _weight_load_context():
             self.model.load_state_dict(self._load_weight_state_dict(config))
+        if config.active_encoders:
+            from freetoken.models.blocks import SupportsMultimodal
+
+            if not isinstance(self.model, SupportsMultimodal):
+                raise TypeError(
+                    f"{type(self.model).__name__} has encoders registered but lacks the SupportsMultimodal hooks; "
+                    "run with --text-model-only"
+                )
+            # before finalize_quant: host-streamed tower blocks leave the GPU before any finalize copy is
+            # allocated (Muse-Glimmer-30B-NVFP4 peaked 3.4 GiB higher and OOMed on a 24 GB card), and before
+            # the residency snapshot, so streamed blocks are not charged as resident weights. Tower linears
+            # are unquantized, so their finalize is a no-op either way.
+            self.model.place_encoder_weights(config.mm.encoder_weights)
         finalize_quant(self.model)
         if resident:
             self._load_resident_experts(config, resident)
