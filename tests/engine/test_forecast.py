@@ -67,7 +67,8 @@ def _analyze(model_path, *flags, free_gib=8.0):
     from freetoken.server.info import analyze, split_argv
     from freetoken.server.args import parse_args
 
-    opts, argv = split_argv([model_path, "--gpu-free-gib", str(free_gib), *flags])
+    # The forecasts below are sized for bf16 linears; next-speed would otherwise default to online fp8.
+    opts, argv = split_argv([model_path, "--gpu-free-gib", str(free_gib), "--online-quant", "none", *flags])
     config, _ = parse_args(argv, prog="ft info")
     return analyze(config, opts)
 
@@ -197,7 +198,7 @@ def _resolved(model_path, *flags):
 
     from freetoken.distributed import try_get_tp_info
 
-    config, _ = parse_args(["--model", model_path, *flags])
+    config, _ = parse_args(["--model", model_path, "--online-quant", "none", *flags])
     if try_get_tp_info() is None:
         set_tp_info(rank=0, size=1)
     _adjust_config(config)
