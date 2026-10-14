@@ -119,4 +119,4 @@ label = "Qwen3.8 Flash-Next (NVFP4)"
 group = "MoE (Offload)"
 path = "models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/*"
 flags = "--kv-cache-dtype fp8 --text-model-only --ple-backend disk --cuda-graph-max-bs 1"
-skip = true  # ~21 tok/s, braucht 88 GiB RAM
+# alle Experten im RAM: Peak ~65 GiB RSS (2026-10-07 bei 79 GiB RAM), ~101k Kontext dank --kv-reserve-share
