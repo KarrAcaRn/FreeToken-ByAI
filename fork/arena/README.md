@@ -170,6 +170,24 @@ prompt = "Warum führt das in diesem Fall zu einem Fehler? Erkläre, was dabei i
 # score_factor = 0.75
 ```
 
+### Korrekturdurchgänge
+
+Scheitert eine Antwort an einer bestimmten Art von Fehler, bekommt das Modell die Rückmeldung der Prüfung im selben
+Gespräch zurück und darf nachbessern. Bisher gibt es die Art `compile` (Compilerfehler bei `pascal_tests`; jede
+Fehlerzeile bekommt die betroffene Zeile des Testprogramms darunter, weil die Zeilennummern sich auf das
+zusammengesetzte Programm beziehen). Geprüft wird jeweils nur die neueste Antwort. Jeder weitere Durchgang zieht
+`penalty` von den Punkten ab: im 2. Durchgang gelöst zählt 0,9, im 4. noch 0,7. Zeit und Tokens aller Durchgänge
+zählen zusammen. Auf der Seite steht so ein Ergebnis mit ✓<sup>K1</sup> (Zahl = Korrekturen). Beispiel:
+`aufgaben/delphi-delta-e-2000`.
+
+```toml
+[retries]
+max = 3          # weitere Durchgänge
+penalty = 0.1    # Abzug je weiterem Durchgang
+on = ["compile"]
+prompt = "... {detail} ..."   # {detail} = Rückmeldung der Prüfung
+```
+
 ### Musterlösung
 
 Leg zu jeder Aufgabe eine `musterloesung.md` ab, also so, wie eine perfekte Modellantwort aussähe. `arena.check`

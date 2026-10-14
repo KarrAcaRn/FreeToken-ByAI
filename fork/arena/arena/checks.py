@@ -18,6 +18,7 @@ class Check:
     artifact: dict | None = None  # e.g. {"svg": "..."}, shown on the site
     found: list | None = None  # names of answer groups that matched (follow-ups key on these)
     missing: list | None = None
+    kind: str = ""  # "compile" for compiler errors ([retries] on = ["compile"] keys on it)
 
 
 def final_answer(text: str) -> str:
@@ -234,11 +235,17 @@ def pascal_tests(cfg: dict, task_dir: Path):
         for pat in forbidden:
             if re.search(pat, src, flags=re.IGNORECASE):
                 return Check(False, 0.0, f"verbotenes Muster im Code: {pat}")
-        r = run_pascal(pascal_program(src, tests, names), names)
+        prog = pascal_program(src, tests, names)
+        r = run_pascal(prog, names)
         if "error" in r:
             return Check(False, 0.0, r["error"])
         if "compile_error" in r:
-            return Check(False, 0.0, "kompiliert nicht: " + r["compile_error"])
+            # Line numbers point into the assembled test program; quote the line so the model can find it.
+            lines = prog.splitlines()
+            out = re.sub(r"^(program\.pas\((\d+),\d+\).*)$",
+                         lambda m: m.group(1) + (f"\n    > {lines[int(m.group(2)) - 1].strip()}" if 0 < int(m.group(2)) <= len(lines) else ""),
+                         r["compile_error"], flags=re.MULTILINE)
+            return Check(False, 0.0, "kompiliert nicht: " + out, kind="compile")
         res = r["results"]
         if not res:
             return Check(False, 0.0, "tests.pas enthält keine Test_*-Prozeduren")

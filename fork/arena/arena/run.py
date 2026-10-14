@@ -99,11 +99,34 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                         c.detail += f" (nach Nachfrage x{fu['score_factor']:g})"
                         asked = {"prompt": fu["prompt"], "first_score": first.score, "first_detail": first.detail,
                                  "score_factor": fu["score_factor"]}
+                rounds = None
+                rt = t.retries
+                if rt and not c.passed and c.kind in rt["on"]:
+                    # Feed the checker's complaint back and let the model fix its answer; each extra round costs rt["penalty"].
+                    rounds = []
+                    msgs = t.messages() + [{"role": "assistant", "content": r["content"]}]
+                    while not c.passed and c.kind in rt["on"] and len(rounds) < rt["max"]:
+                        prompt = rt["prompt"].replace("{detail}", c.detail[:4000])
+                        msgs.append({"role": "user", "content": prompt})
+                        try:
+                            rn = chat(url, served, msgs, t.max_tokens, api_key=api_key)
+                        except Exception as e:
+                            rounds.append({"detail_before": c.detail[:2000], "error": repr(e)[:300]})
+                            break
+                        turns.append(rn)
+                        msgs.append({"role": "assistant", "content": rn["content"]})
+                        rounds.append({"detail_before": c.detail[:2000]})
+                        answer += f"\n\n--- Durchgang {len(rounds) + 1}, Rückmeldung: ---\n{c.detail[:2000]}\n\n--- Antwort: ---\n\n" + rn["content"]
+                        c = t.check(rn["content"])
+                    n = len([x for x in rounds if "error" not in x])
+                    if n:
+                        c.score = round(max(0.0, c.score - rt["penalty"] * n), 3)
+                        c.detail += f" (nach {n} Korrektur{'en' if n > 1 else ''}, -{rt['penalty'] * n:g})"
                 tok = sum(x["completion_tokens"] or 0 for x in turns)
                 dec = sum(x["decode_s"] for x in turns)
                 rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,
                            answer=answer[-20000:], reasoning_chars=sum(len(x["reasoning"]) for x in turns),
-                           followup=asked, finish_reason=turns[-1]["finish_reason"], prompt_tokens=r["prompt_tokens"],
+                           followup=asked, retries=rounds, finish_reason=turns[-1]["finish_reason"], prompt_tokens=r["prompt_tokens"],
                            completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
                            decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
                            prefill_tps=r["prefill_tps"])
@@ -111,7 +134,7 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                     rec["detail"] += f" (Tokenlimit {t.max_tokens} erreicht)"
         append(rec)
         if rec["status"] == "ok":
-            fu = " nach Nachfrage" if rec.get("followup") else ""
+            fu = (" nach Nachfrage" if rec.get("followup") else "") + (f" nach {len(rec['retries'])} Korrekturen" if rec.get("retries") else "")
             verdict = "zur Ansicht" if rec["passed"] is None else "BESTANDEN" if rec["passed"] else "nicht bestanden"
             print(f"  {t.id}: {verdict}{fu} score={rec['score']} "
                   f"{rec['completion_tokens']} tok, {rec['total_s']} s, {rec['decode_tps']} tok/s - {rec['detail'][:100]}")

@@ -152,6 +152,7 @@ details summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
       <div class="legend">
         <span class="pill pass">✓</span>gelöst
         <span class="pill pass">✓ 75%<sup>N</sup></span>gelöst nach Nachfrage (zählt 0,75)
+        <span class="pill pass">✓ 90%<sup>K1</sup></span>gelöst nach Compiler-Rückmeldung (je Korrektur −0,1)
         <span class="pill fail">✗</span>nicht gelöst
         <span class="pill skip">–</span>nicht anwendbar
         <span class="pill view">▣</span>Bild ohne automatische Bewertung (★ = Handbewertung)
@@ -307,7 +308,7 @@ function matrix() {
       const thumb = s === "view" && r.artifact && r.artifact.svg ? `<img class="thumb" alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(r.artifact.svg)}">` : "";
       const sv = s === "view" ? starsTxt(rateFor(m.id + "|" + t.id, r)) : "";
       const sub = s === "view" && sv ? `<span class="stars-avg">${sv}</span>` : s === "pass" || s === "fail" || s === "view" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
-      const extra = ((s === "fail" && r.score > 0) || (s === "pass" && r.score < 1) ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "");
+      const extra = ((s === "fail" && r.score > 0) || (s === "pass" && r.score < 1) ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "") + (r && r.retries && r.retries.length && (s === "pass" || s === "fail") ? `<sup>K${r.retries.length}</sup>` : "");
       const key = m.id + "|" + t.id;
       h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${thumb}${sym}${extra}<small>${sub}</small></span></td>`;
     }
@@ -334,7 +335,7 @@ function showDetail(key) {
   else {
     if (r.fingerprint !== t.fingerprint) h += `<div class="banner">Die Aufgabe wurde seit diesem Lauf geändert; das Ergebnis ist veraltet.</div>`;
     h += `<div class="kv">
-      <div><span>Ergebnis</span><b style="color:var(--${r.passed == null ? "muted" : r.passed ? "pass" : "fail"})">${r.passed == null ? "ohne Bewertung" : r.passed ? (r.followup ? "gelöst nach Nachfrage" : "gelöst") : "nicht gelöst"}</b></div>
+      <div><span>Ergebnis</span><b style="color:var(--${r.passed == null ? "muted" : r.passed ? "pass" : "fail"})">${r.passed == null ? "ohne Bewertung" : r.passed ? (r.followup ? "gelöst nach Nachfrage" : r.retries && r.retries.length ? `gelöst im ${r.retries.length + 1}. Durchgang` : "gelöst") : "nicht gelöst"}</b></div>
       <div ${r.score == null ? "hidden" : ""}><span>Punkte</span><b>${fmt(100 * r.score, 1)} %${r.followup && r.followup.score_factor ? ` <small class="muted">(x${fmt(r.followup.score_factor, 2)})</small>` : ""}</b></div>
       <div><span>Zeit</span><b>${fmtS(r.total_s)}</b></div>
       <div><span>Erstes Token</span><b>${fmtS(r.ttft_s)}</b></div>
@@ -345,6 +346,7 @@ function showDetail(key) {
     </div>
     <p style="margin:0"><b>Prüfung:</b> ${esc(r.detail)}</p>`;
     if (r.followup) h += `<p style="margin:0"><b>Nachfrage:</b> „${esc(r.followup.prompt)}“ – gestellt, weil die erste Antwort nur ${fmt(100 * (r.followup.first_score ?? 0), 0)} % erreichte (${esc(r.followup.first_detail || r.followup.error || "")}).</p>`;
+    if (r.retries && r.retries.length) h += `<details><summary>${r.retries.length} Korrekturdurchgang${r.retries.length > 1 ? "änge" : ""} nach Compiler-Rückmeldung</summary>${r.retries.map((x, i) => `<p style="margin:8px 0 4px"><b>Rückmeldung vor Durchgang ${i + 2}${x.error ? " (Anfrage fehlgeschlagen)" : ""}:</b></p><pre>${esc(x.error || x.detail_before)}</pre>`).join("")}</details>`;
     if (r.artifact && r.artifact.svg) {
       h += `<div class="imgs"><figure>${svgImg(r.artifact.svg)}<figcaption>Antwort des Modells</figcaption></figure>`;
       if (t.reference_svg) h += `<figure>${svgImg(t.reference_svg)}<figcaption>Referenz</figcaption></figure>`;
