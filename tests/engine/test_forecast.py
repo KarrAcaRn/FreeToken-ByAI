@@ -176,6 +176,19 @@ def test_embed_device_cpu_moves_the_table_to_host(tiny_qwen3):
     assert not any(t.flags == ["--embed-device cpu"] for t in r.tips)
 
 
+def test_load_peak_holds_tables_that_move_to_host_only_after_the_load(tiny_qwen3):
+    table = 256 * 128 * 2
+    r = _analyze(tiny_qwen3, "--memory-ratio", "0.8", "--embed-device", "cpu", free_gib=32)
+    w = r.inputs.weights
+    # every tensor is on the device right after load_state_dict; --embed-device cpu moves its table later
+    assert w.load_peak == w.gpu_total + table
+    # a card that holds the settled weights but not the load peak is refused before loading
+    fc = fc_mod.forecast_memory(r.config, w.gpu_total, w.load_peak - 1, load_peak=w.load_peak)
+    assert fc.verdict == "does not fit"
+    assert "loading peaks" in fc.reasons[0]
+    assert fc_mod.forecast_memory(r.config, w.gpu_total, w.load_peak + GiB, load_peak=w.load_peak).verdict != "does not fit"
+
+
 def test_tied_embedding_is_not_offered(tmp_path):
     tied = write_checkpoint(tmp_path / "tied", {**TINY_QWEN3, "tie_word_embeddings": True},
                             {k: v for k, v in tiny_qwen3_tensors().items() if k != "lm_head.weight"})
