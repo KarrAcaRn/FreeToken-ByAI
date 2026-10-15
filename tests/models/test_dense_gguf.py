@@ -38,7 +38,7 @@ def _raw() -> dict[str, torch.Tensor]:
     return raw
 
 
-def _write_gguf(path, arch: str, raw: dict[str, torch.Tensor]) -> None:
+def _write_gguf(path, arch: str, raw: dict[str, torch.Tensor], yarn: float | None = None) -> None:
     """What llama.cpp's converter writes: llama permutes q / k for its interleaved rope, ships
     Llama 3's rope scaling as rope_freqs and ties the embedding (no output.weight); qwen2 carries
     qkv biases, qwen3 q / k norms. Layer 0 keeps v and up in Q4_0 next to Q8_0 (the *_M mixes)."""
@@ -54,6 +54,10 @@ def _write_gguf(path, arch: str, raw: dict[str, torch.Tensor]) -> None:
         w.add_uint32(f"{arch}.{key}", value)
     w.add_float32(f"{arch}.rope.freq_base", 5e5)
     w.add_float32(f"{arch}.attention.layer_norm_rms_epsilon", 1e-5)
+    if yarn:  # what llama.cpp writes for a YaRN-extended export
+        w.add_string(f"{arch}.rope.scaling.type", "yarn")
+        w.add_float32(f"{arch}.rope.scaling.factor", yarn)
+        w.add_uint32(f"{arch}.rope.scaling.original_context_length", 4096)
 
     def add(name: str, t: torch.Tensor, qtype=F32):
         arr = t.float().contiguous().numpy()
@@ -139,6 +143,34 @@ def test_config_has_the_hf_geometry(dense_gguf):
         torch.testing.assert_close(torch.tensor(scaling["factors"]), raw["rope_freqs"])
     else:
         assert scaling is None
+
+
+YARN = {"rope_scaling": {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 4096}}
+
+
+def test_yarn_override_extends_the_context(dense_gguf):
+    from freetoken.models.gguf.dense import parse_gguf_config
+
+    arch, path, _raw = dense_gguf
+    if arch == "llama":  # its rope already carries rope_freqs
+        with pytest.raises(NotImplementedError, match="rope_freqs"):
+            parse_gguf_config(cached_load_hf_config(path, YARN))
+        return
+    rotary = parse_gguf_config(cached_load_hf_config(path, YARN)).rotary_config
+    assert rotary.scaling["rope_type"] == "yarn" and rotary.max_position == 4096
+    assert rotary.table_positions == 4 * 4096
+    with pytest.raises(ValueError, match="accepts only"):
+        cached_load_hf_config(path, {"num_hidden_layers": 1})
+
+
+def test_yarn_metadata_is_read(tmp_path):
+    from freetoken.models.gguf.dense import parse_gguf_config
+
+    path = tmp_path / "qwen3-yarn.gguf"
+    _write_gguf(path, "qwen3", _raw(), yarn=4.0)
+    rotary = parse_gguf_config(cached_load_hf_config(str(path))).rotary_config
+    assert rotary.scaling == {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 4096}
+    assert rotary.table_positions == 4 * 4096
 
 
 def test_emitted_keys_are_the_model_state_dict(dense_gguf):
