@@ -11,10 +11,10 @@ def get_json(url: str, api_key: str | None = None, timeout: float = 10) -> dict:
 
 
 def chat(base_url: str, model: str, messages: list, max_tokens: int, api_key: str | None = None,
-         temperature: float = 0.0, timeout: float = 3600) -> dict:
+         temperature: float = 0.0, timeout: float = 3600, extra: dict | None = None) -> dict:
     body = {
         "model": model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature,
-        "stream": True, "stream_options": {"include_usage": True},
+        "stream": True, "stream_options": {"include_usage": True}, **(extra or {}),
     }
     headers = {"Content-Type": "application/json"}
     if api_key:

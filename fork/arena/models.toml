@@ -1,6 +1,6 @@
 # Ein Eintrag pro getesteter KI. path = Glob unter ~/.cache/huggingface/hub, flags = zusätzliche ft-serve-Flags,
 # caps = Fähigkeiten (vision = Bildeingabe), worktree = welcher FreeToken-Stand den Server stellt
-# (Standard ~/claude/ft-speed-wt = Branch next-speed).
+# (Standard ~/claude/ft-speed-wt = Branch next-speed), reasoning_effort = Denkstufe, die jede Anfrage mitschickt.
 # "--model all" lässt alle Einträge mit skip = true aus. removed = "Grund" streicht ein Modell ganz (kein Lauf, nicht
 # auf der Seite). Jedes Modell braucht mindestens 80k Kontext (MIN_CONTEXT in run.py), sonst bricht der Lauf ab.
 
@@ -95,17 +95,19 @@ path = "models--RedHatAI--Muse-Glimmer-30B-NVFP4/snapshots/*"
 flags = "--kv-cache-dtype fp8 --text-model-only --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"
 
 [qwen3_8-27b]
-label = "Qwen3.8 27B (NVFP4)"
+label = "Qwen3.8 27B (NVFP4, Denken medium)"
 group = "Groß (dicht)"
 path = "models--RadixArk--Qwen3.8-27B-NVFP4/snapshots/*"
 flags = "--kv-cache-dtype fp8 --text-model-only --memory-ratio 0.95 --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"  # 99.5k Kontext (nvfp4-KV: ~190k, langsamer)
+reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphasen); low / medium / xhigh
 
 [qwen3_8-27b-dflash]
-label = "Qwen3.8 27B (NVFP4 + DFlash)"
+label = "Qwen3.8 27B (NVFP4 + DFlash, Denken medium)"
 group = "Groß (dicht)"
 path = "models--RadixArk--Qwen3.8-27B-NVFP4/snapshots/*"
 # Draft-Modell braucht VRAM: nur mit nvfp4-KV, 1 Anfrage, kleinen Prefill-Blöcken ~81k Kontext (Prognose)
 flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.97 --embed-device cpu --max-running-requests 1 --max-prefill-length 2048 --cuda-graph-max-bs 1 --speculative-algorithm dflash --speculative-draft-model-path /home/basti/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4 --speculative-draft-quant fp8"
+reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphasen); low / medium / xhigh
 
 [glm4_5-air]
 label = "GLM-4.5-Air (NVFP4)"
@@ -115,8 +117,9 @@ path = "models--gesong2077--GLM-4.5-Air-NVFP4/snapshots/*"
 flags = "--kv-cache-dtype fp8 --max-running-requests 1 --kv-reserve-tokens 85000"
 
 [qwen3_8-flash-next]
-label = "Qwen3.8 Flash-Next (NVFP4)"
+label = "Qwen3.8 Flash-Next (NVFP4, Denken medium)"
 group = "MoE (Offload)"
 path = "models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/*"
 flags = "--kv-cache-dtype fp8 --text-model-only --ple-backend disk --cuda-graph-max-bs 1"
 # alle Experten im RAM: Peak ~65 GiB RSS (2026-10-07 bei 79 GiB RAM), ~101k Kontext dank --kv-reserve-share
+reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphasen); low / medium / xhigh

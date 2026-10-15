@@ -57,7 +57,8 @@ def git_rev(path: str) -> str | None:
         return None
 
 
-def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, tasks, meta: dict, force: bool, api_key=None):
+def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, tasks, meta: dict, force: bool, api_key=None,
+              extra: dict | None = None):
     done = latest_results()
     for t in tasks:
         old = done.get((model_id, t.id))
@@ -74,7 +75,7 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
             rec.update(status="skipped", reason=f"Kontext zu klein (~{approx_prompt} + {t.max_tokens} > {ctx} Tokens)")
         else:
             try:
-                r = chat(url, served, t.messages(), t.max_tokens, api_key=api_key)
+                r = chat(url, served, t.messages(), t.max_tokens, api_key=api_key, extra=extra)
             except urllib.error.HTTPError as e:
                 rec.update(status="error", reason=f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}")
             except Exception as e:
@@ -91,7 +92,7 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                     msgs = t.messages() + [{"role": "assistant", "content": r["content"]},
                                            {"role": "user", "content": fu["prompt"]}]
                     try:
-                        r2 = chat(url, served, msgs, t.max_tokens, api_key=api_key)
+                        r2 = chat(url, served, msgs, t.max_tokens, api_key=api_key, extra=extra)
                     except Exception as e:
                         asked = {"prompt": fu["prompt"], "error": repr(e)[:300]}
                     else:
@@ -113,7 +114,7 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                         prompt = rt["prompt"].replace("{detail}", c.detail[:4000])
                         msgs.append({"role": "user", "content": prompt})
                         try:
-                            rn = chat(url, served, msgs, t.max_tokens, api_key=api_key)
+                            rn = chat(url, served, msgs, t.max_tokens, api_key=api_key, extra=extra)
                         except Exception as e:
                             rounds.append({"detail_before": c.detail[:2000], "error": repr(e)[:300]})
                             break
@@ -254,7 +255,11 @@ def main():
                             "reason": f"Kontext {ctx} unter {MIN_CONTEXT} Tokens", "time": dt.datetime.now().isoformat(timespec="seconds")})
                 continue
             meta = {"engine": "freetoken", "commit": git_rev(tree), "branch": Path(tree).name, "load_s": load_s, "ctx": ctx}
-            run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True)
+            # request fields per model, e.g. reasoning_effort = "medium" (Qwen3.8 defaults to xhigh)
+            extra = {"reasoning_effort": m["reasoning_effort"]} if m.get("reasoning_effort") else None
+            if extra:
+                meta.update(extra)
+            run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True, extra=extra)
         finally:
             stop(proc)
 
