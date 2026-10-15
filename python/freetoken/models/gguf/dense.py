@@ -67,14 +67,15 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
             freq_factors = tuple(dequantize(t.packed().reshape(-1), t.ggml_type, torch.float32).tolist())
     if not types:
         raise NotImplementedError(f"{shim.model_path}: no GGUF tensor table; serve the .gguf file directly")
-    if shim.metadata.get(f"{arch}.rope.scaling.type") not in (None, "none"):
-        raise NotImplementedError(f"{shim.model_path}: rope scaling metadata in a {arch} GGUF is not supported")
+    max_position, scaling = shim.rope()
+    if freq_factors and scaling:
+        raise NotImplementedError(f"{shim.model_path}: YaRN on top of rope_freqs (Llama 3.x) is not supported")
     rotary = RotaryConfig(
         head_dim=head_dim,
         rotary_dim=int(g("rope.dimension_count", head_dim)),
-        max_position=int(g("context_length")),
+        max_position=max_position,
         base=float(g("rope.freq_base", 10_000.0)),
-        scaling={"rope_type": "freq_factors", "factors": freq_factors} if freq_factors else None,
+        scaling={"rope_type": "freq_factors", "factors": freq_factors} if freq_factors else scaling,
     )
     return ModelConfig(
         num_layers=int(g("block_count")),

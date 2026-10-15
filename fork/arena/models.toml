@@ -72,8 +72,8 @@ flags = "--kv-cache-dtype fp8 --text-model-only"
 label = "Qwen3 30B-A3B (Q4_K_M GGUF)"
 group = "MoE"
 path = "models--Qwen--Qwen3-30B-A3B-GGUF/snapshots/*/*.gguf"
-flags = "--kv-cache-dtype fp8"
-removed = "GGUF: 40k Kontext, YaRN lässt sich bei GGUF nicht einschalten (HF-Gewichte nicht geladen)"
+# YaRN x4 (Qwen3-Modellkarte) braucht den GGUF-YaRN-Support (next 2026-10-15); 100k KV reserviert, ~80% der Experten im VRAM
+flags = '''--kv-cache-dtype fp8 --max-running-requests 1 --kv-reserve-tokens 100000 --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}''''
 
 [qwen3_6-35b-a3b]
 label = "Qwen3.6 35B-A3B (NVFP4)"

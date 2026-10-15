@@ -52,14 +52,13 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
     num_q, num_kv = int(g("attention.head_count")), int(g("attention.head_count_kv"))
     head_dim = int(g("attention.key_length", hidden // num_q))
     moe_inter = int(g("expert_feed_forward_length"))
-    if shim.metadata.get(f"{arch}.rope.scaling.type") not in (None, "none"):
-        raise NotImplementedError(f"{shim.model_path}: rope scaling in a {arch} GGUF is not supported")
+    max_position, scaling = shim.rope()
     rotary = RotaryConfig(
         head_dim=head_dim,
         rotary_dim=int(g("rope.dimension_count", head_dim)),
-        max_position=int(g("context_length")),
+        max_position=max_position,
         base=float(g("rope.freq_base")),
-        scaling=None,
+        scaling=scaling,
     )
     return ModelConfig(
         num_layers=num_layers,
