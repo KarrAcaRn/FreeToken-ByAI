@@ -1,4 +1,5 @@
 .venv/
 site/
 results/logs/
+results/transcripts/
 __pycache__/

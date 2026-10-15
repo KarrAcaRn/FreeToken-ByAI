@@ -59,6 +59,20 @@ def latest_results() -> dict:
     return out
 
 
+def save_transcript(rec: dict, turns: list) -> str:
+    """Full reasoning + answer of every round as markdown under results/transcripts/ (local, not in git);
+    runs.jsonl only keeps the answers."""
+    path = RESULTS.parent / "transcripts" / rec["model"] / f"{rec['task']}-{rec['time'].replace(':', '')}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parts = [f"# {rec['model']} - {rec['task']} ({rec['time']})\n"]
+    for x in turns:
+        parts.append(f"## {x['label']} ({x['completion_tokens']} Tokens, {x['total_s']} s, Ende: {x['finish_reason']}"
+                     f"{', Denken abgebrochen' if x['think_stopped'] else ''})\n\n### Denkphase\n\n{x['reasoning']}\n\n"
+                     f"### Antwort\n\n{x['content']}\n")
+    path.write_text("\n".join(parts))
+    return str(path.relative_to(RESULTS.parent))
+
+
 def append(rec: dict):
     RESULTS.parent.mkdir(exist_ok=True)
     with RESULTS.open("a") as f:
@@ -164,6 +178,7 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                            completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
                            decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
                            prefill_tps=r["prefill_tps"])
+                rec["transcript"] = save_transcript(rec, turns)
                 if rec["think_stopped"]:
                     rec["detail"] += f" (Denken nach {think_limit / 60:g} min abgebrochen)"
                 if turns[-1]["finish_reason"] == "time" and not c.passed:
