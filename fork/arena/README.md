@@ -55,7 +55,10 @@ title = "Kurzer Name"              # erscheint auf der Seite
 category = "code"                  # code | image | text
 level = "mittel"                   # leicht | mittel | schwer (nur Anzeige)
 summary = "Ein Satz, was geprüft wird."
-max_tokens = 8192                  # Obergrenze für die Antwort inkl. Denkphase
+time_limit = 180                   # optional: Sekunden pro Anfrage (Standard 180; Nachfrage/Korrektur je eigene)
+think_limit = 120                  # optional: denkt das Modell nach so vielen Sekunden noch, wird das Denken
+                                   # beendet und es muss sofort antworten (Standard 120, 0 = aus)
+max_tokens = 8192                  # optional: Token-Obergrenze; ohne darf die Antwort den freien Kontext füllen
 prompt = """..."""                 # oder prompt_file = "prompt.md"
 attach = ["dokument.md"]           # optional: {{dokument.md}} im Prompt wird durch die Datei ersetzt
 images = ["bild.png"]              # optional: Bilder vor dem Text, macht die Aufgabe zu needs = ["vision"]
@@ -106,6 +109,16 @@ min_match = 0.98                   # ab diesem Anteil gilt die Aufgabe als gelö
 color_tolerance = 48               # erlaubte Abweichung pro Farbkanal (0-255)
 ```
 
+**`svg_view`**: Keine Bewertung. Das letzte `<svg>` der Antwort wird auf der Seite als kleines Bild gezeigt (in der
+Matrix direkt als Vorschau). Als Hinweise erscheinen der Hintergrund (transparent / einfarbig / uneinheitlich) und ob
+die Texte aus `expect_text` im SVG stehen. Solche Aufgaben zählen nicht in die Rangliste, Zeit und Tokens schon.
+
+```toml
+[check]
+type = "svg_view"
+expect_text = ["Owayo Eulers"]
+```
+
 **`answer`**: Geprüft wird die letzte Zeile `ANTWORT: ...` (fehlt sie, die ganze Antwort). Groß-/Kleinschreibung
 ist egal, Tausenderpunkte werden ignoriert (`4.850` = `4850`). Bitte im Prompt um diese Zeile.
 
@@ -140,6 +153,42 @@ name = "behauptet, die Funktion liefere einen leeren String"
 must_not = true
 regex = '''(liefert|gibt|returns?)[^.,]{0,40}?(leere[nrs]?\s+string|empty\s+string)'''
 unless_before = '''\b(nicht|kein\w*|nie|not|statt)\b'''
+```
+
+### Nachfrage
+
+Nennt ein Modell nur einen Teil der Antwort, kann es sich in einer zweiten Runde erklären. Die Nachfrage wird im
+selben Gespräch gestellt, wenn nach der ersten Antwort alle `when_missing`-Gruppen fehlen und alle
+`when_found`-Gruppen gefunden wurden (Gruppennamen aus `[[check.groups]]`). Geprüft wird danach erste Antwort plus
+Erklärung, Strafgruppen gelten also auch für die Erklärung. Zeit und Tokens beider Runden zählen zusammen. Auf der
+Seite steht so ein Ergebnis als "gelöst nach Nachfrage" (✓<sup>N</sup>). Die Punkte werden mit `score_factor`
+multipliziert (Standard 0.75): gelöst nach Nachfrage zählt in der Rangliste 0,75 statt 1. Beispiel:
+`aufgaben/delphi-result-init`.
+
+```toml
+[[followups]]
+when_found = ["Result wird vor der Schleife nicht mit '' initialisiert"]
+when_missing = ["Folge: an den alten Wert der Zielvariable wird angehängt"]
+prompt = "Warum führt das in diesem Fall zu einem Fehler? Erkläre, was dabei in Delphi intern passiert."
+# score_factor = 0.75
+```
+
+### Korrekturdurchgänge
+
+Scheitert eine Antwort an einer bestimmten Art von Fehler, bekommt das Modell die Rückmeldung der Prüfung im selben
+Gespräch zurück und darf nachbessern. Bisher gibt es die Art `compile` (Compilerfehler bei `pascal_tests`; jede
+Fehlerzeile bekommt die betroffene Zeile des Testprogramms darunter, weil die Zeilennummern sich auf das
+zusammengesetzte Programm beziehen). Geprüft wird jeweils nur die neueste Antwort. Jeder weitere Durchgang zieht
+`penalty` von den Punkten ab: im 2. Durchgang gelöst zählt 0,9, im 4. noch 0,7. Zeit und Tokens aller Durchgänge
+zählen zusammen. Auf der Seite steht so ein Ergebnis mit ✓<sup>K1</sup> (Zahl = Korrekturen). Beispiel:
+`aufgaben/delphi-delta-e-2000`.
+
+```toml
+[retries]
+max = 3          # weitere Durchgänge
+penalty = 0.1    # Abzug je weiterem Durchgang
+on = ["compile"]
+prompt = "... {detail} ..."   # {detail} = Rückmeldung der Prüfung
 ```
 
 ### Musterlösung

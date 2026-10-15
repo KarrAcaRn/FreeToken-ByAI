@@ -12,10 +12,13 @@ from .sandbox import run_pascal, run_tests
 
 @dataclass
 class Check:
-    passed: bool
-    score: float
+    passed: bool | None  # None = shown on the site without a verdict (svg_view)
+    score: float | None
     detail: str = ""
     artifact: dict | None = None  # e.g. {"svg": "..."}, shown on the site
+    found: list | None = None  # names of answer groups that matched (follow-ups key on these)
+    missing: list | None = None
+    kind: str = ""  # "compile" for compiler errors ([retries] on = ["compile"] keys on it)
 
 
 def final_answer(text: str) -> str:
@@ -66,7 +69,8 @@ def answer(cfg: dict, task_dir: Path):
             detail += " | fehlt: " + ", ".join(missing)
         if bad:
             detail += " | verboten: " + ", ".join(bad)
-        return Check(score == 1.0, round(score, 3), detail)
+        return Check(score == 1.0, round(score, 3), detail,
+                     found=[x for x, ok in parts if ok], missing=missing)
 
     return check
 
@@ -231,11 +235,17 @@ def pascal_tests(cfg: dict, task_dir: Path):
         for pat in forbidden:
             if re.search(pat, src, flags=re.IGNORECASE):
                 return Check(False, 0.0, f"verbotenes Muster im Code: {pat}")
-        r = run_pascal(pascal_program(src, tests, names), names)
+        prog = pascal_program(src, tests, names)
+        r = run_pascal(prog, names)
         if "error" in r:
             return Check(False, 0.0, r["error"])
         if "compile_error" in r:
-            return Check(False, 0.0, "kompiliert nicht: " + r["compile_error"])
+            # Line numbers point into the assembled test program; quote the line so the model can find it.
+            lines = prog.splitlines()
+            out = re.sub(r"^(program\.pas\((\d+),\d+\).*)$",
+                         lambda m: m.group(1) + (f"\n    > {lines[int(m.group(2)) - 1].strip()}" if 0 < int(m.group(2)) <= len(lines) else ""),
+                         r["compile_error"], flags=re.MULTILINE)
+            return Check(False, 0.0, "kompiliert nicht: " + out, kind="compile")
         res = r["results"]
         if not res:
             return Check(False, 0.0, "tests.pas enthält keine Test_*-Prozeduren")
@@ -249,4 +259,36 @@ def pascal_tests(cfg: dict, task_dir: Path):
     return check
 
 
-CHECKERS = {"pascal_tests": pascal_tests, "answer": answer, "python_tests": python_tests, "svg_reference": svg_reference}
+def svg_view(cfg: dict, task_dir: Path):
+    """No verdict: renders the answer's SVG for the site and notes a few facts (text present, background)."""
+    expect_text = cfg.get("expect_text", [])
+
+    def check(text: str) -> Check:
+        svg = extract_svg(text)
+        if svg is None:
+            return Check(False, 0.0, "kein <svg> in der Antwort")
+        try:
+            import cairosvg
+            from PIL import Image
+
+            im = Image.open(io.BytesIO(cairosvg.svg2png(bytestring=svg.encode(), output_width=256, unsafe=False))).convert("RGBA")
+        except Exception as e:
+            return Check(False, 0.0, f"SVG nicht renderbar: {e!r}"[:200], {"svg": svg})
+        px = np.asarray(im)
+        border = np.concatenate([px[0], px[-1], px[:, 0], px[:, -1]])
+        if (border[:, 3] == 0).all():
+            bg = "transparent"
+        elif (border[:, 3] == 255).all() and (np.abs(border[:, :3].astype(int) - border[0, :3]).max() <= 8):
+            bg = "einfarbig #%02x%02x%02x" % tuple(border[0, :3])
+        else:
+            bg = "uneinheitlich (Motiv reicht an den Rand oder mehrfarbig)"
+        notes = [f"Hintergrund {bg}"]
+        src = re.sub(r"\s+", " ", svg).casefold()
+        for t in expect_text:
+            notes.append(f"Text '{t}' {'gefunden' if t.casefold() in src else 'nicht als Text im SVG'}")
+        return Check(None, None, "ohne Bewertung - " + "; ".join(notes), {"svg": svg})
+
+    return check
+
+
+CHECKERS = {"svg_view": svg_view, "pascal_tests": pascal_tests, "answer": answer, "python_tests": python_tests, "svg_reference": svg_reference}

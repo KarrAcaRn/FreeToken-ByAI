@@ -9,7 +9,7 @@ the raw GGUF metadata dict, and a few derived facts that need the tensor table
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .reader import gguf_architecture, load_gguf_metadata, gguf_tensor_names
@@ -35,6 +35,31 @@ class GgufConfigShim:
     metadata: dict[str, Any]
     vocab_size: int
     tie_word_embeddings: bool
+    # --hf-overrides a GGUF accepts: only the rope keys (see GGUF_OVERRIDE_KEYS)
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+    def rope(self, head_dim_default: int | None = None) -> tuple[int, dict[str, Any] | None]:
+        """(max_position, rope scaling or None) from the metadata, with any rope override applied:
+        llama.cpp writes YaRN as ``<arch>.rope.scaling.{type,factor,original_context_length}``."""
+        arch, md = self.model_type, self.metadata
+        max_position = int(self.overrides.get("max_position_embeddings") or md[f"{arch}.context_length"])
+        scaling = self.overrides.get("rope_scaling") or self.overrides.get("rope_parameters")
+        if scaling is not None:
+            scaling = dict(scaling)
+            scaling.setdefault("rope_type", scaling.pop("type", None))
+            if scaling["rope_type"] != "yarn":
+                raise NotImplementedError(f"{self.model_path}: only a YaRN rope override is supported for a GGUF")
+            return max_position, scaling
+        kind = md.get(f"{arch}.rope.scaling.type")
+        if kind in (None, "none"):
+            return max_position, None
+        if kind != "yarn":
+            raise NotImplementedError(f"{self.model_path}: rope scaling {kind!r} in a {arch} GGUF is not supported")
+        return max_position, {
+            "rope_type": "yarn",
+            "factor": float(md[f"{arch}.rope.scaling.factor"]),
+            "original_max_position_embeddings": int(md[f"{arch}.rope.scaling.original_context_length"]),
+        }
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal HF-config-like dict for trunk code that introspects the config
@@ -64,8 +89,18 @@ def _vocab_size(model_path: str) -> int:
     raise ValueError(f"GGUF {model_path}: no token_embd.weight to size the vocab")
 
 
-def build_gguf_shim(model_path: str) -> GgufConfigShim:
+# rope only: everything else a GGUF describes is baked into its tensors
+GGUF_OVERRIDE_KEYS = frozenset({"rope_scaling", "rope_parameters", "max_position_embeddings"})
+# the GGUF parsers that build their rope from GgufConfigShim.rope()
+GGUF_ROPE_ARCHS = frozenset({"llama", "qwen2", "qwen3", "qwen3moe"})
+
+
+def build_gguf_shim(model_path: str, overrides: dict[str, Any] | None = None) -> GgufConfigShim:
+    if unknown := set(overrides or {}) - GGUF_OVERRIDE_KEYS:
+        raise ValueError(f"--hf-overrides on a GGUF accepts only {sorted(GGUF_OVERRIDE_KEYS)}; got {sorted(unknown)}")
     arch = gguf_architecture(model_path)
+    if overrides and arch not in GGUF_ROPE_ARCHS:
+        raise ValueError(f"--hf-overrides is not supported for a {arch!r} GGUF (rope overrides: {sorted(GGUF_ROPE_ARCHS)})")
     registry_key = GGUF_ARCH_TO_REGISTRY.get(arch)
     if registry_key is None:
         raise ValueError(
@@ -96,7 +131,8 @@ def build_gguf_shim(model_path: str) -> GgufConfigShim:
         metadata=metadata,
         vocab_size=_vocab_size(model_path),
         tie_word_embeddings=tie_word_embeddings,
+        overrides=dict(overrides or {}),
     )
 
 
-__all__ = ["GgufConfigShim", "GGUF_ARCH_TO_REGISTRY", "build_gguf_shim"]
+__all__ = ["GgufConfigShim", "GGUF_ARCH_TO_REGISTRY", "GGUF_OVERRIDE_KEYS", "build_gguf_shim"]

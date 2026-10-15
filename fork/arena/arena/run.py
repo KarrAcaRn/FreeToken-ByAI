@@ -18,15 +18,19 @@ import tomllib
 import urllib.error
 from pathlib import Path
 
-from .client import chat, get_json
+from .client import ask, get_json
 from .tasks import load_tasks
 
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = Path(os.environ.get("ARENA_RESULTS", ROOT / "results" / "runs.jsonl"))
 
 
-def load_models() -> dict:
-    return tomllib.loads((ROOT / "models.toml").read_text())
+MIN_CONTEXT = 80_000  # below this a model is not usable for real work (user, 2026-10-15: first 100k, then 80k)
+
+
+def load_models(include_removed: bool = False) -> dict:
+    models = tomllib.loads((ROOT / "models.toml").read_text())
+    return models if include_removed else {k: v for k, v in models.items() if not v.get("removed")}
 
 
 def latest_results() -> dict:
@@ -53,7 +57,8 @@ def git_rev(path: str) -> str | None:
         return None
 
 
-def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, tasks, meta: dict, force: bool, api_key=None):
+def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, tasks, meta: dict, force: bool, api_key=None,
+              extra: dict | None = None, think_format: str = "think"):
     done = latest_results()
     for t in tasks:
         old = done.get((model_id, t.id))
@@ -66,26 +71,85 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
         approx_prompt = len(t.prompt) // 3 + 800 * len(t.images)
         if missing:
             rec.update(status="skipped", reason="kann das Modell nicht: " + ", ".join(sorted(missing)))
-        elif ctx and approx_prompt + t.max_tokens > ctx:
+        elif ctx and t.max_tokens and approx_prompt + t.max_tokens > ctx:
             rec.update(status="skipped", reason=f"Kontext zu klein (~{approx_prompt} + {t.max_tokens} > {ctx} Tokens)")
         else:
+            def chat(msgs):
+                return ask(url, served, msgs, ctx=ctx, max_tokens=t.max_tokens, api_key=api_key, extra=extra,
+                           time_limit=t.time_limit, think_limit=t.think_limit, think_format=think_format)
             try:
-                r = chat(url, served, t.messages(), t.max_tokens, api_key=api_key)
+                r = chat(t.messages())
             except urllib.error.HTTPError as e:
                 rec.update(status="error", reason=f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}")
             except Exception as e:
                 rec.update(status="error", reason=repr(e)[:300])
             else:
                 c = t.check(r["content"])
+                turns = [r]
+                answer = r["content"]
+                asked = None
+                fu = next((f for f in t.followups if not c.passed and c.missing is not None
+                           and any(m in c.missing for m in f["when_missing"])
+                           and all(x in (c.found or []) for x in f["when_found"])), None)
+                if fu is not None:
+                    msgs = t.messages() + [{"role": "assistant", "content": r["content"]},
+                                           {"role": "user", "content": fu["prompt"]}]
+                    try:
+                        r2 = chat(msgs)
+                    except Exception as e:
+                        asked = {"prompt": fu["prompt"], "error": repr(e)[:300]}
+                    else:
+                        turns.append(r2)
+                        answer = r["content"] + "\n\n--- Nachfrage: " + fu["prompt"] + " ---\n\n" + r2["content"]
+                        first = c
+                        c = t.check(answer)
+                        c.score = round(c.score * fu["score_factor"], 3)
+                        c.detail += f" (nach Nachfrage x{fu['score_factor']:g})"
+                        asked = {"prompt": fu["prompt"], "first_score": first.score, "first_detail": first.detail,
+                                 "score_factor": fu["score_factor"]}
+                rounds = None
+                rt = t.retries
+                if rt and not c.passed and c.kind in rt["on"]:
+                    # Feed the checker's complaint back and let the model fix its answer; each extra round costs rt["penalty"].
+                    rounds = []
+                    msgs = t.messages() + [{"role": "assistant", "content": r["content"]}]
+                    while not c.passed and c.kind in rt["on"] and len(rounds) < rt["max"]:
+                        prompt = rt["prompt"].replace("{detail}", c.detail[:4000])
+                        msgs.append({"role": "user", "content": prompt})
+                        try:
+                            rn = chat(msgs)
+                        except Exception as e:
+                            rounds.append({"detail_before": c.detail[:2000], "error": repr(e)[:300]})
+                            break
+                        turns.append(rn)
+                        msgs.append({"role": "assistant", "content": rn["content"]})
+                        rounds.append({"detail_before": c.detail[:2000]})
+                        answer += f"\n\n--- Durchgang {len(rounds) + 1}, Rückmeldung: ---\n{c.detail[:2000]}\n\n--- Antwort: ---\n\n" + rn["content"]
+                        c = t.check(rn["content"])
+                    n = len([x for x in rounds if "error" not in x])
+                    if n:
+                        c.score = round(max(0.0, c.score - rt["penalty"] * n), 3)
+                        c.detail += f" (nach {n} Korrektur{'en' if n > 1 else ''}, -{rt['penalty'] * n:g})"
+                tok = sum(x["completion_tokens"] or 0 for x in turns)
+                dec = sum(x["decode_s"] for x in turns)
                 rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,
-                           answer=r["content"][-20000:], reasoning_chars=len(r["reasoning"]),
-                           **{k: r[k] for k in ("finish_reason", "prompt_tokens", "completion_tokens", "ttft_s",
-                                                "total_s", "decode_tps", "prefill_tps")})
-                if r["finish_reason"] == "length" and not c.passed:
-                    rec["detail"] += f" (Tokenlimit {t.max_tokens} erreicht)"
+                           answer=answer[-20000:], reasoning_chars=sum(len(x["reasoning"]) for x in turns),
+                           followup=asked, retries=rounds, time_limit=t.time_limit, think_limit=t.think_limit,
+                           think_stopped=sum(x["think_stopped"] for x in turns), timed_out=sum(x["finish_reason"] == "time" for x in turns), finish_reason=turns[-1]["finish_reason"], prompt_tokens=r["prompt_tokens"],
+                           completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
+                           decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
+                           prefill_tps=r["prefill_tps"])
+                if rec["think_stopped"]:
+                    rec["detail"] += f" (Denken nach {t.think_limit:g} s abgebrochen)"
+                if turns[-1]["finish_reason"] == "time" and not c.passed:
+                    rec["detail"] += f" (Zeitlimit {t.time_limit:g} s erreicht)"
+                if turns[-1]["finish_reason"] == "length" and not c.passed:
+                    rec["detail"] += " (Kontext voll)" if not t.max_tokens else f" (Tokenlimit {t.max_tokens} erreicht)"
         append(rec)
         if rec["status"] == "ok":
-            print(f"  {t.id}: {'BESTANDEN' if rec['passed'] else 'nicht bestanden'} score={rec['score']} "
+            fu = (" nach Nachfrage" if rec.get("followup") else "") + (f" nach {len(rec['retries'])} Korrekturen" if rec.get("retries") else "")
+            verdict = "zur Ansicht" if rec["passed"] is None else "BESTANDEN" if rec["passed"] else "nicht bestanden"
+            print(f"  {t.id}: {verdict}{fu} score={rec['score']} "
                   f"{rec['completion_tokens']} tok, {rec['total_s']} s, {rec['decode_tps']} tok/s - {rec['detail'][:100]}")
         else:
             print(f"  {t.id}: {rec['status']} - {rec['reason']}")
@@ -100,12 +164,21 @@ def serve(model_id: str, m: dict, port: int, log: Path):
     venv = os.path.expanduser("~/claude/FreeToken-ByAI/.venv/bin")
     env = dict(os.environ, PATH=f"{venv}:/usr/local/cuda/bin:" + os.environ["PATH"], CUDA_HOME="/usr/local/cuda",
                PYTHONPATH=f"{tree}/python")
-    cmd = [f"{venv}/ft", "serve", paths[0], "--port", str(port), "--served-model-name", model_id] + shlex.split(m.get("flags", ""))
+    cmd = [f"{venv}/ft", "serve", "--model-path", paths[0], "--port", str(port), "--served-model-name", model_id] + shlex.split(m.get("flags", ""))
     log.parent.mkdir(parents=True, exist_ok=True)
     print(f"[{model_id}] {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, env=env, stdout=log.open("w"), stderr=subprocess.STDOUT, start_new_session=True)
     base = f"http://127.0.0.1:{port}"
     t0 = time.time()
+    try:
+        wait_ready(proc, base, m, log, t0)
+    except BaseException:
+        stop(proc)  # a failed frontend can stay up and hold the port for every following model
+        raise
+    return proc, base + "/v1", round(time.time() - t0), tree
+
+
+def wait_ready(proc, base: str, m: dict, log: Path, t0: float):
     while True:
         if proc.poll() is not None:
             raise RuntimeError(f"ft serve beendet (rc {proc.returncode}), siehe {log}")
@@ -120,7 +193,6 @@ def serve(model_id: str, m: dict, port: int, log: Path):
         if time.time() - t0 > m.get("load_timeout", 1800):
             raise RuntimeError("Ladezeit überschritten")
         time.sleep(3)
-    return proc, base + "/v1", round(time.time() - t0), tree
 
 
 def stop(proc):
@@ -163,7 +235,8 @@ def main():
     ids = [k for k, v in models.items() if not v.get("skip")] if not a.model or "all" in a.model else a.model
     for mid in ids:
         if mid not in models:
-            raise SystemExit(f"unbekanntes Modell {mid}; bekannt: {', '.join(models)}")
+            why = load_models(include_removed=True).get(mid, {}).get("removed")
+            raise SystemExit(f"{mid} ist gestrichen: {why}" if why else f"unbekanntes Modell {mid}; bekannt: {', '.join(models)}")
         m = models[mid]
         done = latest_results()
         todo = [t for t in tasks if a.force or (done.get((mid, t.id)) or {}).get("fingerprint") != t.fingerprint
@@ -183,8 +256,19 @@ def main():
         try:
             ctx = get_json(url + "/models")["data"][0].get("context_length")
             print(f"[{mid}] bereit nach {load_s} s, Kontext {ctx}")
+            if not ctx or ctx < m.get("min_context", MIN_CONTEXT):
+                print(f"[{mid}] Kontext {ctx} unter {MIN_CONTEXT}: Flags in models.toml anpassen oder das Modell streichen")
+                for t in todo:
+                    append({"model": mid, "task": t.id, "fingerprint": t.fingerprint, "status": "error",
+                            "reason": f"Kontext {ctx} unter {MIN_CONTEXT} Tokens", "time": dt.datetime.now().isoformat(timespec="seconds")})
+                continue
             meta = {"engine": "freetoken", "commit": git_rev(tree), "branch": Path(tree).name, "load_s": load_s, "ctx": ctx}
-            run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True)
+            # request fields per model, e.g. reasoning_effort = "medium" (Qwen3.8 defaults to xhigh)
+            extra = {"reasoning_effort": m["reasoning_effort"]} if m.get("reasoning_effort") else None
+            if extra:
+                meta.update(extra)
+            run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True, extra=extra,
+                      think_format=m.get("think_format", "think"))
         finally:
             stop(proc)
 

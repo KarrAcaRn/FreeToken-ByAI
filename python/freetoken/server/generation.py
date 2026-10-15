@@ -361,7 +361,21 @@ async def count_prompt_tokens(
     *,
     inline_system_policy: str | None = None,
 ) -> int:
-    """Token count of an already-converted (messages, tools, chat_template_kwargs) prompt,
+    ids = await prompt_token_ids(
+        messages, tools, chat_template_kwargs, state, inline_system_policy=inline_system_policy
+    )
+    return len(ids)
+
+
+async def prompt_token_ids(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    chat_template_kwargs: dict[str, Any],
+    state: Any,
+    *,
+    inline_system_policy: str | None = None,
+) -> list[int]:
+    """Token ids (and so the count) of an already-converted (messages, tools, chat_template_kwargs) prompt,
     using the frontend's own tokenizer (``state.frontend_tokenizer()``) so the count equals the
     ``usage.input_tokens`` a real generation of the same prompt would report. The neutral
     counterpart to ``submit_generation`` — any protocol's count endpoint converts to this triple
@@ -391,7 +405,7 @@ async def count_prompt_tokens(
         raise GenerationError(str(exc)) from exc
     except _TemplateError as exc:
         raise GenerationError(str(exc)) from exc
-    return int(user_msg.input_ids.numel())
+    return user_msg.input_ids.tolist()
 
 
 async def prerender_error(spec: GenSpec, state: Any) -> GenerationError | None:

@@ -84,13 +84,24 @@ td.r, th.r { text-align: right; }
 .matrix th.task .lvl { display: block; font: 400 0.68rem/1.4 var(--f-mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 td.cell { text-align: center; cursor: pointer; padding: 6px; }
 .pill { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; min-width: 70px; padding: 5px 6px; border-radius: 6px; font: 600 0.8rem/1.15 var(--f-mono); }
+.pill sup { font-size: 0.62rem; margin-left: 1px; }
 .pill small { font-weight: 400; font-size: 0.68rem; opacity: 0.85; }
 .pill.pass { background: var(--pass-bg); color: var(--pass); }
 .pill.fail { background: var(--fail-bg); color: var(--fail); }
 .pill.skip, .pill.none { background: var(--skip-bg); color: var(--skip); }
+.pill.view { background: var(--skip-bg); color: var(--muted); padding: 4px; }
+.pill .thumb { width: 64px; height: 64px; object-fit: contain; display: block; background: repeating-conic-gradient(var(--line) 0 25%, var(--panel) 0 50%) 0 0 / 10px 10px; border-radius: 4px; }
 .pill.err { background: var(--warn-bg); color: var(--warn); }
 .pill.stale { outline: 1px dashed var(--muted); }
 td.cell.active .pill { outline: 2px solid var(--accent); }
+.stars-avg { font: 600 0.72rem/1 var(--f-mono); color: var(--accent); letter-spacing: 0.02em; }
+.stars-avg .n { color: var(--muted); font-weight: 400; }
+.rate { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.rate .btns { display: inline-flex; }
+.rate button.star { border: 0; background: none; padding: 2px 3px; font-size: 1.6rem; line-height: 1; color: var(--line); cursor: pointer; }
+.rate button.star.on { color: var(--accent); }
+.rate button.star:disabled { cursor: default; }
+.rate .hint { font-size: 0.82rem; color: var(--muted); }
 /* detail */
 #detail { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px; display: grid; gap: 14px; }
 .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
@@ -140,8 +151,11 @@ details summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
       <h2>Ergebnisse je Aufgabe</h2>
       <div class="legend">
         <span class="pill pass">✓</span>gelöst
+        <span class="pill pass">✓ 75%<sup>N</sup></span>gelöst nach Nachfrage (zählt 0,75)
+        <span class="pill pass">✓ 90%<sup>K1</sup></span>gelöst nach Compiler-Rückmeldung (je Korrektur −0,1)
         <span class="pill fail">✗</span>nicht gelöst
         <span class="pill skip">–</span>nicht anwendbar
+        <span class="pill view">▣</span>Bild ohne automatische Bewertung (★ = Handbewertung)
         <span class="pill err">!</span>Fehler
         <span class="pill none stale">?</span>veraltet
       </div>
@@ -180,7 +194,40 @@ let sortKey = "passed", sortDir = -1, active = null;
 const byTask = Object.fromEntries(D.tasks.map((t) => [t.id, t]));
 const res = {};
 for (const r of D.results) res[r.model + "|" + r.task] = r;
-const state = (r, t) => !r ? "none" : r.fingerprint !== t.fingerprint ? "stale" : r.status === "ok" ? (r.passed ? "pass" : "fail") : r.status === "skipped" ? "skip" : "err";
+// Hand ratings for ungraded images: db collection "ratings", one doc per viewer
+// ({key: {stars, run}}); a rating counts only for the run (r.time) it was given to.
+let ratings = {}, myId = null, myRatings = {}, rateDb = null, canRate = false, rateErr = "";
+const rateFor = (key, r) => { const v = []; for (const doc of Object.values(ratings)) { const x = doc[key]; if (x && x.run === r.time && x.stars >= 1) v.push(x.stars); } return v; };
+const starsTxt = (v) => v.length ? `★ ${fmt(v.reduce((a, b) => a + b, 0) / v.length, 1)} <span class="n">(${v.length})</span>` : "";
+async function initRatings() {
+  if (!window.claude || !claude.use) return;
+  const [db, user] = await Promise.all([claude.use("db"), claude.use("user")]);
+  if (!db) return;
+  rateDb = db;
+  myId = user ? await user.id() : null;
+  canRate = !!myId && (user ? (await user.can("data.write")) !== false : false);
+  db.collection("ratings").onSnapshot((snap) => {
+    ratings = Object.fromEntries(snap.docs.filter((d) => d.exists).map((d) => [d.id, d.data()]));
+    if (myId && ratings[myId]) myRatings = { ...ratings[myId] };
+    render();
+  }, () => {});
+}
+let rateBusy = Promise.resolve();
+function rate(key, r, stars) {
+  if (!rateDb || !myId) return;
+  const cur = myRatings[key];
+  if (cur && cur.run === r.time && cur.stars === stars) stars = 0;  // second click on the same star clears it
+  myRatings = { ...myRatings, [key]: { stars, run: r.time } };
+  ratings = { ...ratings, [myId]: myRatings };
+  rateErr = ""; render();
+  const body = { ...myRatings };
+  rateBusy = rateBusy.then(() => rateDb.doc("ratings/" + myId).set(body)).catch((e) => {
+    canRate = !(e && e.code === "invalid_argument");
+    rateErr = canRate ? "Speichern fehlgeschlagen." : "Du kannst hier nur ansehen, nicht bewerten.";
+    render();
+  });
+}
+const state = (r, t) => !r ? "none" : r.fingerprint !== t.fingerprint ? "stale" : r.status === "ok" ? (r.passed == null ? "view" : r.passed ? "pass" : "fail") : r.status === "skipped" ? "skip" : "err";
 
 function facts() {
   const ok = D.results.filter((r) => r.status === "ok");
@@ -208,15 +255,18 @@ function visibleTasks() { return D.tasks.filter((t) => cat === "all" || t.catego
 
 function stats(m) {
   const ts = visibleTasks();
-  let passed = 0, tried = 0, score = 0, tok = 0, time = 0; const tps = [];
+  let passed = 0, tried = 0, score = 0, tok = 0, time = 0, viaFollowup = 0; const tps = [];
   for (const t of ts) {
     const r = res[m.id + "|" + t.id];
     if (!r || r.fingerprint !== t.fingerprint || r.status !== "ok") continue;
-    tried++; passed += r.passed ? 1 : 0; score += r.score; tok += r.completion_tokens || 0; time += r.total_s || 0;
     if (r.decode_tps) tps.push(r.decode_tps);
+    tok += r.completion_tokens || 0; time += r.total_s || 0;
+    if (!t.graded || r.passed == null) continue;
+    tried++; passed += r.passed ? r.score : 0; viaFollowup += r.passed && r.followup ? 1 : 0; score += r.score;
   }
-  const applicable = ts.filter((t) => { const r = res[m.id + "|" + t.id]; return !(r && r.status === "skipped" && r.fingerprint === t.fingerprint); }).length;
-  return { passed, tried, applicable, score: tried ? score / tried : null, tps: median(tps), tok, time, tokPer: tried ? tok / tried : null };
+  const applicable = ts.filter((t) => t.graded).filter((t) => { const r = res[m.id + "|" + t.id]; return !(r && r.status === "skipped" && r.fingerprint === t.fingerprint); }).length;
+  const ran = ts.filter((t) => { const r = res[m.id + "|" + t.id]; return r && r.fingerprint === t.fingerprint && r.status === "ok"; }).length;
+  return { passed, viaFollowup, tried, applicable, ran, score: tried ? score / tried : null, tps: median(tps), tok, time, tokPer: ran ? tok / ran : null };
 }
 
 function board() {
@@ -231,11 +281,11 @@ function board() {
   const body = rows.map(({ m, s }, i) => `<tr>
     <td class="rank">${i + 1}</td>
     <td><div class="model-name">${esc(m.label)}</div><div class="group">${esc(m.group || "")}</div></td>
-    <td class="r num">${s.passed}/${s.applicable}<span class="bar"><i style="width:${s.applicable ? (100 * s.passed / s.applicable) : 0}%"></i></span></td>
+    <td class="r num">${s.viaFollowup ? `<span class="group" title="davon nach Nachfrage">${s.viaFollowup}× N</span> ` : ""}${fmt(s.passed, Number.isInteger(s.passed) ? 0 : 2)}/${s.applicable}<span class="bar"><i style="width:${s.applicable ? (100 * s.passed / s.applicable) : 0}%"></i></span></td>
     <td class="r num">${s.score == null ? "–" : fmt(100 * s.score, 0) + " %"}</td>
     <td class="r num">${fmt(s.tps, 1)}</td>
     <td class="r num">${fmt(s.tokPer, 0)}</td>
-    <td class="r num">${s.tried ? fmtS(s.time) : "–"}</td></tr>`).join("");
+    <td class="r num">${s.ran ? fmtS(s.time) : "–"}</td></tr>`).join("");
   $("#board").innerHTML = D.models.length ? `<thead>${head}</thead><tbody>${body}</tbody>` : `<tbody><tr><td class="muted">Noch keine Modelle in models.toml.</td></tr></tbody>`;
   const sortBy = (k) => { if (sortKey === k) sortDir *= -1; else { sortKey = k; sortDir = k === "name" || k === "time" || k === "tokPer" ? 1 : -1; } board(); };
   $("#board").querySelectorAll("th[data-k]").forEach((th) => {
@@ -254,11 +304,13 @@ function matrix() {
     h += `<tr><td><div class="model-name">${esc(m.label)}</div></td>`;
     for (const t of ts) {
       const r = res[m.id + "|" + t.id]; const s = state(r, t);
-      const sym = { pass: "✓", fail: "✗", skip: "–", err: "!", none: "", stale: "?" }[s];
-      const sub = s === "pass" || s === "fail" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
-      const extra = s === "fail" && r.score > 0 ? ` ${fmt(100 * r.score, 0)}%` : "";
+      const sym = { pass: "✓", fail: "✗", skip: "–", err: "!", none: "", stale: "?", view: "" }[s];
+      const thumb = s === "view" && r.artifact && r.artifact.svg ? `<img class="thumb" alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(r.artifact.svg)}">` : "";
+      const sv = s === "view" ? starsTxt(rateFor(m.id + "|" + t.id, r)) : "";
+      const sub = s === "view" && sv ? `<span class="stars-avg">${sv}</span>` : s === "pass" || s === "fail" || s === "view" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
+      const extra = ((s === "fail" && r.score > 0) || (s === "pass" && r.score < 1) ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "") + (r && r.retries && r.retries.length && (s === "pass" || s === "fail") ? `<sup>K${r.retries.length}</sup>` : "");
       const key = m.id + "|" + t.id;
-      h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${sym}${extra}<small>${sub}</small></span></td>`;
+      h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${thumb}${sym}${extra}<small>${sub}</small></span></td>`;
     }
     h += "</tr>";
   }
@@ -272,6 +324,7 @@ function matrix() {
 const svgImg = (svg) => `<img alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}">`;
 
 function showDetail(key) {
+  const keepScroll = active === key && !$("#detail").hidden;
   active = key; matrix();
   const [mid, tid] = key.split("|");
   const m = D.models.find((x) => x.id === mid), t = byTask[tid], r = res[key];
@@ -282,8 +335,8 @@ function showDetail(key) {
   else {
     if (r.fingerprint !== t.fingerprint) h += `<div class="banner">Die Aufgabe wurde seit diesem Lauf geändert; das Ergebnis ist veraltet.</div>`;
     h += `<div class="kv">
-      <div><span>Ergebnis</span><b style="color:var(--${r.passed ? "pass" : "fail"})">${r.passed ? "gelöst" : "nicht gelöst"}</b></div>
-      <div><span>Punkte</span><b>${fmt(100 * r.score, 1)} %</b></div>
+      <div><span>Ergebnis</span><b style="color:var(--${r.passed == null ? "muted" : r.passed ? "pass" : "fail"})">${r.passed == null ? "ohne Bewertung" : r.passed ? (r.followup ? "gelöst nach Nachfrage" : r.retries && r.retries.length ? `gelöst im ${r.retries.length + 1}. Durchgang` : "gelöst") : "nicht gelöst"}</b></div>
+      <div ${r.score == null ? "hidden" : ""}><span>Punkte</span><b>${fmt(100 * r.score, 1)} %${r.followup && r.followup.score_factor ? ` <small class="muted">(x${fmt(r.followup.score_factor, 2)})</small>` : ""}</b></div>
       <div><span>Zeit</span><b>${fmtS(r.total_s)}</b></div>
       <div><span>Erstes Token</span><b>${fmtS(r.ttft_s)}</b></div>
       <div><span>Erzeugung</span><b>${fmt(r.decode_tps, 1)} tok/s</b></div>
@@ -292,17 +345,26 @@ function showDetail(key) {
       <div><span>Tokens raus</span><b>${fmt(r.completion_tokens)}</b></div>
     </div>
     <p style="margin:0"><b>Prüfung:</b> ${esc(r.detail)}</p>`;
+    if (r.followup) h += `<p style="margin:0"><b>Nachfrage:</b> „${esc(r.followup.prompt)}“ – gestellt, weil die erste Antwort nur ${fmt(100 * (r.followup.first_score ?? 0), 0)} % erreichte (${esc(r.followup.first_detail || r.followup.error || "")}).</p>`;
+    if (r.retries && r.retries.length) h += `<details><summary>${r.retries.length} Korrekturdurchgang${r.retries.length > 1 ? "änge" : ""} nach Compiler-Rückmeldung</summary>${r.retries.map((x, i) => `<p style="margin:8px 0 4px"><b>Rückmeldung vor Durchgang ${i + 2}${x.error ? " (Anfrage fehlgeschlagen)" : ""}:</b></p><pre>${esc(x.error || x.detail_before)}</pre>`).join("")}</details>`;
     if (r.artifact && r.artifact.svg) {
       h += `<div class="imgs"><figure>${svgImg(r.artifact.svg)}<figcaption>Antwort des Modells</figcaption></figure>`;
       if (t.reference_svg) h += `<figure>${svgImg(t.reference_svg)}<figcaption>Referenz</figcaption></figure>`;
       h += `</div>`;
     }
+    if (!t.graded && r.artifact && r.artifact.svg) {
+      const v = rateFor(key, r), mine = myRatings[key] && myRatings[key].run === r.time ? myRatings[key].stars : 0;
+      const hint = !rateDb ? "Bewertung in dieser Ansicht nicht verfügbar." : !canRate ? (rateErr || "Zum Bewerten anmelden (mindestens Mitwirkende)." ) : rateErr || (mine ? "Deine Bewertung. Gleichen Stern erneut klicken zum Entfernen." : "Klick auf einen Stern bewertet das Bild.");
+      h += `<div class="rate"><b>Bewertung</b><span class="btns" role="group" aria-label="Sterne">${[1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= mine ? "on" : ""}" data-stars="${n}" aria-label="${n} Sterne" aria-pressed="${n === mine}" ${canRate ? "" : "disabled"}>★</button>`).join("")}</span>
+        <span class="stars-avg">${v.length ? starsTxt(v) + " Ø aller" : '<span class="n">noch keine Bewertung</span>'}</span><span class="hint">${esc(hint)}</span></div>`;
+    }
     h += `<details><summary>Antwort des Modells (${fmt((r.answer || "").length)} Zeichen${r.reasoning_chars ? `, dazu ${fmt(r.reasoning_chars)} Zeichen Denkphase` : ""})</summary><pre>${esc(r.answer)}</pre></details>`;
     h += `<p class="muted mono" style="margin:0;font-size:.78rem">${esc(r.time || "")} · ${esc(r.branch || r.engine || "")} ${esc(r.commit || "")}${r.finish_reason === "length" ? " · Tokenlimit erreicht" : ""}</p>`;
   }
   el.innerHTML = h;
+  el.querySelectorAll("button.star").forEach((b) => { b.onclick = () => rate(key, r, Number(b.dataset.stars)); });
   $("#close").onclick = () => { el.hidden = true; active = null; matrix(); };
-  el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
+  if (!keepScroll) el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
 }
 
 function tasks() {
@@ -316,5 +378,5 @@ function tasks() {
 }
 
 function render() { chips(); board(); matrix(); tasks(); if (active) { const [, tid] = active.split("|"); if (visibleTasks().some((t) => t.id === tid)) showDetail(active); else { $("#detail").hidden = true; active = null; } } }
-facts(); render();
+facts(); render(); initRatings();
 </script>

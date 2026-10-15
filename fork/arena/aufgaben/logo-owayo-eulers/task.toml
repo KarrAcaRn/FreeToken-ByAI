@@ -1,0 +1,14 @@
+title = "Logo Owayo Eulers"
+category = "image"
+level = "mittel"
+summary = "Logo für eine Eishockeymannschaft mit Eule und Schlägern, ohne Hintergrund. Wird nur gezeigt, nicht bewertet."
+prompt = """
+Erstelle ein Logo für eine Eishockeymannschaft. Das Logo soll eine Eule und Eishockeyschläger enthalten.
+Das Team heißt "Owayo Eulers". Der Hintergrund des Logos soll einfarbig sein, am besten besitzt das Logo gar keinen Hintergrund.
+
+Antworte mit genau einem vollständigen SVG-Dokument in einem Codeblock (```svg ... ```). Keine externen Ressourcen, keine Skripte.
+"""
+
+[check]
+type = "svg_view"              # nur anzeigen, keine Bewertung
+expect_text = ["Owayo Eulers"]  # Hinweis auf der Seite, ob der Name als Text im SVG steht
