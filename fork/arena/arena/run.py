@@ -101,6 +101,7 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                 rec.update(status="error", reason=repr(e)[:300])
             else:
                 c = t.check(r["content"])
+                r["label"] = "Antwort"
                 turns = [r]
                 answer = r["content"]
                 asked = None
@@ -115,6 +116,7 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                     except Exception as e:
                         asked = {"prompt": fu["prompt"], "error": repr(e)[:300]}
                     else:
+                        r2["label"] = "Nachfrage"
                         turns.append(r2)
                         answer = r["content"] + "\n\n--- Nachfrage: " + fu["prompt"] + " ---\n\n" + r2["content"]
                         first = c
@@ -137,6 +139,7 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                         except Exception as e:
                             rounds.append({"detail_before": c.detail[:2000], "error": repr(e)[:300]})
                             break
+                        rn["label"] = f"Durchgang {len(rounds) + 2}"
                         turns.append(rn)
                         msgs.append({"role": "assistant", "content": rn["content"]})
                         rounds.append({"detail_before": c.detail[:2000]})
@@ -151,7 +154,13 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                 rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,
                            answer=answer[-20000:], reasoning_chars=sum(len(x["reasoning"]) for x in turns),
                            followup=asked, retries=rounds, tempo=tier, think_limit=think_limit, write_limit=write_limit,
-                           think_stopped=sum(x["think_stopped"] for x in turns), timed_out=sum(x["finish_reason"] == "time" for x in turns), finish_reason=turns[-1]["finish_reason"], prompt_tokens=r["prompt_tokens"],
+                           think_stopped=sum(x["think_stopped"] for x in turns), timed_out=sum(x["finish_reason"] == "time" for x in turns), finish_reason=turns[-1]["finish_reason"], 
+                           # every round reads the whole conversation again, so "in" is the sum over rounds
+                           prompt_tokens=sum(x["prompt_tokens"] or 0 for x in turns) or None,
+                           answer_chars=sum(len(x["content"]) for x in turns),
+                           turns=[{"label": x["label"], "prompt_tokens": x["prompt_tokens"], "completion_tokens": x["completion_tokens"],
+                                   "total_s": x["total_s"], "reasoning_chars": len(x["reasoning"]), "answer_chars": len(x["content"]),
+                                   "think_stopped": x["think_stopped"], "finish_reason": x["finish_reason"]} for x in turns],
                            completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
                            decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
                            prefill_tps=r["prefill_tps"])
