@@ -251,3 +251,23 @@ Llama-3.2-1B, Mistral-7B-v0.3, Qwen2.5-1.5B, Qwen3-0.6B. Decode vs bf16 HF on th
 Llama-1B Q4_0 718 vs 313, Mistral-7B Q4_K_M 171 vs 61, Qwen2.5-1.5B Q4_K_M 497 vs 246.
 Known left: a Mistral GGUF picks the llama3 tool parser (the registry key is per GGUF arch);
 the Gemma-4 GGUF tokenizer differs from tokenizer.json on some Unicode/long texts (pre-existing).
+
+## Found on the KI-Prüfstand runs (2026-10-15)
+
+Both on branches from `main`, GPU validation pending (the bench held the card):
+
+### fix(gemma4): apply the vision tower's clipped linears (branch `fix/gemma4-clipped-linears`, 81bb2425)
+
+Gemma-4 E2B and E4B set `use_clipped_linears`: every vision encoder projection clamps its input and
+output to per-layer scalars stored next to the weight (`<proj>.input_min/max`, `output_min/max`, bf16,
+112 per checkpoint). Since #467 the tower raises `NotImplementedError`, so these checkpoints only serve
+with `--text-model-only`. `_ClippedLinear` loads the four scalars and clamps around the matmul, as HF's
+`Gemma4ClippableLinear` does. Test: tiny tower with clipped linears (±inf bounds equal the plain tower,
+tight bounds clamp); still to run: the reference test with `FREETOKEN_GEMMA4_MODEL=<E2B>`.
+
+### fix(engine): stream encoder towers to host before finalize_quant (branch `fix/encoder-host-before-finalize`, 439039bb)
+
+`place_encoder_weights` ran after `finalize_quant`, so a host-streamed tower sat on the GPU in bf16
+during the finalize peak. Muse-Glimmer-30B-NVFP4 (3.4 GiB of tower blocks) OOMed in
+`nvfp4_transpose_resident` on a 24 GB card. Every host-streamed tower uses unquantized linears, so
+finalize does nothing for them in either order. Still to run: Muse with its tower on the 4090.
