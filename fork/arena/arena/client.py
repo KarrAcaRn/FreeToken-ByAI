@@ -29,9 +29,10 @@ def post_json(url: str, body: dict, api_key: str | None = None, timeout: float =
         return json.load(r)
 
 
-def _stream(url: str, body: dict, api_key: str | None, time_limit: float | None, think_limit: float | None) -> dict:
-    """Streams one request. Past time_limit (or past think_limit while the model has only reasoned so far)
-    it closes the connection, which makes ft serve abort the request; finish_reason is then "time" / "think"."""
+def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None, write_limit: float | None) -> dict:
+    """Streams one request. It closes the connection (ft serve then aborts the request) when the model still
+    only reasons after think_limit seconds (finish_reason "think") or writes its answer for longer than
+    write_limit seconds, counted from the answer's first token (finish_reason "time")."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -40,15 +41,17 @@ def _stream(url: str, body: dict, api_key: str | None, time_limit: float | None,
     has_content = has_reasoning = False
     chunks = 0
     t0 = time.perf_counter()
-    t_first = None
+    t_first = t_write = None
+    # also bounds a request that never streams (stuck prefill, a model that neither reasons nor writes)
+    total = (think_limit or 0) + write_limit if write_limit else None
     try:
-        with urllib.request.urlopen(req, timeout=time_limit or 3600) as r:
+        with urllib.request.urlopen(req, timeout=total or 3600) as r:
             for raw in r:
-                now = time.perf_counter() - t0
-                if time_limit and now > time_limit:
+                now = time.perf_counter()
+                if write_limit and (now - t_write > write_limit if t_write else now - t0 > total):
                     finish = "time"
                     break
-                if think_limit and now > think_limit and has_reasoning and not has_content:
+                if think_limit and now - t0 > think_limit and has_reasoning and not has_content:
                     finish = "think"
                     break
                 line = raw.decode().strip()
@@ -69,7 +72,8 @@ def _stream(url: str, body: dict, api_key: str | None, time_limit: float | None,
                         if t_first is None:
                             t_first = time.perf_counter()
                     has_reasoning |= bool(piece_r)
-                    has_content |= bool(piece_c.strip())
+                    if piece_c.strip() and not has_content:
+                        has_content, t_write = True, time.perf_counter()
                     reasoning.append(piece_r)
                     content.append(piece_c)
                     finish = ch.get("finish_reason") or finish
@@ -97,13 +101,13 @@ def _stream(url: str, body: dict, api_key: str | None, time_limit: float | None,
 
 
 def chat(base_url: str, model: str, messages: list, max_tokens: int, api_key: str | None = None,
-         temperature: float = 0.0, extra: dict | None = None, time_limit: float | None = None,
-         think_limit: float | None = None) -> dict:
+         temperature: float = 0.0, extra: dict | None = None, think_limit: float | None = None,
+         write_limit: float | None = None) -> dict:
     body = {
         "model": model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature,
         "stream": True, "stream_options": {"include_usage": True}, **(extra or {}),
     }
-    return _stream(base_url.rstrip("/") + "/chat/completions", body, api_key, time_limit, think_limit)
+    return _stream(base_url.rstrip("/") + "/chat/completions", body, api_key, think_limit, write_limit)
 
 
 def _token_ids(base: str, body: dict, api_key: str | None) -> list[int]:
@@ -111,11 +115,12 @@ def _token_ids(base: str, body: dict, api_key: str | None) -> list[int]:
 
 
 def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_tokens: int | None = None,
-        api_key: str | None = None, extra: dict | None = None, time_limit: float | None = None,
-        think_limit: float | None = None, think_format: str = "think") -> dict:
-    """One answer within time_limit seconds. A model still reasoning after think_limit seconds gets its
-    reasoning closed with STOP_THINKING and writes the answer on /v1/completions in the time left (the
-    radix cache keeps the prefix, so nothing is prefilled twice); the result then has think_stopped=True.
+        api_key: str | None = None, extra: dict | None = None, think_limit: float | None = None,
+        write_limit: float | None = None, think_format: str = "think") -> dict:
+    """One answer: at most think_limit seconds of reasoning, then write_limit seconds for the answer. A model
+    still reasoning at think_limit gets its reasoning closed with STOP_THINKING and writes the answer on
+    /v1/completions (the radix cache keeps the prefix, so nothing is prefilled twice); the result then has
+    think_stopped=True.
     Without max_tokens the answer may fill the free context."""
     base = base_url.rstrip("/")
     try:
@@ -126,8 +131,8 @@ def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_token
     mt = min(max_tokens, budget) if max_tokens else budget
     # Token ids carry no image data, so a prompt with images cannot be continued that way.
     images = any(isinstance(m["content"], list) for m in messages)
-    r = chat(base_url, model, messages, mt, api_key=api_key, extra=extra, time_limit=time_limit,
-             think_limit=None if images else think_limit)
+    r = chat(base_url, model, messages, mt, api_key=api_key, extra=extra,
+             think_limit=None if images else think_limit, write_limit=write_limit)
     r["think_stopped"] = False
     if r["finish_reason"] != "think":
         return r
@@ -141,7 +146,7 @@ def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_token
                                 "add_special_tokens": False}, api_key)
     body = {"model": model, "prompt": prompt, "max_tokens": max(256, mt - r["completion_tokens"]), "temperature": 0.0,
             "stream": True, "stream_options": {"include_usage": True}}
-    r2 = _stream(base + "/completions", body, api_key, time_limit - r["total_s"] if time_limit else None, None)
+    r2 = _stream(base + "/completions", body, api_key, None, write_limit)
     tok = r["completion_tokens"] + r2["completion_tokens"]
     dec = r["decode_s"] + r2["decode_s"]
     r.update(content=r2["content"], finish_reason=r2["finish_reason"], completion_tokens=tok,

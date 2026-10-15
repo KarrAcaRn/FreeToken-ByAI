@@ -65,21 +65,24 @@ def main():
             self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
             time.sleep(0.05)
             t_think = time.time() + (0 if completion else a.think)
+            sent = 0
             try:
                 while time.time() < t_think:
                     d = {"choices": [{"index": 0, "delta": {"reasoning_content": "hmm "}, "finish_reason": None}]}
                     self.wfile.write(f"data: {json.dumps(d)}\n\n".encode()); self.wfile.flush()
+                    sent += 1
                     time.sleep(1 / a.tps)
                 for i, w in enumerate(words):
                     piece = w + (" " if i < len(words) - 1 else "")
                     d = {"choices": [{"index": 0, "text": piece} if completion else
                                      {"index": 0, "delta": {"content": piece}, "finish_reason": None}]}
                     self.wfile.write(f"data: {json.dumps(d)}\n\n".encode()); self.wfile.flush()
+                    sent += 1
                     time.sleep(1 / a.tps)
             except (BrokenPipeError, ConnectionResetError):
                 return
             self.wfile.write(f"data: {json.dumps({'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n".encode())
-            usage = {"prompt_tokens": len(json.dumps(req.get("messages") or req["prompt"])) // 4, "completion_tokens": len(words), "total_tokens": 0}
+            usage = {"prompt_tokens": len(json.dumps(req.get("messages") or req["prompt"])) // 4, "completion_tokens": sent, "total_tokens": 0}
             self.wfile.write(f"data: {json.dumps({'choices': [], 'usage': usage})}\n\ndata: [DONE]\n\n".encode())
 
     ThreadingHTTPServer(("127.0.0.1", a.port), H).serve_forever()
