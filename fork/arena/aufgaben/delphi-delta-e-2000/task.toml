@@ -2,7 +2,6 @@ title = "Delta E 2000 in Delphi"
 category = "code"
 level = "schwer"
 summary = "Delphi-Funktion für den Farbabstand CIEDE2000 zwischen zwei RGB-Farben (sRGB -> Lab -> Delta E 2000)."
-max_tokens = 32768
 prompt = """
 Schreibe mir eine Delphi-Funktion, die den Farbabstand Delta E 2000 zwischen zwei Farben berechnet.
 Als Farben bekommt die Funktion zwei RGB-Werte.

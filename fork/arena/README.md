@@ -55,7 +55,10 @@ title = "Kurzer Name"              # erscheint auf der Seite
 category = "code"                  # code | image | text
 level = "mittel"                   # leicht | mittel | schwer (nur Anzeige)
 summary = "Ein Satz, was geprüft wird."
-max_tokens = 8192                  # Obergrenze für die Antwort inkl. Denkphase
+time_limit = 180                   # optional: Sekunden pro Anfrage (Standard 180; Nachfrage/Korrektur je eigene)
+think_limit = 120                  # optional: denkt das Modell nach so vielen Sekunden noch, wird das Denken
+                                   # beendet und es muss sofort antworten (Standard 120, 0 = aus)
+max_tokens = 8192                  # optional: Token-Obergrenze; ohne darf die Antwort den freien Kontext füllen
 prompt = """..."""                 # oder prompt_file = "prompt.md"
 attach = ["dokument.md"]           # optional: {{dokument.md}} im Prompt wird durch die Datei ersetzt
 images = ["bild.png"]              # optional: Bilder vor dem Text, macht die Aufgabe zu needs = ["vision"]

@@ -2,7 +2,6 @@ title = "Nicht initialisiertes Result"
 category = "code"
 level = "mittel"
 summary = "Delphi: Result wird vor dem Anhängen nicht auf '' gesetzt, die Funktion erweitert den alten Wert der Zielvariable."
-max_tokens = 32768
 prompt = """
 Was ist an dieser Funktion falsch?
 

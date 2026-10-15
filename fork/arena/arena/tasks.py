@@ -17,6 +17,11 @@ Das hat nicht geklappt. Rückmeldung der Prüfung:
 Korrigiere deine Lösung und antworte wieder mit genau einem vollständigen Codeblock.
 """
 
+# Seconds per request (each follow-up or correction round gets its own), and after how many seconds
+# a model that is still only reasoning is told to stop and answer. task.toml can override both.
+TIME_LIMIT = 180
+THINK_LIMIT = 120
+
 CATEGORIES = {"code": "Programmieren", "image": "Bild", "text": "Textverständnis"}
 
 
@@ -30,7 +35,9 @@ class Task:
     prompt: str
     images: list[Path]
     needs: frozenset
-    max_tokens: int
+    max_tokens: int | None  # None: the answer may fill the free context, only time_limit stops it
+    time_limit: float
+    think_limit: float | None
     check: Callable[[str], Check]
     check_type: str
     fingerprint: str  # changes whenever any file of the task changes; old results then show as outdated
@@ -49,8 +56,8 @@ class Task:
         return [{"role": "user", "content": parts}]
 
 
-def _fingerprint(d: Path) -> str:
-    h = hashlib.sha256()
+def _fingerprint(d: Path, limits: str) -> str:
+    h = hashlib.sha256(limits.encode())
     # The sample solution only feeds `arena.check`; editing it must not invalidate model results.
     for f in sorted(p for p in d.rglob("*") if p.is_file() and p.name != "musterloesung.md"):
         h.update(f.relative_to(d).as_posix().encode())
@@ -71,11 +78,15 @@ def load_task(d: Path) -> Task:
     if category not in CATEGORIES:
         raise ValueError(f"{d.name}: category muss eine von {sorted(CATEGORIES)} sein")
     chk = cfg["check"]
+    max_tokens = int(cfg["max_tokens"]) if "max_tokens" in cfg else None
+    time_limit = float(cfg.get("time_limit", TIME_LIMIT))
+    think_limit = float(cfg.get("think_limit", THINK_LIMIT)) or None  # 0 lets the model think until time_limit
     return Task(
         id=d.name, category=category, title=cfg["title"], summary=cfg.get("summary", ""),
         level=cfg.get("level", "mittel"), prompt=prompt.strip(), images=images, needs=frozenset(needs),
-        max_tokens=int(cfg.get("max_tokens", 8192)), check=CHECKERS[chk["type"]](chk, d),
-        check_type=chk["type"], fingerprint=_fingerprint(d), dir=d,
+        max_tokens=max_tokens, time_limit=time_limit, think_limit=think_limit,
+        check=CHECKERS[chk["type"]](chk, d), check_type=chk["type"],
+        fingerprint=_fingerprint(d, f"{max_tokens}/{time_limit:g}/{think_limit}"), dir=d,
         followups=[{"prompt": f["prompt"].strip(), "when_missing": f.get("when_missing", []),
                     "when_found": f.get("when_found", []), "score_factor": float(f.get("score_factor", 0.75))}
                    for f in cfg.get("followups", [])],
