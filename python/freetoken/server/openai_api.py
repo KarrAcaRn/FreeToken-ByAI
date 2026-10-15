@@ -45,7 +45,7 @@ from .generation import (
     ToolCallsDelta,
     ToolCallStart,
     build_metrics,
-    count_prompt_tokens,
+    prompt_token_ids,
     generate_events,
     generate_full,
     metrics_enabled,
@@ -149,7 +149,7 @@ def register_openai_routes(
         llama.cpp exposes the same endpoint (POST /tokenize) so OpenAI-compatible
         clients can pre-validate prompt size against max_model_len before sending.
         The messages path renders through the SAME chat template a generation
-        would use (via count_prompt_tokens), so the count matches the
+        would use (via prompt_token_ids), so the count matches the
         usage.prompt_tokens a real request would report.
         """
         state = get_state()
@@ -183,10 +183,10 @@ def register_openai_routes(
                     )
                 except (ValidationError, ValueError) as exc:
                     return create_error_response(str(exc))
-                n_tokens = await count_prompt_tokens(
+                ids = await prompt_token_ids(
                     spec.messages, spec.template_tools, spec.chat_template_kwargs or {}, state
                 )
-                return TokenizeResponse(tokens=n_tokens)
+                return TokenizeResponse(tokens=len(ids), token_ids=ids)
             # Raw text path: direct tokenizer encode, no chat template.
             tokenizer = await asyncio.to_thread(state.frontend_tokenizer)
             texts = req.input if isinstance(req.input, list) else [req.input]
