@@ -134,6 +134,8 @@ def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_token
     r = chat(base_url, model, messages, mt, api_key=api_key, extra=extra,
              think_limit=None if images else think_limit, write_limit=write_limit)
     r["think_stopped"] = False
+    # an aborted stream reports no usage
+    r["prompt_tokens"] = r["prompt_tokens"] or n_prompt
     if r["finish_reason"] != "think":
         return r
     opener, closer = THINK_FORMATS[think_format]
