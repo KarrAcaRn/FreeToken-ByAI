@@ -17,10 +17,8 @@ Das hat nicht geklappt. Rückmeldung der Prüfung:
 Korrigiere deine Lösung und antworte wieder mit genau einem vollständigen Codeblock.
 """
 
-# Seconds per request (each follow-up or correction round gets its own), and after how many seconds
-# a model that is still only reasoning is told to stop and answer. task.toml can override both.
-TIME_LIMIT = 180
-THINK_LIMIT = 120
+# Bumped when the run rules change (time limits in run.py), so every result shows as outdated.
+RULES = "think/write limits by speed tier, 2026-10-15"
 
 CATEGORIES = {"code": "Programmieren", "image": "Bild", "text": "Textverständnis"}
 
@@ -35,9 +33,7 @@ class Task:
     prompt: str
     images: list[Path]
     needs: frozenset
-    max_tokens: int | None  # None: the answer may fill the free context, only time_limit stops it
-    time_limit: float
-    think_limit: float | None
+    max_tokens: int | None  # None: the answer may fill the free context, only the time limits stop it
     check: Callable[[str], Check]
     check_type: str
     fingerprint: str  # changes whenever any file of the task changes; old results then show as outdated
@@ -79,14 +75,12 @@ def load_task(d: Path) -> Task:
         raise ValueError(f"{d.name}: category muss eine von {sorted(CATEGORIES)} sein")
     chk = cfg["check"]
     max_tokens = int(cfg["max_tokens"]) if "max_tokens" in cfg else None
-    time_limit = float(cfg.get("time_limit", TIME_LIMIT))
-    think_limit = float(cfg.get("think_limit", THINK_LIMIT)) or None  # 0 lets the model think until time_limit
     return Task(
         id=d.name, category=category, title=cfg["title"], summary=cfg.get("summary", ""),
         level=cfg.get("level", "mittel"), prompt=prompt.strip(), images=images, needs=frozenset(needs),
-        max_tokens=max_tokens, time_limit=time_limit, think_limit=think_limit,
+        max_tokens=max_tokens,
         check=CHECKERS[chk["type"]](chk, d), check_type=chk["type"],
-        fingerprint=_fingerprint(d, f"{max_tokens}/{time_limit:g}/{think_limit}"), dir=d,
+        fingerprint=_fingerprint(d, RULES), dir=d,
         followups=[{"prompt": f["prompt"].strip(), "when_missing": f.get("when_missing", []),
                     "when_found": f.get("when_found", []), "score_factor": float(f.get("score_factor", 0.75))}
                    for f in cfg.get("followups", [])],

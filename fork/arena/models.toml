@@ -1,6 +1,7 @@
 # Ein Eintrag pro getesteter KI. path = Glob unter ~/.cache/huggingface/hub, flags = zusätzliche ft-serve-Flags,
 # caps = Fähigkeiten (vision = Bildeingabe), think_format = wie das Modell sein Denken schreibt (think = <think>,
-# harmony = gpt-oss, gemma4; nötig, um das Denken nach think_limit Sekunden abzubrechen), worktree = welcher FreeToken-Stand den Server stellt
+# harmony = gpt-oss, gemma4; nötig, um das Denken nach Ablauf der Denkzeit abzubrechen), tempo = "langsam" / "schnell"
+# legt die Zeitklasse fest statt sie zu messen (README: Zeitlimits), worktree = welcher FreeToken-Stand den Server stellt
 # (Standard ~/claude/ft-speed-wt = Branch next-speed), reasoning_effort = Denkstufe, die jede Anfrage mitschickt.
 # "--model all" lässt alle Einträge mit skip = true aus. removed = "Grund" streicht ein Modell ganz (kein Lauf, nicht
 # auf der Seite). Jedes Modell braucht mindestens 80k Kontext (MIN_CONTEXT in run.py), sonst bricht der Lauf ab.
