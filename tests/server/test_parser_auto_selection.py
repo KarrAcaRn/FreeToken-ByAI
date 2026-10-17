@@ -31,11 +31,10 @@ ANON_PATH = "/models/anon"
 # parser, and a new architecture landing here is the bug this file exists to catch.
 NO_REASONING_FORMAT = {
     "LlamaForCausalLM",
+    "LlamaGGUFForCausalLM",
     "MistralForCausalLM",
     "Mistral3ForConditionalGeneration",
     "Qwen2ForCausalLM",
-    # llama.cpp GGUFs of the same families
-    "LlamaGGUFForCausalLM",
     "Qwen2GGUFForCausalLM",
 }
 

@@ -47,6 +47,8 @@ class Qwen3Model(BaseOP):
         self.embed_tokens = VocabParallelEmbedding(
             num_embeddings=config.vocab_size,
             embedding_dim=config.hidden_size,
+            quant_config=config.quant,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.layers = OPList(
             [
@@ -81,11 +83,6 @@ class Qwen3MoeForCausalLM(BaseLLMModel):
             prefix="lm_head",
         )
         super().__init__()
-
-        from .gguf import convert_qwen3_moe_to_gguf, is_gguf_model
-
-        if is_gguf_model(config):
-            convert_qwen3_moe_to_gguf(self, config)
 
     def forward(self) -> torch.Tensor:
         output = self.model.forward(get_global_ctx().batch.input_ids)

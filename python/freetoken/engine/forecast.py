@@ -241,13 +241,15 @@ def resident_weights(model, config) -> WeightReport:
 def _largest_finalize_copy(model) -> int:
     """Bytes of the biggest weight whose kernel rewrites it in finalize (nvfp4 transposes, fp8 repacks):
     during that call the source and the new copy are both on the device."""
+    from freetoken.layers.quantization.embedding.base import EmbeddingKernel
     from freetoken.layers.quantization.linear.base import LinearKernel
 
+    no_op = (LinearKernel.finalize, EmbeddingKernel.finalize)
     biggest = 0
     for _, o in _walk(model):
         kernel = getattr(getattr(o, "quant_method", None), "kernel", None)
         w = getattr(o, "weight", None)
-        if kernel is not None and isinstance(w, torch.Tensor) and type(kernel).finalize is not LinearKernel.finalize:
+        if kernel is not None and isinstance(w, torch.Tensor) and type(kernel).finalize not in no_op:
             biggest = max(biggest, _nbytes(w))
     return biggest
 

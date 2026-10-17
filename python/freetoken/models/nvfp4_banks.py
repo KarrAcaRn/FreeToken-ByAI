@@ -5,7 +5,7 @@ import itertools
 import os
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Collection
 
 import safetensors
 import torch
@@ -87,6 +87,7 @@ def iter_nvfp4_expert_pieces(
     config,
     spec: Nvfp4ExpertSourceSpec,
     *,
+    layers: Collection[int] | None = None,
     parallel: bool = False,
     workers: int = 8,
     chunk: int = 8 << 20,
@@ -100,6 +101,7 @@ def iter_nvfp4_expert_pieces(
 
     Serial reads walk the shards in order; ``parallel`` uses the chunked O_DIRECT reader. Either
     way tensors of one expert may span shards, so they are grouped by (layer, expert) as they land.
+    ``layers`` (bank layer ids, default all) reads only those layers' experts.
 
     ``skip_experts_from`` (the disk tier): experts ``[skip_experts_from, E)`` are disk-resident.
     The serial reader never calls ``get_tensor`` for them (no I/O); the parallel reader filters
@@ -115,6 +117,7 @@ def iter_nvfp4_expert_pieces(
     folder = download_hf_weight(model_path)
     weight_map = safetensors_weight_map(folder)
 
+    keep = None if layers is None else set(layers)
     wanted: dict[str, tuple[int, int, str]] = {}
     for name in weight_map:
         match = spec.key_pattern.match(name)
@@ -123,7 +126,7 @@ def iter_nvfp4_expert_pieces(
         if skip_experts_from is not None and int(match.group("expert")) >= skip_experts_from:
             continue  # disk-resident: never read
         bank_layer = _bank_layer(spec, int(match.group("layer")), config)
-        if bank_layer is None:
+        if bank_layer is None or (keep is not None and bank_layer not in keep):
             continue
         proj = match.group("proj")
         if proj not in spec.proj_to_role:
@@ -133,7 +136,7 @@ def iter_nvfp4_expert_pieces(
             raise ValueError(f"{spec.desc}: unknown NVFP4 expert tensor kind {kind!r}")
         wanted[name] = (bank_layer, int(match.group("expert")), spec.proj_to_role[proj] + _kind_suffix(kind))
     experts = min(skip_experts_from, config.num_experts) if skip_experts_from is not None else config.num_experts
-    expected = _num_moe_layers(config) * experts * 9
+    expected = (_num_moe_layers(config) if keep is None else len(keep)) * experts * 9
     if len(wanted) != expected:
         raise ValueError(f"{spec.desc}: found {len(wanted)} expert tensors, expected {expected}")
 

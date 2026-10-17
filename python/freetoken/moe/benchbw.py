@@ -67,7 +67,7 @@ from freetoken.utils import init_logger
 logger = init_logger(__name__)
 
 # Formats the CPU MoE C++ kernel can compute AND this bench can build banks for; anything
-# else is offload-only here. (The kernel also does q4_0, but this bench has no q4_0 banks.)
+# else is offload-only here.
 _CPU_MOE_FORMATS = frozenset({"bf16", "nvfp4", "mxfp4_triton", "ds_fp4", "fp8_block"})
 # Formats this bench can build synthetic (correctly-sized) banks for.
 _BUILDABLE_FORMATS = frozenset({"bf16", "nvfp4", "fp8_block", "mxfp4_triton", "ds_fp4"})
@@ -474,14 +474,11 @@ def _build_gather_rig(fmt: str, wl: Workload, device: torch.device):
     specs = _offload_bank_specs(fmt, H, I)
     cache = OffloadMoeCache(num_layers=1, num_experts=E, cache_size=E, device=device, quant_format=fmt)
     expert_bytes = 0
+    sources = {}
     for name, (elems, dtype) in specs.items():
-        src = _bench_bank(E, elems, dtype=dtype)  # pinned + mapped like the loaders' banks
-        dst = torch.empty(E, elems, dtype=dtype, device=device)
-        cache.bank_sources[name] = [src]
-        cache.bank_caches[name] = dst
-        cache.banks.append(([src], dst))
+        sources[name] = [_bench_bank(E, elems, dtype=dtype)]  # pinned + mapped like the loaders' banks
         expert_bytes += elems * dtype.itemsize
-    cache._build_copy_plan()  # enable the fused path (production default) when aligned
+    cache.set_bank_sources(sources)  # builds the fused copy plan (production default) when aligned
 
     n = min(wl.top_k, E)
     cache.evict_slots[:n].copy_(torch.randperm(E, device=device)[:n].to(torch.int32))
@@ -551,7 +548,7 @@ def _build_cpu_moe_executor(fmt: str, wl: Workload, banks: dict, num_threads: in
         cache, top_k=wl.top_k, activation=wl.activation,
         apply_router_weight_on_input=False, num_threads=num_threads, max_tokens=1,
         device=torch.device("cuda"), swiglu_alpha=wl.swiglu_alpha,
-        swiglu_limit=wl.swiglu_limit, act_block=wl.act_block,
+        swiglu_limit=wl.swiglu_limit, layer_formats=[(fmt, {"act_block": wl.act_block} if wl.act_block is not None else {})] * cache.num_layers,
     )
 
 

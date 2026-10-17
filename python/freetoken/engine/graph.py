@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ctypes
+import functools
 import gc
 import math
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
 
@@ -276,6 +279,30 @@ def dflash_verify_bytes_per_token(linear_state_pool, hidden_dtype: torch.dtype) 
     return conv[:, 0].numel() * conv.element_size() + layers * (conv_dim + 2 * num_v) * elem
 
 
+@functools.cache
+def _cu_graph_upload():
+    if sys.platform != "linux" or torch.version.hip is not None:
+        return None
+    fn = ctypes.CDLL("libcuda.so.1").cuGraphUpload
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    fn.restype = ctypes.c_int
+    return fn
+
+
+def _upload_graph(graph: torch.cuda.CUDAGraph, stream: torch.cuda.Stream) -> None:
+    """Upload the graph at capture time.
+
+    Otherwise the first replay pushes every node behind the graph's own stream WAIT, and a large graph then blocks cudaGraphLaunch until the WAIT is released. PLE wait-sync releases it only after the launch returns, so that deadlocks.
+    """
+    upload = _cu_graph_upload()
+    if upload is None:
+        return
+    rc = upload(graph.raw_cuda_graph_exec(), stream.cuda_stream)
+    if rc != 0:
+        raise RuntimeError(f"cuGraphUpload failed with CUresult {rc}")
+    stream.synchronize()
+
+
 class GraphRunner:
     def __init__(
         self,
@@ -387,6 +414,7 @@ class GraphRunner:
                 # CUDA graph capture to replay cold-cache expert copies.
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):
                     self._run_model_into_buffer(model, bs)
+                _upload_graph(graph, self.stream)
                 self._reset_moe_offload_cache()
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
@@ -462,6 +490,7 @@ class GraphRunner:
                 self._run_dflash_target_verify_into_buffer(model, rows, buffer)
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):
                     self._run_dflash_target_verify_into_buffer(model, rows, buffer)
+                _upload_graph(graph, self.stream)
                 self._reset_moe_offload_cache()
             self.dflash_target_verify_graph_map[bs, verify_len] = graph
             self.dflash_target_verify_buffers[bs, verify_len] = buffer
