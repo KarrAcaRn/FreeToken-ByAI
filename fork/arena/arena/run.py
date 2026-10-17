@@ -25,7 +25,9 @@ ROOT = Path(__file__).resolve().parent.parent
 RESULTS = Path(os.environ.get("ARENA_RESULTS", ROOT / "results" / "runs.jsonl"))
 
 
-MIN_CONTEXT = 80_000  # below this a model is not usable for real work (user, 2026-10-15: first 100k, then 80k)
+# below this a model is not usable for real work (user, 2026-10-15: first 100k, then 80k); a slow model cannot
+# write more than its time limits allow anyway, so 40k is enough there (user, 2026-10-17)
+MIN_CONTEXT = {"schnell": 80_000, "langsam": 40_000}
 # Seconds to think, then seconds to write the answer, by decode speed (user, 2026-10-15). Each follow-up
 # or correction round gets the same again. models.toml can pin a model with tempo = "langsam" / "schnell".
 SLOW_TPS = 35
@@ -299,12 +301,6 @@ def main():
         try:
             ctx = get_json(url + "/models")["data"][0].get("context_length")
             print(f"[{mid}] bereit nach {load_s} s, Kontext {ctx}")
-            if not ctx or ctx < m.get("min_context", MIN_CONTEXT):
-                print(f"[{mid}] Kontext {ctx} unter {MIN_CONTEXT}: Flags in models.toml anpassen oder das Modell streichen")
-                for t in todo:
-                    append({"model": mid, "task": t.id, "fingerprint": t.fingerprint, "status": "error",
-                            "reason": f"Kontext {ctx} unter {MIN_CONTEXT} Tokens", "time": dt.datetime.now().isoformat(timespec="seconds")})
-                continue
             meta = {"engine": "freetoken", "commit": git_rev(tree), "branch": Path(tree).name, "load_s": load_s, "ctx": ctx}
             # request fields per model, e.g. reasoning_effort = "medium" (Qwen3.8 defaults to xhigh)
             extra = {"reasoning_effort": m["reasoning_effort"]} if m.get("reasoning_effort") else None
@@ -313,6 +309,13 @@ def main():
             tier, tps = speed_tier(url, mid, m, extra=extra)
             meta["probe_tps"] = tps
             print(f"[{mid}] Tempo {tier} ({tps} tok/s): {LIMITS[tier][0] / 60:g} min denken, {LIMITS[tier][1] / 60:g} min schreiben")
+            need = m.get("min_context", MIN_CONTEXT[tier])
+            if not ctx or ctx < need:
+                print(f"[{mid}] Kontext {ctx} unter {need} ({tier}): Flags in models.toml anpassen oder das Modell streichen")
+                for t in todo:
+                    append({"model": mid, "task": t.id, "fingerprint": t.fingerprint, "status": "error",
+                            "reason": f"Kontext {ctx} unter {need} Tokens ({tier})", "time": dt.datetime.now().isoformat(timespec="seconds")})
+                continue
             run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True, extra=extra,
                       think_format=m.get("think_format", "think"), tier=tier)
         finally:

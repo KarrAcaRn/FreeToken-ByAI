@@ -4,7 +4,7 @@
 # legt die Zeitklasse fest statt sie zu messen (README: Zeitlimits), worktree = welcher FreeToken-Stand den Server stellt
 # (Standard ~/claude/ft-speed-wt = Branch next-speed), reasoning_effort = Denkstufe, die jede Anfrage mitschickt.
 # "--model all" lässt alle Einträge mit skip = true aus. removed = "Grund" streicht ein Modell ganz (kein Lauf, nicht
-# auf der Seite). Jedes Modell braucht mindestens 80k Kontext (MIN_CONTEXT in run.py), sonst bricht der Lauf ab.
+# auf der Seite). Jedes Modell braucht mindestens 80k Kontext, langsame (< 35 tok/s) 40k (MIN_CONTEXT in run.py), sonst bricht der Lauf ab.
 
 [qwen3-0_6b]
 label = "Qwen3 0.6B"
