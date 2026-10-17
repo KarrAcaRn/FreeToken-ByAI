@@ -1,5 +1,6 @@
 """Streaming OpenAI chat client (stdlib only) that measures TTFT and decode speed."""
 import json
+import os
 import socket
 import time
 import urllib.error
@@ -29,6 +30,24 @@ def post_json(url: str, body: dict, api_key: str | None = None, timeout: float =
         return json.load(r)
 
 
+# ARENA_LIVE=<file>: the text received so far is written there every few seconds, for watching a run
+LIVE = os.environ.get("ARENA_LIVE")
+LIVE_EVERY = 5.0
+
+
+def _write_live(body: dict, reasoning: list, content: list, t0: float, final: bool = False):
+    try:
+        tmp = LIVE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps({"model": body.get("model"), "elapsed_s": round(time.perf_counter() - t0, 1),
+                                "done": final, "reasoning_chars": sum(map(len, reasoning)),
+                                "content_chars": sum(map(len, content))}) + "\n")
+            f.write("".join(reasoning)[-20000:] + "\n=====ANTWORT=====\n" + "".join(content)[-20000:])
+        os.replace(tmp, LIVE)
+    except OSError:
+        pass
+
+
 def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None, write_limit: float | None) -> dict:
     """Streams one request. It closes the connection (ft serve then aborts the request) when the model still
     only reasons after think_limit seconds (finish_reason "think") or writes its answer for longer than
@@ -42,6 +61,7 @@ def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None
     chunks = 0
     t0 = time.perf_counter()
     t_first = t_write = None
+    t_live = t0
     # also bounds a request that never streams (stuck prefill, a model that neither reasons nor writes)
     total = (think_limit or 0) + write_limit if write_limit else None
     try:
@@ -77,8 +97,13 @@ def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None
                     reasoning.append(piece_r)
                     content.append(piece_c)
                     finish = ch.get("finish_reason") or finish
+                if LIVE and now - t_live > LIVE_EVERY:
+                    t_live = now
+                    _write_live(body, reasoning, content, t0)
     except (TimeoutError, socket.timeout):
         finish = "time"
+    if LIVE:
+        _write_live(body, reasoning, content, t0, final=True)
     t_end = time.perf_counter()
     t_first = t_first or t_end
     usage = usage or {}

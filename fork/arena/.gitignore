@@ -3,3 +3,4 @@ site/
 results/logs/
 results/transcripts/
 __pycache__/
+results/live.txt*
