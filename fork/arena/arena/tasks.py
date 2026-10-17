@@ -17,6 +17,9 @@ Das hat nicht geklappt. Rückmeldung der Prüfung:
 Korrigiere deine Lösung und antworte wieder mit genau einem vollständigen Codeblock.
 """
 
+# Bumped when the run rules change (time limits in run.py), so every result shows as outdated.
+RULES = "think/write limits by speed tier, 2026-10-15"
+
 CATEGORIES = {"code": "Programmieren", "image": "Bild", "text": "Textverständnis"}
 
 
@@ -30,7 +33,7 @@ class Task:
     prompt: str
     images: list[Path]
     needs: frozenset
-    max_tokens: int
+    max_tokens: int | None  # None: the answer may fill the free context, only the time limits stop it
     check: Callable[[str], Check]
     check_type: str
     fingerprint: str  # changes whenever any file of the task changes; old results then show as outdated
@@ -49,8 +52,8 @@ class Task:
         return [{"role": "user", "content": parts}]
 
 
-def _fingerprint(d: Path) -> str:
-    h = hashlib.sha256()
+def _fingerprint(d: Path, limits: str) -> str:
+    h = hashlib.sha256(limits.encode())
     # The sample solution only feeds `arena.check`; editing it must not invalidate model results.
     for f in sorted(p for p in d.rglob("*") if p.is_file() and p.name != "musterloesung.md"):
         h.update(f.relative_to(d).as_posix().encode())
@@ -71,11 +74,13 @@ def load_task(d: Path) -> Task:
     if category not in CATEGORIES:
         raise ValueError(f"{d.name}: category muss eine von {sorted(CATEGORIES)} sein")
     chk = cfg["check"]
+    max_tokens = int(cfg["max_tokens"]) if "max_tokens" in cfg else None
     return Task(
         id=d.name, category=category, title=cfg["title"], summary=cfg.get("summary", ""),
         level=cfg.get("level", "mittel"), prompt=prompt.strip(), images=images, needs=frozenset(needs),
-        max_tokens=int(cfg.get("max_tokens", 8192)), check=CHECKERS[chk["type"]](chk, d),
-        check_type=chk["type"], fingerprint=_fingerprint(d), dir=d,
+        max_tokens=max_tokens,
+        check=CHECKERS[chk["type"]](chk, d), check_type=chk["type"],
+        fingerprint=_fingerprint(d, RULES), dir=d,
         followups=[{"prompt": f["prompt"].strip(), "when_missing": f.get("when_missing", []),
                     "when_found": f.get("when_found", []), "score_factor": float(f.get("score_factor", 0.75))}
                    for f in cfg.get("followups", [])],

@@ -18,16 +18,20 @@ from .reader import gguf_architecture, load_gguf_metadata, gguf_tensor_names
 # reuses the model classes but a GGUF parse_config / iter_weights).
 GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
     "gemma4": "Gemma4GGUFForCausalLM",
-    "qwen35moe": "Qwen3_5MoeGGUFForCausalLM",
-    "qwen3moe": "Qwen3MoeGGUFForCausalLM",
-    # dense: Llama 3.x and Mistral (both ``llama``), Qwen2/2.5, Qwen3 (models/gguf/dense.py)
     "llama": "LlamaGGUFForCausalLM",
+    "minimax-m2": "MiniMaxM2GGUFForCausalLM",
+    "minimax-m3": "MiniMaxM3GGUFForCausalLM",
+    "muse-glimmer": "MuseGlimmerGGUFForCausalLM",
     "qwen2": "Qwen2GGUFForCausalLM",
     "qwen3": "Qwen3GGUFForCausalLM",
+    "qwen3moe": "Qwen3MoeGGUFForCausalLM",
+    "qwen35": "Qwen3_5GGUFForCausalLM",
+    "qwen35moe": "Qwen3_5MoeGGUFForCausalLM",
+    "qwen4exp": "Qwen4ExpGGUFForCausalLM",
 }
 
 
-@dataclass
+@dataclass(frozen=True)
 class GgufConfigShim:
     architectures: list[str]
     model_path: str
@@ -37,29 +41,6 @@ class GgufConfigShim:
     tie_word_embeddings: bool
     # --hf-overrides a GGUF accepts: only the rope keys (see GGUF_OVERRIDE_KEYS)
     overrides: dict[str, Any] = field(default_factory=dict)
-
-    def rope(self, head_dim_default: int | None = None) -> tuple[int, dict[str, Any] | None]:
-        """(max_position, rope scaling or None) from the metadata, with any rope override applied:
-        llama.cpp writes YaRN as ``<arch>.rope.scaling.{type,factor,original_context_length}``."""
-        arch, md = self.model_type, self.metadata
-        max_position = int(self.overrides.get("max_position_embeddings") or md[f"{arch}.context_length"])
-        scaling = self.overrides.get("rope_scaling") or self.overrides.get("rope_parameters")
-        if scaling is not None:
-            scaling = dict(scaling)
-            scaling.setdefault("rope_type", scaling.pop("type", None))
-            if scaling["rope_type"] != "yarn":
-                raise NotImplementedError(f"{self.model_path}: only a YaRN rope override is supported for a GGUF")
-            return max_position, scaling
-        kind = md.get(f"{arch}.rope.scaling.type")
-        if kind in (None, "none"):
-            return max_position, None
-        if kind != "yarn":
-            raise NotImplementedError(f"{self.model_path}: rope scaling {kind!r} in a {arch} GGUF is not supported")
-        return max_position, {
-            "rope_type": "yarn",
-            "factor": float(md[f"{arch}.rope.scaling.factor"]),
-            "original_max_position_embeddings": int(md[f"{arch}.rope.scaling.original_context_length"]),
-        }
 
     def to_dict(self) -> dict[str, Any]:
         """Minimal HF-config-like dict for trunk code that introspects the config
@@ -91,8 +72,24 @@ def _vocab_size(model_path: str) -> int:
 
 # rope only: everything else a GGUF describes is baked into its tensors
 GGUF_OVERRIDE_KEYS = frozenset({"rope_scaling", "rope_parameters", "max_position_embeddings"})
-# the GGUF parsers that build their rope from GgufConfigShim.rope()
+# the GGUF parsers that pass their HF config through apply_rope_overrides()
 GGUF_ROPE_ARCHS = frozenset({"llama", "qwen2", "qwen3", "qwen3moe"})
+
+
+def apply_rope_overrides(shim: GgufConfigShim, hf: Any) -> Any:
+    """Apply the shim's rope --hf-overrides to a GGUF parser's HF config namespace (YaRN only)."""
+    if max_position := shim.overrides.get("max_position_embeddings"):
+        hf.max_position_embeddings = int(max_position)
+    scaling = shim.overrides.get("rope_scaling") or shim.overrides.get("rope_parameters")
+    if scaling is not None:
+        scaling = dict(scaling)
+        scaling.setdefault("rope_type", scaling.pop("type", None))
+        if scaling["rope_type"] != "yarn":
+            raise NotImplementedError(f"{shim.model_path}: only a YaRN rope override is supported for a GGUF")
+        if (hf.rope_scaling or {}).get("rope_type", "default") not in ("default", "yarn"):
+            raise NotImplementedError(f"{shim.model_path}: YaRN on top of {hf.rope_scaling['rope_type']} rope is not supported")
+        hf.rope_scaling = {**(hf.rope_scaling or {}), **scaling}
+    return hf
 
 
 def build_gguf_shim(model_path: str, overrides: dict[str, Any] | None = None) -> GgufConfigShim:
@@ -135,4 +132,4 @@ def build_gguf_shim(model_path: str, overrides: dict[str, Any] | None = None) ->
     )
 
 
-__all__ = ["GgufConfigShim", "GGUF_ARCH_TO_REGISTRY", "GGUF_OVERRIDE_KEYS", "build_gguf_shim"]
+__all__ = ["GgufConfigShim", "GGUF_ARCH_TO_REGISTRY", "GGUF_OVERRIDE_KEYS", "apply_rope_overrides", "build_gguf_shim"]

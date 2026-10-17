@@ -196,10 +196,6 @@ def _rope_frequencies(
         case "default":
             return inv_freq, 1.0
 
-        case "freq_factors":
-            # llama.cpp's rope_freqs tensor (Llama 3.x GGUFs): per-pair frequency divisors
-            return inv_freq / torch.tensor(rope_scaling["factors"], dtype=torch.float), 1.0
-
         case "llama3":
             scaling_factor: float = rope_scaling["factor"]
             low_freq_factor: float = rope_scaling["low_freq_factor"]

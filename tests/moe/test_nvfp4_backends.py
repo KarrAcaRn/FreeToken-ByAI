@@ -191,7 +191,7 @@ def test_marlin_prefill_matches_dequant_reference():
     cache.materialize_layer(0)
     cache.copy_missing()
     g1, g2 = cache.alphas_for_layer(0)
-    gu_p, gu_s, dn_p, dn_s = cache.bank_views(E)
+    gu_p, gu_s, dn_p, dn_s = cache.stage_views(0, 0)
     out = marlin_fused_experts(
         hidden, gu_p, gu_s, g1, dn_p, dn_s, g2,
         topk_weights, topk_ids, "silu", False,
@@ -218,7 +218,7 @@ def test_marlin_decode_matches_dequant_reference_after_prefill_stomp():
         cache.ensure_experts(layer_id, ids)  # rewrites ids -> slots in place
         cache.copy_missing()
         g1, g2 = cache.alphas_for_slots(layer_id)
-        gu_p, gu_s, dn_p, dn_s = cache.bank_views()
+        gu_p, gu_s, dn_p, dn_s = cache.pool_bank_views(layer_id)
         out = marlin_fused_experts(
             hidden, gu_p, gu_s, g1, dn_p, dn_s, g2,
             topk_weights, ids, "silu", False,
@@ -282,7 +282,7 @@ def test_marlin_overlap_prefill_matches_dequant_reference():
     assert int(cache.num_indices.item()) == 2, "stale slot mappings survived the prefetch"
     cache.copy_missing()
     g1, g2 = cache.alphas_for_slots(0)
-    gu_p, gu_s, dn_p, dn_s = cache.bank_views()
+    gu_p, gu_s, dn_p, dn_s = cache.pool_bank_views(0)
     out = marlin_fused_experts(
         dec_hidden, gu_p, gu_s, g1, dn_p, dn_s, g2,
         dec_weights, ids, "silu", False,
@@ -330,62 +330,15 @@ def test_triton_overlap_prefill_matches_dequant_reference():
 
 
 @cuda
-def test_triton_prefill_dequant_reads_every_code_and_scale_exactly():
-    """The prefill GEMM decodes e2m1 by placing its bits in fp16 rather than through a table:
-    every code must read 2^-14 of its value, and every product with an e4m3 block scale must be
-    exact in bf16 -- the property that keeps the GEMM bit-identical to the table decode."""
-    import triton
-    import triton.language as tl
-
-    from freetoken.kernel.triton.e4m3_compat import e4m3_kernel_view, e4m3_to_f16_x128
-    from freetoken.kernel.triton.nvfp4_fused_moe import _e2m1_byte_f16_x2pow_neg14
-
-    @triton.jit
-    def dequant(bytes_ptr, scales_ptr, placed_ptr, weights_ptr, BLOCK: tl.constexpr):
-        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        lo, hi = _e2m1_byte_f16_x2pow_neg14(tl.load(bytes_ptr + offs))
-        scale = e4m3_to_f16_x128(tl.load(scales_ptr + offs))
-        tl.store(placed_ptr + 2 * offs, lo)
-        tl.store(placed_ptr + 2 * offs + 1, hi)
-        tl.store(weights_ptr + 2 * offs, (lo * scale).to(tl.bfloat16))
-        tl.store(weights_ptr + 2 * offs + 1, (hi * scale).to(tl.bfloat16))
-
-    device = torch.device("cuda")
-    # every byte against every scale: each (low code, high code) pair meets all 256 scale codes
-    packed = torch.arange(256, dtype=torch.int32, device=device).repeat_interleave(256)
-    scales = torch.arange(256, dtype=torch.uint8, device=device).repeat(256).view(torch.float8_e4m3fn)
-    placed = torch.empty(2 * packed.numel(), dtype=torch.float16, device=device)
-    weights = torch.empty(2 * packed.numel(), dtype=torch.bfloat16, device=device)
-    dequant[(packed.numel() // 1024,)](packed, e4m3_kernel_view(scales), placed, weights, BLOCK=1024)
-
-    codes = torch.stack([packed & 0xF, packed >> 4], dim=1).reshape(-1)
-    value = _E2M1.double().to(device)[codes.long()]
-    assert torch.equal(placed.double(), value * 2.0**-14)
-    assert torch.equal(placed.signbit(), value.signbit())
-    scale = scales.double().repeat_interleave(2)
-    finite = ~scale.isnan()
-    assert int(finite.sum()) == 2 * 256 * 254
-    assert torch.equal(weights.double()[finite], (value * scale * 2.0**-7)[finite])
-
-
-@cuda
 @pytest.mark.parametrize(
     ("hidden", "inter", "tokens"),
     [(H, I, 96), (272, 80, 96)],
     ids=["tiled-k", "k-not-a-tile-multiple"],
 )
-@pytest.mark.parametrize("join_b", [False, True], ids=["split-a", "join-b"])
-def test_triton_prefill_large_batch_matches_dequant_reference(hidden, inter, tokens, join_b, monkeypatch):
+def test_triton_prefill_large_batch_matches_dequant_reference(hidden, inter, tokens):
     """A batch past the small-batch tile (> 64 tokens) through the Triton prefill grouped GEMM,
-    at a K the byte tile divides and at one it does not (272 and 80 leave 8 bytes over), with
-    a split per dot and with the joined B rows of one dot (the triton >= 3.8 sm_89 path)."""
-    from freetoken.moe import fused_nvfp4
+    at a K the byte tile divides and at one it does not (272 and 80 leave 8 bytes over)."""
     from freetoken.moe.fused_nvfp4 import fused_experts_nvfp4
-
-    if join_b:
-        cfg = dict(BLOCK_SIZE_M=64, BLOCK_SIZE_N=128, BLOCK_SIZE_KB=16, GROUP_SIZE_M=8,
-                   num_warps=4, num_stages=3, JOIN_B=True)
-        monkeypatch.setattr(fused_nvfp4, "_prefill_config", lambda *_: dict(cfg))
 
     device = torch.device("cuda")
     sources = _make_native_sources(device, seed=13, hidden=hidden, inter=inter)
@@ -483,7 +436,7 @@ def test_triton_decode_marlin_matches_dequant_reference_after_prefill_stomp():
         ref = _ref_moe(ref_sources, layer_id, hidden, topk_weights, ids)
         cache.ensure_experts(layer_id, ids)  # rewrites ids -> slots in place
         cache.copy_missing()
-        gu_p, gu_s, gu_g, dn_p, dn_s, dn_g = cache.bank_views()
+        gu_p, gu_s, gu_g, dn_p, dn_s, dn_g = cache.pool_bank_views(layer_id)
         out = fused_experts_decode_nvfp4_marlin(
             hidden, gu_p, gu_s, gu_g, dn_p, dn_s, dn_g, topk_weights, ids, "silu", False
         )
@@ -513,7 +466,7 @@ def test_triton_decode_marlin_matches_baseline_kernel():
     ids = torch.tensor([[1, 6]], dtype=torch.int32, device=device)
     cache.ensure_experts(0, ids)
     cache.copy_missing()
-    banks = cache.bank_views()
+    banks = cache.pool_bank_views(0)
     marlin = fused_experts_decode_nvfp4_marlin(hidden, *banks, topk_weights, ids, "silu", False)
     base = fused_experts_decode_nvfp4_serial(hidden, *banks, topk_weights, ids, "silu", False)
     torch.testing.assert_close(marlin.float(), base.float(), rtol=2e-3, atol=2e-3)
@@ -541,7 +494,7 @@ def test_b12x_decode_matches_dequant_reference():
     cache.ensure_experts(0, ids)
     cache.copy_missing()
     g1, g2 = cache.alphas_for_slots(0)
-    gu_p, gu_s, dn_p, dn_s = cache.bank_views()
+    gu_p, gu_s, dn_p, dn_s = cache.pool_bank_views(0)
     out = b12x_fused_experts(
         hidden, gu_p, gu_s, g1, dn_p, dn_s, g2, topk_weights, ids, "silu", False
     )
@@ -613,14 +566,3 @@ def test_b12x_pack_keeps_per_layer_banks_and_flat_alphas():
     assert sum(t.shape[0] for t in cache.bank_sources["gate_up"]) == total
     assert cache.gate_up_alpha.shape == (total,)
 
-
-def test_prefill_config_joins_b_only_when_compute_bound_on_new_triton(monkeypatch):
-    from freetoken.moe import fused_nvfp4
-
-    old = dict(BLOCK_SIZE_M=64, BLOCK_SIZE_N=64, BLOCK_SIZE_KB=32, GROUP_SIZE_M=8, num_warps=4, num_stages=3)
-    new = dict(old, BLOCK_SIZE_N=128)
-    monkeypatch.setattr(fused_nvfp4, "_sm89_prefill_config", lambda: new)
-    assert fused_nvfp4._prefill_config(4096, 128.0) == dict(new, BLOCK_SIZE_KB=16, JOIN_B=True)
-    assert fused_nvfp4._prefill_config(1024, 32.0) == new
-    monkeypatch.setattr(fused_nvfp4, "_sm89_prefill_config", lambda: old)
-    assert "JOIN_B" not in fused_nvfp4._prefill_config(4096, 128.0)

@@ -75,11 +75,11 @@ def test_tokenize_messages_converts_like_a_chat_completion(client, monkeypatch):
 
     seen = {}
 
-    async def fake_count(messages, tools, ctk, state):
+    async def fake_ids(messages, tools, ctk, state):
         seen.update(messages=messages, tools=tools, ctk=ctk)
-        return 42
+        return list(range(42))
 
-    monkeypatch.setattr(openai_api, "count_prompt_tokens", fake_count)
+    monkeypatch.setattr(openai_api, "prompt_token_ids", fake_ids)
     tool = {
         "type": "function",
         "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}},
@@ -95,6 +95,8 @@ def test_tokenize_messages_converts_like_a_chat_completion(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["tokens"] == 42
+    # the ids let a client continue the rendered prompt on /v1/completions
+    assert resp.json()["token_ids"] == list(range(42))
     assert seen["messages"] == [{"role": "user", "content": "hi"}]
     assert seen["tools"] and seen["tools"][0]["function"]["name"] == "get_weather"
     assert seen["ctk"]["custom"] == 1

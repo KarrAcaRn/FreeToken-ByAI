@@ -1,201 +1,150 @@
-"""Qwen3-MoE (llama.cpp arch ``qwen3moe``, e.g. Qwen3-30B-A3B) served from a GGUF file.
+"""Qwen3 MoE from a llama.cpp ``qwen3moe`` GGUF: config from the GGUF metadata, tensors by name; the routed experts load as GGUF expert banks (``freetoken.models.gguf.experts``).
 
-The geometry is the HF qwen3_moe model's (full attention with q/k norms on every layer,
-routed experts without a shared expert), so this builds the same ``ModelConfig`` as
-``config.parse_config`` from GGUF metadata. llama.cpp's converter stores this family's
-tensors unchanged: plain RMSNorm weights, no q/k row permutation (NeoX rope). Projections,
-the embedding and the LM head stay in their packed ggml blocks (``layers.gguf``); the
-routed experts are streamed from host banks by the offload cache.
+The llama.cpp converter (conversion/qwen.py) stores these tensors unchanged: both sides run NeoX rope, so q/k carry no rope permute, and the RMSNorm weights are the HF ones.
 """
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Iterator
 
 import torch
 
-from freetoken.layers.gguf import GGUFEmbedding, GGUFLinear, GGUFLMHead, gguf_linear, gguf_linear_entries
-from freetoken.models.config import ModelConfig, RotaryConfig
-from freetoken.models.gguf.dequant import dequantize
-from freetoken.models.gguf.experts import (
-    SPLIT_EXPERT_SUFFIXES,
-    dummy_gguf_expert_sources,
-    load_split_gguf_expert_sources,
-    split_expert_quant_layout,
-)
+from freetoken.models.gguf.config import apply_rope_overrides
+from freetoken.models.gguf.reader import GgufTensorInfo, gguf_tensor_index
+from freetoken.models.gguf.tensors import float_tensor, fused, matrix
+
+from .config import parse_config
 
 if TYPE_CHECKING:
+    from freetoken.models.config import ModelConfig
     from freetoken.models.gguf.config import GgufConfigShim
 
+_ARCH = "qwen3moe"
+_LAYER_LEAVES = {
+    "self_attn.q_proj": "attn_q",
+    "self_attn.k_proj": "attn_k",
+    "self_attn.v_proj": "attn_v",
+    "self_attn.o_proj": "attn_output",
+    "mlp.gate": "ffn_gate_inp",
+    "mlp.experts.0.gate_proj": "ffn_gate_exps",
+    "mlp.experts.0.up_proj": "ffn_up_exps",
+    "mlp.experts.0.down_proj": "ffn_down_exps",
+}
+_QKV_LEAVES = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")
+_TOP_LEAVES = {"model.embed_tokens": "token_embd", "lm_head": "output"}
+_LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
 
-def _require_tp1(what: str) -> None:
-    from freetoken.distributed import get_tp_info
 
-    if get_tp_info().size > 1:
-        raise NotImplementedError(
-            f"qwen3moe GGUF {what} supports TP=1 only "
-            "(GGUF quant layers and expert banks are not tensor-parallel sharded)"
+def to_gguf(name: str, tensors: dict[str, int]) -> tuple[str, ...]:
+    """Checkpoint module name -> the GGUF tensors (without ``.weight``) that store it; empty for modules the GGUF has no matrix for."""
+    if name in _TOP_LEAVES:
+        return (_TOP_LEAVES[name],)
+    m = _LAYER_RE.match(name)
+    if m is None:
+        return ()
+    blk, leaf = f"blk.{m.group(1)}", m.group(2)
+    if leaf in _QKV_LEAVES and f"{blk}.attn_qkv.weight" in tensors:
+        return (f"{blk}.attn_qkv",)
+    if leaf in ("mlp.experts.0.gate_proj", "mlp.experts.0.up_proj") and f"{blk}.ffn_gate_up_exps.weight" in tensors:
+        return (f"{blk}.ffn_gate_up_exps",)
+    tensor = _LAYER_LEAVES.get(leaf)
+    return (f"{blk}.{tensor}",) if tensor is not None else ()
+
+
+def _check_supported(shim: GgufConfigShim) -> None:
+    if any(k.startswith("prism.hadamard.") for k in shim.metadata):
+        raise NotImplementedError(f"{shim.model_path}: Hadamard-rotated (prism) GGUF weights are not supported")
+    scaled = sorted(n for n in gguf_tensor_index(shim.model_path) if n.endswith((".scale", ".input_scale")))
+    if scaled:
+        raise NotImplementedError(f"{shim.model_path}: GGUF tensors with per-tensor scales are not supported (e.g. {scaled[0]})")
+
+
+def _hf_config(shim: GgufConfigShim) -> SimpleNamespace:
+    """The HF config fields ``parse_config`` reads, from the GGUF metadata."""
+    md = shim.metadata
+
+    def kv(key: str):
+        return md[f"{_ARCH}.{key}"]
+
+    _check_supported(shim)
+    rope = {"rope_theta": float(kv("rope.freq_base")), "rope_type": "default"}
+    scaling = md.get(f"{_ARCH}.rope.scaling.type", "none")
+    if scaling == "yarn":
+        rope.update(
+            rope_type="yarn",
+            factor=float(kv("rope.scaling.factor")),
+            original_max_position_embeddings=int(kv("rope.scaling.original_context_length")),
         )
-
-
-def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
-    arch = shim.model_type
-
-    def g(key: str, default=None):
-        val = shim.metadata.get(f"{arch}.{key}", default)
-        if val is None:
-            raise KeyError(f"missing GGUF metadata key {arch}.{key}")
-        return val
-
-    num_layers = int(g("block_count"))
-    hidden = int(g("embedding_length"))
-    num_q, num_kv = int(g("attention.head_count")), int(g("attention.head_count_kv"))
-    head_dim = int(g("attention.key_length", hidden // num_q))
-    moe_inter = int(g("expert_feed_forward_length"))
-    max_position, scaling = shim.rope()
-    rotary = RotaryConfig(
-        head_dim=head_dim,
-        rotary_dim=int(g("rope.dimension_count", head_dim)),
-        max_position=max_position,
-        base=float(g("rope.freq_base")),
-        scaling=scaling,
-    )
-    return ModelConfig(
-        num_layers=num_layers,
-        num_qo_heads=num_q,
-        num_kv_heads=num_kv,
-        head_dim=head_dim,
-        hidden_size=hidden,
-        vocab_size=int(shim.vocab_size),
-        intermediate_size=int(g("feed_forward_length", 0)),
-        hidden_act="silu",
-        rms_norm_eps=float(g("attention.layer_norm_rms_epsilon")),
-        tie_word_embeddings=bool(shim.tie_word_embeddings),
-        rotary_config=rotary,
-        num_experts=int(g("expert_count")),
-        num_experts_per_tok=int(g("expert_used_count")),
-        moe_intermediate_size=moe_inter,
-        # no GGUF key carries it: llama.cpp's qwen3moe graph always renormalizes the top-k weights
-        norm_topk_prob=True,
-        moe_enabled=True,
-        model_type=arch,
+    elif scaling != "none":
+        raise NotImplementedError(f"{shim.model_path}: rope scaling {scaling!r} is not supported")
+    key_length = md.get(f"{_ARCH}.attention.key_length")
+    return SimpleNamespace(
+        model_type="qwen3_moe",
         architectures=list(shim.architectures),
-        # the GGUF expert provider's tag; gguf_quant_types records the real per-layer types
-        expert_quant="q4_0",
-        moe_weight_format="q4_0",
-        gguf_quant_types=split_expert_quant_layout(shim.model_path, num_layers, hidden, moe_inter, arch),
+        hidden_act="silu",
+        hidden_size=int(kv("embedding_length")),
+        num_hidden_layers=int(kv("block_count")),
+        num_attention_heads=int(kv("attention.head_count")),
+        num_key_value_heads=int(kv("attention.head_count_kv")),
+        head_dim=int(key_length) if key_length is not None else None,
+        rope_scaling=rope,
+        max_position_embeddings=int(kv("context_length")),
+        rms_norm_eps=float(kv("attention.layer_norm_rms_epsilon")),
+        vocab_size=int(shim.vocab_size),
+        tie_word_embeddings=bool(shim.tie_word_embeddings),
+        intermediate_size=int(kv("feed_forward_length")),
+        num_experts=int(kv("expert_count")),
+        num_experts_per_tok=int(kv("expert_used_count")),
+        moe_intermediate_size=int(kv("expert_feed_forward_length")),
+        # llama.cpp always renormalizes the top-k weights of a qwen3moe router
+        norm_topk_prob=True,
     )
 
 
-def is_gguf_model(config: ModelConfig) -> bool:
-    return getattr(config, "gguf_quant_types", None) is not None
-
-
-def convert_qwen3_moe_to_gguf(model, config: ModelConfig) -> None:
-    """In place: swap the attention projections, the embedding and the LM head for packed
-    GGUF ops whose buffers match ``iter_gguf_weights``. Norms and the router stay dense;
-    the routed experts stay on the offload cache."""
-    tensors = config.gguf_quant_types["tensors"]
-    H = config.hidden_size
-    inner = model.model
-    inner.embed_tokens = GGUFEmbedding(config.vocab_size, H, tensors["token_embd.weight"])
-    if config.tie_word_embeddings:
-        from freetoken.models.gemma4.gguf import GGUFTiedLMHead
-
-        model.lm_head = GGUFTiedLMHead(inner.embed_tokens, tensors["token_embd.weight"])
-    else:
-        model.lm_head = GGUFLMHead(config.vocab_size, H, tensors["output.weight"])
-    for i, layer in enumerate(inner.layers.op_list):
-        attn = layer.self_attn
-        attn.qkv_proj = gguf_linear(
-            H, [attn.qo_attn_dim, attn.kv_attn_dim, attn.kv_attn_dim],
-            [tensors[f"blk.{i}.attn_{part}.weight"] for part in ("q", "k", "v")],
-        )
-        attn.o_proj = GGUFLinear(attn.qo_attn_dim, H, tensors[f"blk.{i}.attn_output.weight"])
-
-
-def _dense(t) -> torch.Tensor:
-    return dequantize(t.packed().reshape(-1), t.ggml_type, torch.bfloat16).reshape(t.shape)
+def parse_gguf_config(shim: GgufConfigShim) -> ModelConfig:
+    return replace(parse_config(apply_rope_overrides(shim, _hf_config(shim))), expert_quant="gguf")
 
 
 def iter_gguf_weights(
     model_path: str,
-    device,
+    device: torch.device,
     *,
     include_moe_experts: bool,
     include_non_moe: bool,
 ) -> Iterator[tuple[str, torch.Tensor]]:
-    """Yield every non-expert param: projections and the embedding as packed ``qweight``
-    bytes (q/k/v fused, one run per ggml type), norms and the router dequantized."""
-    from freetoken.models.gguf.reader import iter_gguf_tensors
+    """The dense state dict from the GGUF; the routed experts load as GGUF expert banks (``freetoken.models.gguf.experts``)."""
+    if not include_non_moe:
+        return
     from freetoken.utils import cached_load_hf_config
 
-    assert not include_moe_experts, (
-        "qwen3moe GGUF routed experts load into the offload banks (load_q4_0_expert_sources)"
-    )
-    assert include_non_moe
-    _require_tp1("weight loading")
-    config = parse_gguf_config(cached_load_hf_config(model_path))
-    dense = {
-        "attn_norm.weight": "input_layernorm.weight",
-        "ffn_norm.weight": "post_attention_layernorm.weight",
-        "attn_q_norm.weight": "self_attn.q_norm.weight",
-        "attn_k_norm.weight": "self_attn.k_norm.weight",
-        "ffn_gate_inp.weight": "mlp.gate.weight",
-    }
-    qkv = ("attn_q.weight", "attn_k.weight", "attn_v.weight")
-    pending: dict[int, dict[int, tuple[torch.Tensor, int]]] = {}
+    hf = _hf_config(cached_load_hf_config(model_path))
+    index = gguf_tensor_index(model_path)
+    hidden = hf.hidden_size
 
-    for t in iter_gguf_tensors(model_path):
-        name = t.name
-        if name == "token_embd.weight":
-            yield "model.embed_tokens.qweight", t.packed()
-            continue
-        if name == "output.weight":
-            if not config.tie_word_embeddings:
-                yield "lm_head.qweight", t.packed()
-            continue
-        if name == "output_norm.weight":
-            yield "model.norm.weight", _dense(t)
-            continue
-        if not name.startswith("blk."):
-            raise ValueError(f"unmapped qwen3moe GGUF tensor: {name}")
-        layer = int(name.split(".")[1])
-        suffix = name.split(".", 2)[2]
-        base = f"model.layers.{layer}"
-        if suffix in SPLIT_EXPERT_SUFFIXES:
-            continue  # routed experts -> offload banks
-        if suffix in dense:
-            yield f"{base}.{dense[suffix]}", _dense(t)
-        elif suffix == "attn_output.weight":
-            yield f"{base}.self_attn.o_proj.qweight", t.packed()
-        elif suffix in qkv:
-            slots = pending.setdefault(layer, {})
-            slots[qkv.index(suffix)] = (t.packed(), t.ggml_type)
-            if len(slots) == 3:
-                del pending[layer]
-                yield from gguf_linear_entries(f"{base}.self_attn.qkv_proj", [slots[i] for i in range(3)])
-        else:
-            raise ValueError(f"unmapped qwen3moe GGUF tensor: {name}")
+    def t(name: str) -> GgufTensorInfo:
+        return index[name if name in index else f"{name}.weight"]
 
-    assert not pending, f"incomplete GGUF qkv projections in layers {sorted(pending)}"
+    yield from fused("model.embed_tokens", [t("token_embd")], [matrix(t("token_embd"))], hidden)
+    if not hf.tie_word_embeddings:
+        yield from fused("lm_head", [t("output")], [matrix(t("output"))], hidden)
+    yield "model.norm.weight", float_tensor(t("output_norm"))
+
+    for layer in range(hf.num_hidden_layers):
+        blk, pre = f"blk.{layer}", f"model.layers.{layer}"
+        yield f"{pre}.input_layernorm.weight", float_tensor(t(f"{blk}.attn_norm"))
+        yield f"{pre}.post_attention_layernorm.weight", float_tensor(t(f"{blk}.ffn_norm"))
+        sa = f"{pre}.self_attn"
+        # convert_hf_to_gguf.py --fuse-qkv stores q, k and v as one attn_qkv matrix
+        qkv = [t(f"{blk}.attn_qkv")] if f"{blk}.attn_qkv.weight" in index else [t(f"{blk}.attn_{p}") for p in ("q", "k", "v")]
+        yield from fused(f"{sa}.qkv_proj", qkv, [matrix(p) for p in qkv], hidden)
+        yield f"{sa}.q_norm.weight", float_tensor(t(f"{blk}.attn_q_norm"))
+        yield f"{sa}.k_norm.weight", float_tensor(t(f"{blk}.attn_k_norm"))
+        out = t(f"{blk}.attn_output")
+        yield from fused(f"{sa}.o_proj", [out], [matrix(out)], int(out.ne[0]))
+        yield f"{pre}.mlp.gate.weight", float_tensor(t(f"{blk}.ffn_gate_inp"))
 
 
-def load_q4_0_expert_sources(model_path: str, config: ModelConfig, *, layer_sink=None) -> dict[str, list[torch.Tensor]]:
-    """Per-layer host banks of the routed experts' packed ggml bytes (``load_split_gguf_expert_sources``)."""
-    _require_tp1("expert banks")
-    return load_split_gguf_expert_sources(model_path, config, layer_sink=layer_sink)
-
-
-def dummy_q4_0_expert_sources(config: ModelConfig) -> dict[str, list[torch.Tensor]]:
-    return dummy_gguf_expert_sources(config)
-
-
-__all__ = [
-    "parse_gguf_config",
-    "iter_gguf_weights",
-    "convert_qwen3_moe_to_gguf",
-    "is_gguf_model",
-    "load_q4_0_expert_sources",
-    "dummy_q4_0_expert_sources",
-]
+__all__ = ["iter_gguf_weights", "parse_gguf_config", "to_gguf"]

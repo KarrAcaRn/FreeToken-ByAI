@@ -392,7 +392,7 @@ def test_cpu_decode_dsfp4_matches_gpu(bs):
         max_tokens=bs,
         device=dev,
         swiglu_limit=swiglu_limit,
-        act_block=128,
+        layer_formats=[("ds_fp4", {"act_block": 128})] * cache.num_layers,
     )
 
     hidden = torch.randn(bs, H, device=dev, dtype=torch.bfloat16)
@@ -690,7 +690,7 @@ def test_cpu_moe_decode_cuda_graph_replay_dsfp4():
     ex = CpuMoeExecutor(
         cache, top_k=top_k, activation="silu",
         apply_router_weight_on_input=False, num_threads=8, max_tokens=bs, device=dev,
-        swiglu_limit=limit, act_block=128,
+        swiglu_limit=limit, layer_formats=[("ds_fp4", {"act_block": 128})] * cache.num_layers,
     )
     b = cache.bank_sources
     layer_banks = [b[n][layer].to(dev) for n in (
@@ -782,5 +782,5 @@ def test_cpu_moe_rejects_batch_above_max_tokens():
     hidden = torch.randn(3, H, device=dev, dtype=torch.bfloat16)
     ids = torch.zeros(3, top_k, device=dev, dtype=torch.int32)
     w = torch.ones(3, top_k, device=dev, dtype=torch.float32)
-    with pytest.raises(ValueError, match="max_tokens=2"):
+    with pytest.raises(ValueError, match="max_tokens 2"):
         ex.decode(0, hidden, w, ids)

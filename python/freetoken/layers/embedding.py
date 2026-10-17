@@ -9,14 +9,22 @@ from freetoken.utils import div_ceil, nvtx_annotate
 
 from .base import BaseOP, OPList
 from .quantization import LayerKind, QuantConfig, quant_method_for
+from .quantization.embedding.unquantized import UnquantizedEmbeddingMethod
 
 
 class VocabParallelEmbedding(BaseOP):
+    """The vocab table, sharded over TP: its ``quant_method`` owns the table, looks rows up, and serves a tied LM head's product."""
+
+    quant_layer_kind = LayerKind.EMBEDDING
+
     def __init__(
         self,
         num_embeddings: int,
         embedding_dim: int,
         embed_scale: float | None = None,
+        *,
+        quant_config: QuantConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         tp_info = get_tp_info()
@@ -27,7 +35,12 @@ class VocabParallelEmbedding(BaseOP):
         start_idx = self.num_embeddings_tp * tp_rank
         finish_idx = min(start_idx + self.num_embeddings_tp, num_embeddings)
         self.vocab_range = (start_idx, finish_idx - start_idx)
-        self.weight = torch.empty(self.num_embeddings_tp, embedding_dim)
+        self.embedding_dim = embedding_dim
+        # the LM head subclass is a linear and builds its own method
+        self.quant_method = None
+        if self.quant_layer_kind is LayerKind.EMBEDDING:
+            self.quant_method = quant_method_for(quant_config, self, prefix)
+            self.quant_method.create_weights(self)
         # Gemma scales embeddings by sqrt(hidden_size). The scale is materialized in
         # the weight dtype (bf16) to match HF, which downcasts the scalar. The GPU
         # scalar is built lazily (model __init__ runs on the meta device) and cached
@@ -57,13 +70,7 @@ class VocabParallelEmbedding(BaseOP):
             out = torch.empty(x.numel(), self.weight.shape[1], dtype=self.weight.dtype, device=x.device)
             return host_embedding_gather(self._host_ptr, length, self.weight.shape[1], x.view(-1), out, start)
 
-        from freetoken.kernel import indexing
-
-        return indexing(
-            weights=self.weight,
-            indices=x,
-            vocab_range=self.vocab_range if self.tp_size > 1 else None,
-        )
+        return self.quant_method.embed(self, x)
 
     @nvtx_annotate("Embedding")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -105,12 +112,11 @@ class ParallelLMHead(VocabParallelEmbedding):
         self.in_features = embedding_dim
         self.out_features = self.num_embeddings_tp
         self.output_sizes = (self.num_embeddings_tp,)
-        self.quant_method = None
         self.tied_kernel = None
         if tied_embedding is None:
             self.quant_method = quant_method_for(quant_config, self, prefix)
             self.quant_method.create_weights(self)
-        else:
+        elif isinstance(tied_embedding.quant_method, UnquantizedEmbeddingMethod):
             # the embedding's bf16 table is the weight; only the kernel choice comes from a Method
             self.tied_kernel = quant_method_for(None, self, prefix).kernel
         self.bias = torch.empty(self.num_embeddings_tp) if bias else None
@@ -158,7 +164,10 @@ class ParallelLMHead(VocabParallelEmbedding):
             del indices
 
         if self.tied_embedding is not None:
-            logits = self.tied_kernel.linear(x, self.tied_embedding.weight, self.bias)
+            if self.tied_kernel is not None:
+                logits = self.tied_kernel.linear(x, self.tied_embedding.weight, self.bias)
+            else:
+                logits = self.tied_embedding.quant_method.logits(self.tied_embedding, x, self.bias)
         else:
             logits = self.quant_method.apply(self, x)
         if self.tp_size == 1:

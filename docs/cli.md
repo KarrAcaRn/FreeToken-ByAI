@@ -129,12 +129,14 @@ See [models.md](models.md#moe-strategies) for what each strategy does.
 | `--quant-backend` | auto | Kernel per quantized layer type, `layer[.kind]=name` entries: `linear=marlin,moe=b12x` or `moe.nvfp4=triton`. A layer-level entry applies to every kind whose table lists the name. `linear.none=torch` keeps bf16 linears off the single-row decode GEMV (`gemv`) |
 | `--online-quant` | fp8 | `fp8` quantizes a checkpoint's bf16 linears (≥1024 outputs, untied lm_head) to fp8 with one scale per row at load, same as `--quant-backend linear.none=fp8`: faster decode, more KV, slightly different outputs. `none` keeps bf16. The default steps aside when `--quant-backend` has a `linear` or `linear.none` entry (next-speed only) |
 | `--nvfp4-backend` | — | Deprecated: stands in for `--quant-backend moe.nvfp4=<marlin\|b12x\|triton>` (`flashinfer` means b12x); cannot be combined with `--quant-backend` |
-| `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family strategies) |
+| `--moe-cache-size` / `--moe-cache-rate` / `--moe-cache-mem` / `--moe-cache-auto` | auto | GPU expert-cache size as slots / fraction of all experts / memory such as `12GiB` / sized from free VRAM (mutually exclusive; auto is enabled by default for offload-family strategies) |
+| `--moe-cache-scope` | unified | `unified`: one LRU pool of slots per expert quant (quant type and bank layout), so all MoE layers share one pool when they share a quant format; `per-layer`: each layer has its own pool. `per-layer` does not combine with `--moe-strategy cpu` or `--moe-cpu-layers` |
+| `--moe-cache-split` | equal | How the pools share the slots: `equal` (in proportion to their layer counts), or `profile:<path>`: every pool keeps `top_k` slots and the rest go to the most used experts in the profile's per-layer expert counts. With `offload`, a pool smaller than the expert count lowers `--max-running-requests` to its slots / top_k |
 | `--kv-reserve-tokens` | 8192 | KV token floor reserved before `--moe-cache-auto` fills experts |
 | `--kv-reserve-share` | 0.1 | Share of the cache budget `--moe-cache-auto` keeps for KV, capped at the model context; 0 gives the experts everything but `--kv-reserve-tokens` |
 | `--enable-kv-ladder` | off | With `--moe-cache-auto --max-running-requests 1`: start KV at 2x `--ladder-step-size`, then grow in one-step rungs before requests that could reach the current bound; MoE slots shrink to keep the same VRAM budget, up to the model context limit |
 | `--moe-cpu-threads` | physical cores - 2 | CPU worker threads for the cpu/hybrid executor (auto leaves one core to the engine thread and one to the GPU handshake coordinator) |
-| `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, fp8_block, nvfp4, mxfp4) |
+| `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, a fraction, or `auto`). `auto` is for Windows/WSL only, where CUDA pinned memory is capped; every value needs an expert format the CPU executor serves (bf16, fp8_block, nvfp4, mxfp4, GGUF on x86 CPUs) |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--disable-moe-prefill-hit-d2d` | hit-D2D on | Stream all of a prefill's experts over PCIe instead of copying the cache-resident ones device-side (the split needs CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
@@ -364,7 +366,7 @@ ft checkpoint --model <hf_dir> --out <ftw_dir> [--dtype bfloat16] [--moe-backend
 Converts an HF safetensors checkpoint to FTW, FreeToken's self-contained
 fast-load format; point `ft serve --model` at the output dir. MoE experts are
 always packed into expert banks, which serve the fused and the offload
-strategies alike (GGUF and DeepSeek-V4 experts serve offload only);
+strategies alike (DeepSeek-V4 experts serve offload only);
 `--moe-backend` is kept for compatibility. See the FTW caveats in
 [models.md](models.md#notes); FTW files from older builds can be repaired with
 [scripts/ftw_hotfix.py](ftw-hotfix.md) instead of reconverting.

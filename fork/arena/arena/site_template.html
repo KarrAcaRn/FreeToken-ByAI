@@ -109,6 +109,10 @@ td.cell.active .pill { outline: 2px solid var(--accent); }
 .kv span { font: 600 0.68rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 .kv b { font: 600 1.05rem/1.2 var(--f-mono); font-variant-numeric: tabular-nums; }
 pre { margin: 0; padding: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; overflow: auto; max-height: 420px; font: 0.8rem/1.45 var(--f-mono); white-space: pre-wrap; word-break: break-word; }
+table.turns { border-collapse: collapse; margin-top: 8px; font: 0.82rem/1.4 var(--f-mono); font-variant-numeric: tabular-nums; display: block; overflow-x: auto; }
+table.turns th, table.turns td { padding: 4px 12px 4px 0; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.turns th { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+table.turns td:first-child { text-align: left; }
 .imgs { display: flex; flex-wrap: wrap; gap: 16px; }
 .imgs figure { margin: 0; display: grid; gap: 6px; }
 .imgs img { background: repeating-conic-gradient(var(--skip-bg) 0 25%, var(--panel) 0 50%) 0 0 / 16px 16px; border: 1px solid var(--line); border-radius: 4px; max-width: 100%; width: 240px; height: auto; }
@@ -347,6 +351,7 @@ function showDetail(key) {
     <p style="margin:0"><b>Prüfung:</b> ${esc(r.detail)}</p>`;
     if (r.followup) h += `<p style="margin:0"><b>Nachfrage:</b> „${esc(r.followup.prompt)}“ – gestellt, weil die erste Antwort nur ${fmt(100 * (r.followup.first_score ?? 0), 0)} % erreichte (${esc(r.followup.first_detail || r.followup.error || "")}).</p>`;
     if (r.retries && r.retries.length) h += `<details><summary>${r.retries.length} Korrekturdurchgang${r.retries.length > 1 ? "änge" : ""} nach Compiler-Rückmeldung</summary>${r.retries.map((x, i) => `<p style="margin:8px 0 4px"><b>Rückmeldung vor Durchgang ${i + 2}${x.error ? " (Anfrage fehlgeschlagen)" : ""}:</b></p><pre>${esc(x.error || x.detail_before)}</pre>`).join("")}</details>`;
+    if (r.turns && r.turns.length > 1) h += `<details><summary>Verbrauch je Durchgang</summary><table class="turns"><thead><tr><th></th><th>Tokens rein</th><th>Tokens raus</th><th>Zeit</th><th>Denkphase</th><th>Antwort</th></tr></thead><tbody>${r.turns.map((x) => `<tr><td>${esc(x.label)}</td><td>${fmt(x.prompt_tokens)}</td><td>${fmt(x.completion_tokens)}</td><td>${fmtS(x.total_s)}</td><td>${fmt(x.reasoning_chars)} Z.${x.think_stopped ? " (abgebrochen)" : ""}</td><td>${fmt(x.answer_chars)} Z.${x.finish_reason === "time" ? " (Zeit um)" : ""}</td></tr>`).join("")}</tbody></table></details>`;
     if (r.artifact && r.artifact.svg) {
       h += `<div class="imgs"><figure>${svgImg(r.artifact.svg)}<figcaption>Antwort des Modells</figcaption></figure>`;
       if (t.reference_svg) h += `<figure>${svgImg(t.reference_svg)}<figcaption>Referenz</figcaption></figure>`;
@@ -358,7 +363,7 @@ function showDetail(key) {
       h += `<div class="rate"><b>Bewertung</b><span class="btns" role="group" aria-label="Sterne">${[1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= mine ? "on" : ""}" data-stars="${n}" aria-label="${n} Sterne" aria-pressed="${n === mine}" ${canRate ? "" : "disabled"}>★</button>`).join("")}</span>
         <span class="stars-avg">${v.length ? starsTxt(v) + " Ø aller" : '<span class="n">noch keine Bewertung</span>'}</span><span class="hint">${esc(hint)}</span></div>`;
     }
-    h += `<details><summary>Antwort des Modells (${fmt((r.answer || "").length)} Zeichen${r.reasoning_chars ? `, dazu ${fmt(r.reasoning_chars)} Zeichen Denkphase` : ""})</summary><pre>${esc(r.answer)}</pre></details>`;
+    h += `<details><summary>Antwort des Modells (${fmt(r.answer_chars ?? (r.answer || "").length)} Zeichen${r.reasoning_chars ? `, dazu ${fmt(r.reasoning_chars)} Zeichen Denkphase` : ""})</summary><pre>${esc(r.answer)}</pre></details>`;
     h += `<p class="muted mono" style="margin:0;font-size:.78rem">${esc(r.time || "")} · ${esc(r.branch || r.engine || "")} ${esc(r.commit || "")}${r.finish_reason === "length" ? " · Tokenlimit erreicht" : ""}</p>`;
   }
   el.innerHTML = h;

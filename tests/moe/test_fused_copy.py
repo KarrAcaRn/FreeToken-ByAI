@@ -36,6 +36,7 @@ def test_rocm_graph_capture_uses_per_bank_copy(monkeypatch):
         evict_slots=tensor,
         src_indices=tensor,
         num_indices=tensor,
+        pool_bank_views=lambda layer_id: (tensor,),
     )
     monkeypatch.setattr(torch.version, "hip", "7.0", raising=False)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)

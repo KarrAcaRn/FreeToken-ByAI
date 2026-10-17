@@ -18,7 +18,7 @@ import tomllib
 import urllib.error
 from pathlib import Path
 
-from .client import chat, get_json
+from .client import ask, chat, get_json
 from .tasks import load_tasks
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +26,21 @@ RESULTS = Path(os.environ.get("ARENA_RESULTS", ROOT / "results" / "runs.jsonl"))
 
 
 MIN_CONTEXT = 80_000  # below this a model is not usable for real work (user, 2026-10-15: first 100k, then 80k)
+# Seconds to think, then seconds to write the answer, by decode speed (user, 2026-10-15). Each follow-up
+# or correction round gets the same again. models.toml can pin a model with tempo = "langsam" / "schnell".
+SLOW_TPS = 35
+LIMITS = {"langsam": (360, 360), "schnell": (240, 240)}
+PROBE_PROMPT = "Zähle von 1 bis 200, jede Zahl in einer eigenen Zeile, ohne weiteren Text."
+
+
+def speed_tier(url: str, served: str, m: dict, api_key=None, extra: dict | None = None) -> tuple[str, float | None]:
+    """Decode tok/s of a short probe answer -> "langsam" below SLOW_TPS, else "schnell"."""
+    if m.get("tempo"):
+        return m["tempo"], None
+    r = chat(url, served, [{"role": "user", "content": PROBE_PROMPT}], 300, api_key=api_key, extra=extra,
+             write_limit=600)
+    tps = r["decode_tps"] or 0.0
+    return ("langsam" if tps < SLOW_TPS else "schnell"), tps
 
 
 def load_models(include_removed: bool = False) -> dict:
@@ -44,6 +59,20 @@ def latest_results() -> dict:
     return out
 
 
+def save_transcript(rec: dict, turns: list) -> str:
+    """Full reasoning + answer of every round as markdown under results/transcripts/ (local, not in git);
+    runs.jsonl only keeps the answers."""
+    path = RESULTS.parent / "transcripts" / rec["model"] / f"{rec['task']}-{rec['time'].replace(':', '')}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parts = [f"# {rec['model']} - {rec['task']} ({rec['time']})\n"]
+    for x in turns:
+        parts.append(f"## {x['label']} ({x['completion_tokens']} Tokens, {x['total_s']} s, Ende: {x['finish_reason']}"
+                     f"{', Denken abgebrochen' if x['think_stopped'] else ''})\n\n### Denkphase\n\n{x['reasoning']}\n\n"
+                     f"### Antwort\n\n{x['content']}\n")
+    path.write_text("\n".join(parts))
+    return str(path.relative_to(RESULTS.parent))
+
+
 def append(rec: dict):
     RESULTS.parent.mkdir(exist_ok=True)
     with RESULTS.open("a") as f:
@@ -57,7 +86,9 @@ def git_rev(path: str) -> str | None:
         return None
 
 
-def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, tasks, meta: dict, force: bool, api_key=None):
+def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, tasks, meta: dict, force: bool, api_key=None,
+              extra: dict | None = None, think_format: str = "think", tier: str = "schnell"):
+    think_limit, write_limit = LIMITS[tier]
     done = latest_results()
     for t in tasks:
         old = done.get((model_id, t.id))
@@ -70,17 +101,21 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
         approx_prompt = len(t.prompt) // 3 + 800 * len(t.images)
         if missing:
             rec.update(status="skipped", reason="kann das Modell nicht: " + ", ".join(sorted(missing)))
-        elif ctx and approx_prompt + t.max_tokens > ctx:
+        elif ctx and t.max_tokens and approx_prompt + t.max_tokens > ctx:
             rec.update(status="skipped", reason=f"Kontext zu klein (~{approx_prompt} + {t.max_tokens} > {ctx} Tokens)")
         else:
+            def chat(msgs):
+                return ask(url, served, msgs, ctx=ctx, max_tokens=t.max_tokens, api_key=api_key, extra=extra,
+                           think_limit=think_limit, write_limit=write_limit, think_format=think_format)
             try:
-                r = chat(url, served, t.messages(), t.max_tokens, api_key=api_key)
+                r = chat(t.messages())
             except urllib.error.HTTPError as e:
                 rec.update(status="error", reason=f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}")
             except Exception as e:
                 rec.update(status="error", reason=repr(e)[:300])
             else:
                 c = t.check(r["content"])
+                r["label"] = "Antwort"
                 turns = [r]
                 answer = r["content"]
                 asked = None
@@ -91,10 +126,11 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                     msgs = t.messages() + [{"role": "assistant", "content": r["content"]},
                                            {"role": "user", "content": fu["prompt"]}]
                     try:
-                        r2 = chat(url, served, msgs, t.max_tokens, api_key=api_key)
+                        r2 = chat(msgs)
                     except Exception as e:
                         asked = {"prompt": fu["prompt"], "error": repr(e)[:300]}
                     else:
+                        r2["label"] = "Nachfrage"
                         turns.append(r2)
                         answer = r["content"] + "\n\n--- Nachfrage: " + fu["prompt"] + " ---\n\n" + r2["content"]
                         first = c
@@ -113,10 +149,11 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                         prompt = rt["prompt"].replace("{detail}", c.detail[:4000])
                         msgs.append({"role": "user", "content": prompt})
                         try:
-                            rn = chat(url, served, msgs, t.max_tokens, api_key=api_key)
+                            rn = chat(msgs)
                         except Exception as e:
                             rounds.append({"detail_before": c.detail[:2000], "error": repr(e)[:300]})
                             break
+                        rn["label"] = f"Durchgang {len(rounds) + 2}"
                         turns.append(rn)
                         msgs.append({"role": "assistant", "content": rn["content"]})
                         rounds.append({"detail_before": c.detail[:2000]})
@@ -130,12 +167,24 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                 dec = sum(x["decode_s"] for x in turns)
                 rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,
                            answer=answer[-20000:], reasoning_chars=sum(len(x["reasoning"]) for x in turns),
-                           followup=asked, retries=rounds, finish_reason=turns[-1]["finish_reason"], prompt_tokens=r["prompt_tokens"],
+                           followup=asked, retries=rounds, tempo=tier, think_limit=think_limit, write_limit=write_limit,
+                           think_stopped=sum(x["think_stopped"] for x in turns), timed_out=sum(x["finish_reason"] == "time" for x in turns), finish_reason=turns[-1]["finish_reason"], 
+                           # every round reads the whole conversation again, so "in" is the sum over rounds
+                           prompt_tokens=sum(x["prompt_tokens"] or 0 for x in turns) or None,
+                           answer_chars=sum(len(x["content"]) for x in turns),
+                           turns=[{"label": x["label"], "prompt_tokens": x["prompt_tokens"], "completion_tokens": x["completion_tokens"],
+                                   "total_s": x["total_s"], "reasoning_chars": len(x["reasoning"]), "answer_chars": len(x["content"]),
+                                   "think_stopped": x["think_stopped"], "finish_reason": x["finish_reason"]} for x in turns],
                            completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
                            decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
                            prefill_tps=r["prefill_tps"])
+                rec["transcript"] = save_transcript(rec, turns)
+                if rec["think_stopped"]:
+                    rec["detail"] += f" (Denken nach {think_limit / 60:g} min abgebrochen)"
+                if turns[-1]["finish_reason"] == "time" and not c.passed:
+                    rec["detail"] += f" (Schreibzeit {write_limit / 60:g} min abgelaufen)"
                 if turns[-1]["finish_reason"] == "length" and not c.passed:
-                    rec["detail"] += f" (Tokenlimit {t.max_tokens} erreicht)"
+                    rec["detail"] += " (Kontext voll)" if not t.max_tokens else f" (Tokenlimit {t.max_tokens} erreicht)"
         append(rec)
         if rec["status"] == "ok":
             fu = (" nach Nachfrage" if rec.get("followup") else "") + (f" nach {len(rec['retries'])} Korrekturen" if rec.get("retries") else "")
@@ -218,8 +267,11 @@ def main():
         models = load_models()
         caps = set(filter(None, a.caps.split(","))) or set(models.get(name, {}).get("caps", []))
         served = get_json(a.url.rstrip("/") + "/models", a.api_key)["data"][0]
+        tier, tps = speed_tier(a.url, served["id"], models.get(name, {}), a.api_key)
+        print(f"[{name}] Tempo {tier} ({tps} tok/s)")
         run_tasks(a.url, name, served["id"], caps, served.get("context_length"), tasks,
-                  {"engine": "extern", "url": a.url}, a.force, a.api_key)
+                  {"engine": "extern", "url": a.url, "probe_tps": tps}, a.force, a.api_key,
+                  think_format=models.get(name, {}).get("think_format", "think"), tier=tier)
         return
 
     models = load_models()
@@ -254,7 +306,15 @@ def main():
                             "reason": f"Kontext {ctx} unter {MIN_CONTEXT} Tokens", "time": dt.datetime.now().isoformat(timespec="seconds")})
                 continue
             meta = {"engine": "freetoken", "commit": git_rev(tree), "branch": Path(tree).name, "load_s": load_s, "ctx": ctx}
-            run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True)
+            # request fields per model, e.g. reasoning_effort = "medium" (Qwen3.8 defaults to xhigh)
+            extra = {"reasoning_effort": m["reasoning_effort"]} if m.get("reasoning_effort") else None
+            if extra:
+                meta.update(extra)
+            tier, tps = speed_tier(url, mid, m, extra=extra)
+            meta["probe_tps"] = tps
+            print(f"[{mid}] Tempo {tier} ({tps} tok/s): {LIMITS[tier][0] / 60:g} min denken, {LIMITS[tier][1] / 60:g} min schreiben")
+            run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True, extra=extra,
+                      think_format=m.get("think_format", "think"), tier=tier)
         finally:
             stop(proc)
 

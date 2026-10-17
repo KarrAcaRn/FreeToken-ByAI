@@ -54,6 +54,12 @@ class EngineConfig:
     moe_cache_size: int = 0
     moe_cache_rate: float | None = None
     moe_cache_auto: bool = False
+    # --moe-cache-mem: slot-cache budget in bytes, turned into a slot count once the expert banks are loaded
+    moe_cache_mem: int | None = None
+    # --moe-cache-scope: unified (one LRU pool per expert quant) or per-layer (one pool per layer)
+    moe_cache_scope: str = "unified"
+    # --moe-cache-split: how pools share the slots; equal or profile:<path> (by expert use from a profile file)
+    moe_cache_split: str = "equal"
     kv_reserve_tokens: int = 8192  # KV floor for --moe-cache-auto; small by design (MoE-priority)
     # --moe-cache-auto also reserves this share of the cache budget for KV, up to max_seq_len
     kv_reserve_share: float = 0.1
@@ -191,7 +197,7 @@ class EngineConfig:
         hf_config = copy.copy(self.hf_config)
         built = {e.config_key for e in self.active_encoders}
         for key in set(ENCODER_SECTIONS) | {e.config_key for e in self.model_spec.encoders}:
-            if key not in built:
+            if key not in built and getattr(hf_config, key, None) is not None:
                 setattr(hf_config, key, None)
         spec = self.model_spec
         quant = checkpoint_quant_config(self.model_path, hf_config, spec)

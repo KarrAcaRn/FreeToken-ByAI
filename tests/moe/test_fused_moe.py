@@ -417,12 +417,16 @@ def test_torch_moe_align_block_size_matches_contract(
 
 
 def test_moe_align_block_size_uses_torch_path_on_rocm(monkeypatch):
+    import triton
+
     import freetoken.kernel.backend as backend
     import freetoken.moe.fused as fused
 
     calls = []
     monkeypatch.setattr(backend, "is_rocm", lambda: True)
     monkeypatch.setattr(backend, "is_sgl_kernel_installed", lambda: False)
+    # Triton 3.8 on ROCm takes upstream's staged alignment (#691) first
+    monkeypatch.setattr(triton, "__version__", "3.7.0")
     monkeypatch.setattr(
         fused, "_torch_moe_align_block_size", lambda *args: calls.append(args) or "torch"
     )

@@ -48,6 +48,14 @@ cp -r vorlagen/code-beispiel aufgaben/code-json-parser
 | `vorlagen/bild-lesen-beispiel` | Bild | `answer`: Bild als Eingabe, nur für Modelle mit `vision` |
 | `vorlagen/text-beispiel` | Textverständnis | `answer`: Dokument im Prompt, Begriffe in der `ANTWORT:`-Zeile |
 
+### Zeitlimits
+
+Es gibt kein Token-Limit, sondern Zeit: Nach dem Start misst ein kurzer Probelauf die Decode-Geschwindigkeit.
+Unter 35 tok/s ("langsam") darf ein Modell 6 min denken und danach 6 min schreiben, sonst ("schnell") 4 + 4 min.
+Denkt es nach Ablauf der Denkzeit noch, wird das Denken beendet ("Time is up ...") und es muss sofort antworten;
+die Schreibzeit zählt ab dem ersten Antwort-Token. Nachfrage und Korrekturrunden bekommen jeweils dieselben
+Zeiten neu. `tempo = "langsam"` / `"schnell"` in models.toml legt die Klasse fest, ohne zu messen.
+
 ### task.toml
 
 ```toml
@@ -55,7 +63,7 @@ title = "Kurzer Name"              # erscheint auf der Seite
 category = "code"                  # code | image | text
 level = "mittel"                   # leicht | mittel | schwer (nur Anzeige)
 summary = "Ein Satz, was geprüft wird."
-max_tokens = 8192                  # Obergrenze für die Antwort inkl. Denkphase
+max_tokens = 8192                  # optional: Token-Obergrenze; ohne darf die Antwort den freien Kontext füllen
 prompt = """..."""                 # oder prompt_file = "prompt.md"
 attach = ["dokument.md"]           # optional: {{dokument.md}} im Prompt wird durch die Datei ersetzt
 images = ["bild.png"]              # optional: Bilder vor dem Text, macht die Aufgabe zu needs = ["vision"]
