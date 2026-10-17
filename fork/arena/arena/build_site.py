@@ -95,7 +95,7 @@ def main():
 
     data = {"categories": CATEGORIES, "tasks": tdata, "models": models, "results": results,
             "banner": a.banner, "hardware": a.hardware, "mode": "echt" if a.echt else "debug"}
-    blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/").replace("\ufffd", "\\ufffd")
     html = (Path(__file__).parent / "site_template.html").read_text().replace("/*DATA*/", blob)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
