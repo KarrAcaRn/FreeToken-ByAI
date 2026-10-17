@@ -120,8 +120,9 @@ reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphase
 label = "GLM-4.5-Air (NVFP4)"
 group = "MoE (Offload)"
 path = "models--gesong2077--GLM-4.5-Air-NVFP4/snapshots/*"
-# Experten (52 GiB) ganz im RAM; ohne Reserve nur 12k Kontext, 85k KV lassen ~400 Expert-Slots im VRAM
-flags = "--kv-cache-dtype fp8 --max-running-requests 1 --kv-reserve-tokens 85000"
+# Experten (52 GiB) ganz im RAM. Langsam -> 40k Kontext reichen; hybrid rechnet fehlende Experten auf der CPU.
+# Messung 2026-10-17 (40k): offload/fp8 7,0 - offload/nvfp4 8,3 - hybrid/fp8 11,4 - hybrid/nvfp4 12,6 tok/s (85k offload/fp8: 3,6)
+flags = "--kv-cache-dtype nvfp4 --moe-strategy hybrid --max-running-requests 1 --kv-reserve-tokens 40000"
 
 [qwen3_8-flash-next]
 label = "Qwen3.8 Flash-Next (NVFP4, Denken medium)"
