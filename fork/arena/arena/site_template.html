@@ -365,7 +365,7 @@ function runBlock(r, t, rkey) {
     <p style="margin:0"><b>Prüfung:</b> ${esc(r.detail)}</p>`;
   if (r.followup) h += `<p style="margin:0"><b>Nachfrage:</b> „${esc(r.followup.prompt)}“ – gestellt, weil die erste Antwort nur ${fmt(100 * (r.followup.first_score ?? 0), 0)} % erreichte (${esc(r.followup.first_detail || r.followup.error || "")}).</p>`;
   if (r.retries && r.retries.length) h += `<details><summary>${r.retries.length} Korrekturdurchgang${r.retries.length > 1 ? "änge" : ""} nach Compiler-Rückmeldung</summary>${r.retries.map((x, i) => `<p style="margin:8px 0 4px"><b>Rückmeldung vor Durchgang ${i + 2}${x.error ? " (Anfrage fehlgeschlagen)" : ""}:</b></p><pre>${esc(x.error || x.detail_before)}</pre>`).join("")}</details>`;
-  if (r.turns && r.turns.length > 1) h += `<details><summary>Verbrauch je Durchgang</summary><table class="turns"><thead><tr><th></th><th>Tokens rein</th><th>Tokens raus</th><th>Zeit</th><th>Denkphase</th><th>Antwort</th></tr></thead><tbody>${r.turns.map((x) => `<tr><td>${esc(x.label)}</td><td>${fmt(x.prompt_tokens)}</td><td>${fmt(x.completion_tokens)}</td><td>${fmtS(x.total_s)}</td><td>${fmt(x.reasoning_chars)} Z.${x.think_stopped ? " (abgebrochen)" : ""}</td><td>${fmt(x.answer_chars)} Z.${x.finish_reason === "time" ? " (Zeit um)" : ""}</td></tr>`).join("")}</tbody></table></details>`;
+  if (r.turns && r.turns.length > 1) h += `<details><summary>Verbrauch je Durchgang</summary><table class="turns"><thead><tr><th></th><th>Tokens rein</th><th>Tokens raus</th><th>Zeit</th><th>Denkphase</th><th>Antwort</th></tr></thead><tbody>${r.turns.map((x) => `<tr><td>${esc(x.label)}</td><td>${fmt(x.prompt_tokens)}</td><td>${fmt(x.completion_tokens)}</td><td>${fmtS(x.total_s)}</td><td>${fmt(x.reasoning_chars)} Z.${x.think_looped ? " (Schleife, abgebrochen)" : x.think_stopped ? " (abgebrochen)" : ""}</td><td>${fmt(x.answer_chars)} Z.${x.finish_reason === "time" ? " (Zeit um)" : x.finish_reason === "loop" ? " (Schleife, abgebrochen)" : ""}</td></tr>`).join("")}</tbody></table></details>`;
   if (r.artifact && r.artifact.svg) {
     h += `<div class="imgs"><figure>${svgImg(r.artifact.svg)}<figcaption>Antwort des Modells</figcaption></figure>`;
     if (t.reference_svg) h += `<figure>${svgImg(t.reference_svg)}<figcaption>Referenz</figcaption></figure>`;
@@ -378,7 +378,7 @@ function runBlock(r, t, rkey) {
       <span class="stars-avg">${v.length ? starsTxt(v) + " Ø aller" : '<span class="n">noch keine Bewertung</span>'}</span><span class="hint">${esc(hint)}</span></div>`;
   }
   h += `<details><summary>Antwort des Modells (${fmt(r.answer_chars ?? (r.answer || "").length)} Zeichen${r.reasoning_chars ? `, dazu ${fmt(r.reasoning_chars)} Zeichen Denkphase` : ""})</summary><pre>${esc(r.answer)}</pre></details>`;
-  h += `<p class="muted mono" style="margin:0;font-size:.78rem">${esc(r.time || "")} · ${esc(r.branch || r.engine || "")} ${esc(r.commit || "")}${r.finish_reason === "length" ? " · Tokenlimit erreicht" : ""}</p>`;
+  h += `<p class="muted mono" style="margin:0;font-size:.78rem">${esc(r.time || "")} · ${esc(r.branch || r.engine || "")} ${esc(r.commit || "")}${r.finish_reason === "length" ? " · Tokenlimit erreicht" : ""}${r.looped ? " · Schleife erkannt und abgebrochen" : ""}</p>`;
   return h;
 }
 

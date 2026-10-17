@@ -6,6 +6,8 @@ import time
 import urllib.error
 import urllib.request
 
+from .loopwatch import looping
+
 # How a model's reasoning block opens and closes in raw text, to cut a reasoning phase short.
 # models.toml picks one per model with think_format (default "think").
 THINK_FORMATS = {
@@ -33,6 +35,8 @@ def post_json(url: str, body: dict, api_key: str | None = None, timeout: float =
 # ARENA_LIVE=<file>: the text received so far is written there every few seconds, for watching a run
 LIVE = os.environ.get("ARENA_LIVE")
 LIVE_EVERY = 5.0
+# a looping reasoning ends like an expired think limit ("think"), a looping answer ends the request ("loop")
+LOOP_EVERY = 5.0
 
 
 def _write_live(body: dict, reasoning: list, content: list, t0: float, final: bool = False):
@@ -57,11 +61,12 @@ def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(url, json.dumps(body).encode(), headers)
     content, reasoning, usage, finish = [], [], None, None
+    looped = False
     has_content = has_reasoning = False
     chunks = 0
     t0 = time.perf_counter()
     t_first = t_write = None
-    t_live = t0
+    t_live = t_loop = t0
     # also bounds a request that never streams (stuck prefill, a model that neither reasons nor writes)
     total = (think_limit or 0) + write_limit if write_limit else None
     try:
@@ -97,6 +102,16 @@ def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None
                     reasoning.append(piece_r)
                     content.append(piece_c)
                     finish = ch.get("finish_reason") or finish
+                if now - t_loop > LOOP_EVERY:
+                    t_loop = now
+                    if has_content:
+                        if looping("".join(content)):
+                            finish = "loop"
+                            break
+                    elif has_reasoning and looping("".join(reasoning)):
+                        finish = "think"
+                        looped = True
+                        break
                 if LIVE and now - t_live > LIVE_EVERY:
                     t_live = now
                     _write_live(body, reasoning, content, t0)
@@ -114,6 +129,7 @@ def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None
         "content": "".join(content),
         "reasoning": "".join(reasoning),
         "finish_reason": finish,
+        "think_looped": looped,
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": out_tok,
         "ttft_s": round(t_first - t0, 3),
@@ -164,6 +180,8 @@ def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_token
     r["think_stopped"] = False
     # an aborted stream reports no usage
     r["prompt_tokens"] = r["prompt_tokens"] or n_prompt
+    if r["think_looped"] and images:
+        r["finish_reason"] = "loop"
     if r["finish_reason"] != "think":
         return r
     opener, closer = THINK_FORMATS[think_format]

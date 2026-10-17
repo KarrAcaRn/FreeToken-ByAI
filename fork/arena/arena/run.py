@@ -192,19 +192,25 @@ def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, 
                     rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,
                                answer=answer[-20000:], reasoning_chars=sum(len(x["reasoning"]) for x in turns),
                                followup=asked, retries=rounds, tempo=tier, think_limit=think_limit, write_limit=write_limit,
-                               think_stopped=sum(x["think_stopped"] for x in turns), timed_out=sum(x["finish_reason"] == "time" for x in turns), finish_reason=turns[-1]["finish_reason"], 
+                               think_stopped=sum(x["think_stopped"] for x in turns), timed_out=sum(x["finish_reason"] == "time" for x in turns), finish_reason=turns[-1]["finish_reason"],
+                               looped=sum(bool(x.get("think_looped")) + (x["finish_reason"] == "loop") for x in turns),
                                # every round reads the whole conversation again, so "in" is the sum over rounds
                                prompt_tokens=sum(x["prompt_tokens"] or 0 for x in turns) or None,
                                answer_chars=sum(len(x["content"]) for x in turns),
                                turns=[{"label": x["label"], "prompt_tokens": x["prompt_tokens"], "completion_tokens": x["completion_tokens"],
                                        "total_s": x["total_s"], "reasoning_chars": len(x["reasoning"]), "answer_chars": len(x["content"]),
-                                       "think_stopped": x["think_stopped"], "finish_reason": x["finish_reason"]} for x in turns],
+                                       "think_stopped": x["think_stopped"], "think_looped": bool(x.get("think_looped")),
+                                       "finish_reason": x["finish_reason"]} for x in turns],
                                completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
                                decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
                                prefill_tps=r["prefill_tps"])
                     rec["transcript"] = save_transcript(rec, turns)
-                    if rec["think_stopped"]:
+                    if any(x.get("think_looped") for x in turns):
+                        rec["detail"] += " (Denken wegen Schleife abgebrochen)"
+                    elif rec["think_stopped"]:
                         rec["detail"] += f" (Denken nach {think_limit / 60:g} min abgebrochen)"
+                    if turns[-1]["finish_reason"] == "loop" and not c.passed:
+                        rec["detail"] += " (Antwort wegen Schleife abgebrochen)"
                     if turns[-1]["finish_reason"] == "time" and not c.passed:
                         rec["detail"] += f" (Schreibzeit {write_limit / 60:g} min abgelaufen)"
                     if turns[-1]["finish_reason"] == "length" and not c.passed:
