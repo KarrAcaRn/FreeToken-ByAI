@@ -107,3 +107,17 @@ def test_tokenize_messages_converts_like_a_chat_completion(client, monkeypatch):
 def test_tokenize_messages_rejects_an_invalid_request(client):
     resp = client.post("/v1/tokenize", json={"messages": [{"role": "user"}], "tools": "nope"})
     assert resp.status_code == 400
+
+
+def test_token_id_messages_skip_the_tokenizer():
+    from freetoken.message import TokenizeMsg
+    from freetoken.tokenizer.tokenize import TokenizeManager
+
+    class Refuses:
+        def encode(self, *args, **kwargs):
+            raise AssertionError("token ids must not be re-tokenized")
+
+    manager = TokenizeManager.__new__(TokenizeManager)
+    manager.tokenizer, manager.mm_processor, manager._dsv4_encoder = Refuses(), None, None
+    [user] = manager.tokenize([TokenizeMsg(uid=7, text="", sampling_params=None, input_ids=[5, 6, 7])])
+    assert user.uid == 7 and user.input_ids.tolist() == [5, 6, 7]

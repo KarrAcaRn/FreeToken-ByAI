@@ -4,6 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from freetoken.message import TokenizeMsg, UserReply
@@ -339,8 +340,11 @@ def test_tool_choice_none_keeps_tool_tags_as_content():
     assert choice["message"] == {"role": "assistant", "content": output}
 
 
-def test_completion_rejects_token_id_prompts():
-    state = FakeState([])
+def test_completion_sends_token_id_prompts_untokenized():
+    state = FakeState(
+        [UserReply(uid=42, incremental_output="hello", finished=True, prompt_tokens_delta=3, completion_tokens_delta=1)]
+    )
+    state.frontend_tokenizer = lambda: SimpleNamespace(tokenizer=list(range(100)))
     response = run(
         handle_completion(
             CompletionRequest(model="client-model", prompt=[1, 2, 3]),
@@ -350,10 +354,26 @@ def test_completion_rejects_token_id_prompts():
         )
     )
 
+    assert state.sent.input_ids == [1, 2, 3]
+    assert response["choices"][0]["text"] == "hello"
+
+
+@pytest.mark.parametrize(("prompt", "message"), [([1, 100], "outside the vocabulary"), ([[1], []], "must not be empty")])
+def test_completion_rejects_unusable_token_id_prompts(prompt, message):
+    state = FakeState([])
+    state.frontend_tokenizer = lambda: SimpleNamespace(tokenizer=list(range(100)))
+    response = run(
+        handle_completion(
+            CompletionRequest(model="client-model", prompt=prompt),
+            request=None,
+            state=state,
+            model_sampling={},
+        )
+    )
+
     assert response.status_code == 400
-    body = json.loads(response.body)
-    assert body["error"]["type"] == "invalid_request_error"
-    assert "token-id prompt" in body["error"]["message"]
+    assert message in json.loads(response.body)["error"]["message"]
+    assert state.sent is None
 
 
 def test_completion_accepts_text_prompt():
@@ -865,7 +885,6 @@ def test_stream_chat_without_include_usage_has_no_metrics_chunk():
     assert not any(isinstance(e, dict) and "metrics" in e for e in events)
 
 
-import pytest  # noqa: E402
 
 
 @pytest.mark.parametrize(

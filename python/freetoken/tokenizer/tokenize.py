@@ -75,6 +75,10 @@ class TokenizeManager:
         results: List[UserMsg] = []
         # TODO: batch tokenization
         for msg in msgs:
+            if msg.input_ids is not None:
+                ids = torch.tensor(msg.input_ids, dtype=torch.int32)
+                results.append(UserMsg(uid=msg.uid, input_ids=ids, sampling_params=msg.sampling_params))
+                continue
             prompt = self.render_prompt(msg)
             # A jinja chat template owns every special token (HF's apply_chat_template
             # tokenizes with add_special_tokens=False for the same reason): tokenizers
