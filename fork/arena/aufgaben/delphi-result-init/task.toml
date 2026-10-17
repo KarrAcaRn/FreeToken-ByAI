@@ -24,9 +24,10 @@ type = "answer"
 name = "Result wird vor der Schleife nicht mit '' initialisiert"
 regex = '''result\s*:=\s*''|result\s*:=\s*emptystr|result[^.]{0,60}?(nicht|nie|kein\w*|never|not)[^.]{0,40}?(initiali\w*|vorbelegt|geleert|gelöscht|zurückgesetzt|cleared|reset)|(nicht|nie|kein\w*|never|not|un)[^.]{0,20}?initiali\w*[^.]{0,60}?result|uninitiali\w*[^.]{0,40}?result|result[^.]{0,40}?uninitiali\w*|(fehlende?|fehlt|missing)[^.]{0,30}?initiali\w*|initiali\w*[^.]{0,40}?,\s*(aber\s+)?result(\s+aber)?\s+nicht'''
 
+# Auch richtig: Result startet mit einem undefinierten (= dem bisherigen) Wert (Muse, 2026-10-17).
 [[check.groups]]
 name = "Folge: an den alten Wert der Zielvariable wird angehängt"
-regex = '''erweiter\w*|anhäng\w*|angehängt|append\w*|(alte[nrs]?|vorherige[nrs]?|bisherige[nrs]?|vorhandene[nrs]?|previous|existing|old)\s+(wert|inhalt|string|value|content)|(an|auf)[^.]{0,60}?(hängt|angehängt|anhängen|erweitert)|(hängt|angehängt|erweitert|appends?|appended|prepended)[^.]{0,80}?(an|aufrufer|ziel|caller|existing|previous)|(inhalt|wert)[^.]{0,40}?(des|der)[^.]{0,20}?(aufrufer|zielvariable)|(var|out)-?\s*parameter|versteckte[nrs]? parameter|hidden (var )?parameter'''
+regex = '''erweiter\w*|anhäng\w*|angehängt|append\w*|(alte[nrs]?|vorherige[nrs]?|bisherige[nrs]?|vorhandene[nrs]?|previous|existing|old)\s+(wert|inhalt|string|value|content)|(an|auf)[^.]{0,60}?(hängt|angehängt|anhängen|erweitert)|(hängt|angehängt|erweitert|appends?|appended|prepended)[^.]{0,80}?(an|aufrufer|ziel|caller|existing|previous)|(inhalt|wert)[^.]{0,40}?(des|der)[^.]{0,20}?(aufrufer|zielvariable)|(var|out)-?\s*parameter|versteckte[nrs]? parameter|hidden (var )?parameter|(arbeitet|rechnet|startet|beginnt|operiert|läuft)[^.]{0,40}?mit[^.]{0,30}?(undefiniert\w*|zufällig\w*|unbestimmt\w*|uninitialisiert\w*|altem|alten)|(undefiniert\w*|zufällig\w*|unbestimmt\w*|unvorhersehbar\w*)[^.]{0,20}?(wert|inhalt|result|value|string)|garbage'''
 
 # Falsche Begründung: Result wird bei Strings nicht automatisch mit '' initialisiert.
 [[check.groups]]
