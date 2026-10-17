@@ -632,15 +632,24 @@ async def handle_completion(
 
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     assert isinstance(prompts, list)
+    if _is_token_prompt(req.prompt):
+        # token ids go to the engine as they are; one list of ints is one prompt
+        prompts = [req.prompt] if isinstance(req.prompt[0], int) else req.prompt
+        bad = await _token_prompt_error(state, prompts)
+        if bad is not None:
+            return create_error_response(bad, param="prompt")
+
+    def _tokenize_msg(uid: int, prompt: Any) -> TokenizeMsg:
+        sampling = _resolve_sampling(req, model_sampling, default_max_tokens=default_max_tokens)
+        if isinstance(prompt, str):
+            return TokenizeMsg(uid=uid, text=prompt, sampling_params=sampling)
+        return TokenizeMsg(uid=uid, text="", sampling_params=sampling, input_ids=list(prompt))
+
     if req.stream:
         if len(prompts) != 1:
-            return create_error_response("Streaming completions only support a single text prompt")
+            return create_error_response("Streaming completions only support a single prompt")
         uid = state.new_user()
-        await state.send_one(
-            TokenizeMsg(uid=uid, text=prompts[0], sampling_params=_resolve_sampling(
-                req, model_sampling, default_max_tokens=default_max_tokens
-            ))
-        )
+        await state.send_one(_tokenize_msg(uid, prompts[0]))
         chunks = stream_completion_chunks(uid, req, state)
         if request is not None:
             chunks = state.stream_with_cancellation(chunks, request, uid)
@@ -652,15 +661,7 @@ async def handle_completion(
     cached_tokens = 0
     for index, prompt in enumerate(prompts):
         uid = state.new_user()
-        await state.send_one(
-            TokenizeMsg(
-                uid=uid,
-                text=prompt,
-                sampling_params=_resolve_sampling(
-                    req, model_sampling, default_max_tokens=default_max_tokens
-                ),
-            )
-        )
+        await state.send_one(_tokenize_msg(uid, prompt))
 
         async def _drain_one(uid: int = uid, index: int = index):
             nonlocal prompt_tokens, completion_tokens, cached_tokens
@@ -913,8 +914,6 @@ def _response_format_unsupported(response_format: dict[str, Any] | None) -> bool
 
 
 def _completion_unsupported_reason(req: CompletionRequest) -> str | None:
-    if _is_token_prompt(req.prompt):
-        return "OpenAI token-id prompt inputs are not supported; pass text prompt strings instead"
     logprobs_error = completion_logprobs_error(req)
     if logprobs_error is not None:
         return logprobs_error
@@ -926,6 +925,19 @@ def _completion_unsupported_reason(req: CompletionRequest) -> str | None:
         return "logit_bias is not supported"
     if _response_format_unsupported(req.response_format):
         return "response_format json_object/json_schema is not supported (no constrained decoding)"
+    return None
+
+
+async def _token_prompt_error(state: Any, prompts: list[list[int]]) -> str | None:
+    """Why token-id prompts cannot run (empty, or an id outside the tokenizer's vocabulary), or None."""
+    if any(not p for p in prompts):
+        return "a token-id prompt must not be empty"
+    build = getattr(state, "frontend_tokenizer", None)
+    vocab = len((await asyncio.to_thread(build)).tokenizer) if build is not None else None
+    for p in prompts:
+        bad = next((t for t in p if t < 0 or (vocab is not None and t >= vocab)), None)
+        if bad is not None:
+            return f"token id {bad} is outside the vocabulary" + (f" (0..{vocab - 1})" if vocab else "")
     return None
 
 

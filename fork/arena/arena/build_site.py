@@ -9,6 +9,15 @@ from .run import ROOT, latest_results, load_models
 from .tasks import CATEGORIES, load_tasks
 
 PROMPT_PREVIEW = 6000
+# answers that loop until the time limit run to hundreds of KB; the page keeps their start and end
+ANSWER_HEAD, ANSWER_TAIL = 3000, 1000
+
+
+def _short_answer(text: str | None) -> str | None:
+    if not text or len(text) <= ANSWER_HEAD + ANSWER_TAIL:
+        return text
+    cut = len(text) - ANSWER_HEAD - ANSWER_TAIL
+    return f"{text[:ANSWER_HEAD]}\n\n[... {cut} Zeichen gekürzt, vollständig im Transkript ...]\n\n{text[-ANSWER_TAIL:]}"
 
 
 def main():
@@ -24,6 +33,7 @@ def main():
     results = list(latest_results().values())
     task_ids = {t.id for t in tasks}
     results = [r for r in results if r["task"] in task_ids and r["model"] in models_cfg]
+    results = [{**r, "answer": _short_answer(r.get("answer"))} for r in results]
     with_results = {r["model"] for r in results}
     models = [{"id": k, "label": v.get("label", k), "group": v.get("group", "")}
               for k, v in models_cfg.items() if k in with_results or (not with_results and not v.get("skip"))]

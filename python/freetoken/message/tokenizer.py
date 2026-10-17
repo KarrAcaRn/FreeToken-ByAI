@@ -84,6 +84,8 @@ class TokenizeMsg(BaseTokenizerMsg):
     tools: List[Dict[str, Any]] | None = None
     images: List[bytes] | None = None
     inline_system_policy: str | None = None
+    # an already tokenized prompt (/v1/completions token ids); ``text`` is then unused
+    input_ids: List[int] | None = None
 
 
 @dataclass
