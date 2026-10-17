@@ -51,17 +51,23 @@ class _FakeMoeCache:
         self.max_slots = None
         self.layout = None
         self.quant_format = "none"
+        self.decode_target = "gpu"
         # one uint8 per expert row -> expert_bytes_per_slot == 1 unit
         self.bank_sources = {"w13": [torch.zeros((self.num_experts, 1), dtype=torch.uint8)]}
         self.cache_size = size
         self._held = size
         ledger.alloc("moe", size)
 
-    def validate_rebuild(self, cache_size: int) -> None:
+    @property
+    def banks(self):
+        # one byte per slot: what Engine._target_moe_and_expert_bytes sums
+        return [(None, torch.empty(self.cache_size, dtype=torch.uint8))]
+
+    def validate_rebuild(self, cache_size: int, pool_sizes=None) -> None:
         if cache_size < self.num_experts:
             raise ValueError(f"cache_size {cache_size} < num_experts {self.num_experts}")
 
-    def rebuild(self, cache_size: int) -> None:
+    def rebuild(self, cache_size: int, pool_sizes=None) -> None:
         self.validate_rebuild(cache_size)
         self.ledger.free("moe", self._held)
         self._held = 0
@@ -125,7 +131,8 @@ def _build_engine(monkeypatch, ledger: _Ledger, *, moe: int, kv: int, budget: in
     config = types.SimpleNamespace(
         page_size=16, max_seq_len=4096, max_running_req=4, memory_ratio=1.0,
         cuda_graph_max_bs=4, swa_num_pages_override=None,
-        model_config=types.SimpleNamespace(vocab_size=128, model_is_mrope=False, hidden_size=64),
+        model_config=types.SimpleNamespace(vocab_size=128, model_is_mrope=False, hidden_size=64,
+                                           num_experts=8, num_experts_per_tok=2),
     )
     page_table = torch.zeros((config.max_running_req + 1, 256), dtype=torch.int32)
     eng = types.SimpleNamespace(
@@ -140,7 +147,11 @@ def _build_engine(monkeypatch, ledger: _Ledger, *, moe: int, kv: int, budget: in
         dflash_worker=None,
         dtype=torch.bfloat16,
         _fill_moe_slot_cache=lambda: None,
+        # one pool of one-byte slots
+        _moe_pool_groups=[[0]], _moe_layer_slot_bytes=[1], _moe_expert_counts=None, _moe_slot_limit=None,
     )
+    eng._moe_pools = Engine._moe_pools.__get__(eng)
+    eng._moe_pool_bytes = Engine._moe_pool_bytes.__get__(eng)
     eng._target_moe_and_expert_bytes = Engine._target_moe_and_expert_bytes.__get__(eng)
     eng._resize_kv_pool = Engine._resize_kv_pool.__get__(eng)
     eng._refresh_seq_state = Engine._refresh_seq_state.__get__(eng)

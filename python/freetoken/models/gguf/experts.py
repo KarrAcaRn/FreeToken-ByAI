@@ -1,173 +1,104 @@
-"""Host-bank shapes of routed experts served natively from a GGUF file.
+"""Routed-expert banks straight from a GGUF's ``blk.N.ffn_{gate,up,down}_exps`` tensors, in their packed ggml rows: pinned host banks for the offload cache, or device banks for resident experts.
 
-Shared by every GGUF MoE family. A layout whose routed experts are all Q4_0 keeps the
-legacy ``[E, rows, row_bytes]`` banks; any other type (K- and I-quants, or types that
-differ by layer) gets fixed-width byte slots sized for the widest layer, and
-``gguf_quant_types`` tells the kernel how to decode each layer.
-"""
+Each layer keeps its own ggml types, so each layer gets its own bank shapes: ``gate_up`` [E, 2I, row_bytes] (expert e's gate rows, then its up rows) and ``down`` [E, H, row_bytes]; float experts keep their dtype ([E, 2I, H] and [E, H, I]).
+A GGUF that stores ``ffn_gate_up_exps`` (gemma4) already holds the gate_up rows in that order."""
 
 from __future__ import annotations
 
+import contextlib
+import os
+
 import torch
 
-from .dequant import GGML_Q4_0, row_bytes
+from freetoken.layers.quantization import QuantKind
+from freetoken.layers.quantization.ggml_types import float_dtype, mmq_tail_bytes, pad_rows, type_name
+from freetoken.utils import init_logger
+
+from .reader import GgufTensorInfo, gguf_tensor_index
+
+logger = init_logger(__name__)
 
 
-def q4_0_expert_specs(config) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
-    E = config.num_experts
-    H, I = config.hidden_size, config.moe_intermediate_size
-    return {
-        "gate_up": ((E, 2 * I, row_bytes(H, GGML_Q4_0)), torch.uint8),
-        "down": ((E, H, row_bytes(I, GGML_Q4_0)), torch.uint8),
-    }
+def _expert_rows(info: GgufTensorInfo) -> torch.Tensor:
+    """[E, rows, row_bytes] packed ggml rows, or [E, rows, K] for a float tensor."""
+    k, rows, experts = info.ne
+    raw = torch.from_numpy(info.data()).view(experts, rows, info.nbytes // (experts * rows))
+    dtype = float_dtype(info.ggml_type)
+    return raw if dtype is None else raw.view(dtype)
 
 
-def uses_mixed_gguf_experts(config) -> bool:
-    layout = getattr(config, "gguf_quant_types", None)
-    if layout is None:
-        return False
-    return any(
-        quant_type != GGML_Q4_0
-        for role in ("expert_gate_up", "expert_down")
-        for quant_type in layout.get(role, ())
-    )
+def _drop_page_cache(info: GgufTensorInfo) -> None:
+    try:
+        fd = os.open(info.path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, info.offset, info.nbytes, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
-def gguf_expert_specs(config) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
-    if not uses_mixed_gguf_experts(config):
-        return q4_0_expert_specs(config)
-    layout = config.gguf_quant_types
-    E = config.num_experts
-    return {
-        "gate_up": ((E, max(layout["expert_gate_up_bytes"])), torch.uint8),
-        "down": ((E, max(layout["expert_down_bytes"])), torch.uint8),
-    }
+def _device_bank(shape: tuple[int, ...], k: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    """An [E, rows, row] device bank; a zero row follows the last one when ggml's MMQ tiles read past it."""
+    experts, rows, row = shape
+    flat = torch.empty(experts * rows + pad_rows(k), row, dtype=dtype, device=device)
+    flat[experts * rows :].zero_()
+    return flat[: experts * rows].view(shape)
 
 
-def dummy_gguf_expert_sources(config) -> dict[str, list[torch.Tensor]]:
-    """Random expert banks shaped like the GGUF expert loaders' output (--use-dummy-weight)."""
-    from freetoken.moe.host_banks import alloc_layer_banks, pin_banks
+def load_gguf_expert_banks(model_path: str, num_layers: int, *, first_layer: int = 0, dummy: bool = False, device: torch.device | None = None):
+    """``ExpertBanks`` with one bank per (layer, role): pinned host banks for the offload cache, filled from the file and pinned while later layers load, or resident banks on ``device``."""
+    from freetoken.moe.expert_banks import ExpertBanks
+    from freetoken.moe.host_banks import HostBank, PinPipeline
 
-    hb = alloc_layer_banks(gguf_expert_specs(config), config.num_layers)
-    banks = {name: [b.tensor for b in hb[name]] for name in hb}
-    for t in banks["gate_up"] + banks["down"]:
-        t.random_(0, 256)
-    if torch.cuda.is_available():
-        pin_banks(hb)  # match the other dummies: pin-after-fill (no-op mmap fill on CPU-only)
-    return banks
-
-
-# Routed experts stored as separate gate / up / down ``[E, rows, row_bytes]`` stacks
-# (llama.cpp qwen35moe, qwen3moe); read by the bank loader, not the dense weight pass.
-SPLIT_EXPERT_SUFFIXES = ("ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight")
-
-
-def split_expert_quant_layout(model_path: str, num_layers: int, hidden: int, moe_inter: int, arch: str) -> dict:
-    """ggml type of every non-expert tensor plus the per-layer routed-expert types and slot bytes."""
-    from .reader import iter_gguf_tensors
-
-    tensors: dict[str, int] = {}
-    experts: dict[str, list[int | None]] = {sfx: [None] * num_layers for sfx in SPLIT_EXPERT_SUFFIXES}
-    for t in iter_gguf_tensors(model_path):
-        if t.name.startswith("blk."):
-            layer = int(t.name.split(".")[1])
-            suffix = t.name.split(".", 2)[2]
-            if layer >= num_layers:
-                continue  # NextN / MTP block
-            if suffix in experts:
-                experts[suffix][layer] = t.ggml_type
-                continue
-        tensors[t.name] = t.ggml_type
-    if not tensors:
-        raise NotImplementedError(
-            f"{model_path}: no GGUF tensor table (a converted FTW dir?); serve the .gguf file directly"
-        )
-    missing = {sfx: [i for i, v in enumerate(types) if v is None] for sfx, types in experts.items()}
-    missing = {sfx: ids for sfx, ids in missing.items() if ids}
-    if missing:
-        raise ValueError(f"{arch} GGUF routed-expert tensors missing: {missing}")
-    gate, up, down = (tuple(experts[sfx]) for sfx in SPLIT_EXPERT_SUFFIXES)
-    split = [i for i in range(num_layers) if gate[i] != up[i]]
-    if split:
-        raise NotImplementedError(
-            f"{arch} GGUF: ffn_gate_exps and ffn_up_exps differ in ggml type in layers {split}; "
-            "the fused gate_up expert bank needs one type per layer"
-        )
-    return {
-        "tensors": tensors,
-        "expert_gate_up": gate,
-        "expert_down": down,
-        "expert_gate_up_bytes": tuple(2 * moe_inter * row_bytes(hidden, t) for t in gate),
-        "expert_down_bytes": tuple(hidden * row_bytes(moe_inter, t) for t in down),
-    }
+    index = gguf_tensor_index(model_path)
+    sources: dict[str, list[torch.Tensor]] = {"gate_up": [], "down": []}
+    tails: dict[str, list[int]] = {"gate_up": [], "down": []}
+    tags = []
+    with PinPipeline() if device is None else contextlib.nullcontext() as pins:
+        for layer in range(num_layers):
+            blk = f"blk.{first_layer + layer}"
+            down = index[f"{blk}.ffn_down_exps.weight"]
+            if f"{blk}.ffn_gate_up_exps.weight" in index:
+                gate = index[f"{blk}.ffn_gate_up_exps.weight"]
+                parts = [gate]
+            else:
+                gate, up = index[f"{blk}.ffn_gate_exps.weight"], index[f"{blk}.ffn_up_exps.weight"]
+                if gate.ggml_type != up.ggml_type:
+                    raise NotImplementedError(f"{blk}: gate and up experts have different ggml types")
+                parts = [gate, up]
+            tags.append(("ggml", type_name(gate.ggml_type), type_name(down.ggml_type)))
+            tails["gate_up"].append(mmq_tail_bytes(gate.ggml_type, gate.ne[0]))
+            tails["down"].append(mmq_tail_bytes(down.ggml_type, down.ne[0]))
+            rows = [_expert_rows(info) for info in parts]
+            d = _expert_rows(down)
+            gate_up_shape = (rows[0].shape[0], sum(r.shape[1] for r in rows), rows[0].shape[2])
+            if device is None:
+                host = {"gate_up": HostBank(gate_up_shape, rows[0].dtype), "down": HostBank(tuple(d.shape), d.dtype)}
+                banks = {role: bank.tensor for role, bank in host.items()}
+            else:
+                banks = {
+                    "gate_up": _device_bank(gate_up_shape, gate.ne[0], rows[0].dtype, device),
+                    "down": _device_bank(tuple(d.shape), down.ne[0], d.dtype, device),
+                }
+            if dummy:
+                banks["gate_up"].zero_()
+                banks["down"].zero_()
+            else:
+                start = 0
+                for r in rows:
+                    banks["gate_up"][:, start : start + r.shape[1]].copy_(r)
+                    start += r.shape[1]
+                banks["down"].copy_(d)
+                for info in (*parts, down):
+                    _drop_page_cache(info)
+            if device is None:
+                pins(layer, host)
+            for role, bank in banks.items():
+                sources[role].append(bank)
+    total = sum(t.numel() * t.element_size() for ts in sources.values() for t in ts)
+    logger.info_rank0(f"GGUF expert banks: {num_layers} layers, {total / 2**30:.1f} GiB {'on ' + str(device) if device is not None else 'in host RAM'}")
+    return ExpertBanks("gguf", sources, kind=QuantKind.GGUF, kernel="ggml", layout=None, layer_tags=tags, row_tail_bytes=tails)
 
 
-def load_split_gguf_expert_sources(model_path: str, config, *, layer_sink=None) -> dict[str, list[torch.Tensor]]:
-    """Per-layer host banks of the routed experts' packed ggml bytes, verbatim from the file.
-
-    ``gate_up`` holds each expert's gate rows followed by its up rows (one GEMV computes
-    the fused ``[gate | up]`` the activation splits), ``down`` its down rows. A non-Q4_0
-    layout stores each expert as one fixed-width byte slot. ``layer_sink`` as in the
-    gemma4 loader (the converter; mixed layouts refuse it).
-    """
-    from freetoken.moe.host_banks import LayerCompletionTracker, PinPipeline, alloc_layer_banks
-
-    from .reader import iter_gguf_tensors
-
-    L, E = config.num_layers, config.num_experts
-    mixed = uses_mixed_gguf_experts(config)
-    if mixed and layer_sink is not None:
-        raise NotImplementedError(
-            "converting non-Q4_0 GGUF expert banks to FTW is not supported; serve the source GGUF directly"
-        )
-    hb = alloc_layer_banks(gguf_expert_specs(config), L)
-    banks = {name: [b.tensor for b in hb[name]] for name in hb}
-    seen: dict[str, set[int]] = {sfx: set() for sfx in SPLIT_EXPERT_SUFFIXES}
-
-    def _place(t) -> int | None:
-        if not t.name.startswith("blk."):
-            return None
-        layer, suffix = int(t.name.split(".")[1]), t.name.split(".", 2)[2]
-        if suffix not in seen or layer >= L:
-            return None
-        packed = t.packed().reshape(E, -1)
-        width = packed.shape[1]
-        if suffix == "ffn_down_exps.weight":
-            dst = banks["down"][layer].view(E, -1)[:, :width]
-        else:
-            # gate and up share a type (checked in split_expert_quant_layout), so up starts one gate width in
-            start = width if suffix == "ffn_up_exps.weight" else 0
-            dst = banks["gate_up"][layer].view(E, -1)[:, start : start + width]
-        dst.copy_(packed)
-        seen[suffix].add(layer)
-        return layer
-
-    def _load(sink) -> None:
-        tracker = LayerCompletionTracker(3, hb, sink) if sink is not None else None  # gate + up + down
-        for t in iter_gguf_tensors(model_path):
-            layer = _place(t)
-            if layer is not None and tracker is not None:
-                tracker.note(layer)
-
-    if layer_sink is not None:
-        _load(layer_sink)
-    elif torch.cuda.is_available():
-        with PinPipeline() as pins:
-            _load(pins)
-    else:
-        _load(None)
-
-    missing = {sfx: sorted(set(range(L)) - got) for sfx, got in seen.items() if got != set(range(L))}
-    assert not missing, f"missing GGUF expert layers: {missing}"
-    return banks
-
-
-__all__ = [
-    "SPLIT_EXPERT_SUFFIXES",
-    "q4_0_expert_specs",
-    "uses_mixed_gguf_experts",
-    "gguf_expert_specs",
-    "dummy_gguf_expert_sources",
-    "split_expert_quant_layout",
-    "load_split_gguf_expert_sources",
-]
+__all__ = ["load_gguf_expert_banks"]

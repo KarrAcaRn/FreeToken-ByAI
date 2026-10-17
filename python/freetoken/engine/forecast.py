@@ -194,9 +194,10 @@ def _df11_estimate(model) -> Counter[str]:
     return found
 
 
-def _online_fp8_savings(model) -> Counter[str]:
+def _online_fp8_savings(model, only=None) -> Counter[str]:
     """Per category, the bytes --online-quant fp8 frees once its layers finalize: the meta build
-    still holds their bf16 weights; at load they become e4m3 plus one fp32 scale per row."""
+    still holds their bf16 weights; at load they become e4m3 plus one fp32 scale per row.
+    ``only(weight_name)`` limits it to some weights."""
     from freetoken.layers.quantization.linear.unquantized import (
         ONLINE_FP8_MIN_OUT_FEATURES,
         OnlineFp8LinearKernel,
@@ -209,7 +210,8 @@ def _online_fp8_savings(model) -> Counter[str]:
         if (isinstance(getattr(method, "kernel", None), OnlineFp8LinearKernel) and isinstance(w, torch.Tensor)
                 and w.dim() == 2 and w.dtype in (torch.bfloat16, torch.float16)
                 and w.shape[0] >= ONLINE_FP8_MIN_OUT_FEATURES):
-            saved[tensor_category(f"{path}.weight")] += w.numel() * (w.element_size() - 1) - w.shape[0] * 4
+            if only is None or only(f"{path}.weight"):
+                saved[tensor_category(f"{path}.weight")] += w.numel() * (w.element_size() - 1) - w.shape[0] * 4
     return saved
 
 
@@ -224,6 +226,7 @@ def resident_weights(model, config) -> WeightReport:
         gpu[tensor_category(name)] += _nbytes(t)
     df11 = _df11_estimate(model)
     gpu.update(df11)
+    loaded = sum(gpu.values())  # bf16 originals of the online-fp8 layers are all on the device after load
     gpu.subtract(_online_fp8_savings(model))
     report = WeightReport(gpu=dict(gpu))
     from freetoken.layers.embedding import host_movable_embeddings
@@ -245,7 +248,10 @@ def resident_weights(model, config) -> WeightReport:
     if vision and config.active_encoders:
         streamed, staging = _streamed_encoder_bytes(model, state)
         if streamed:
-            report.vision_gpu_if_host = vision - streamed + staging
+            # streamed blocks leave the device before finalize_quant, so online fp8 never converts
+            # them: they keep their bf16 size on the host, and their savings must not be taken twice
+            kept = _online_fp8_savings(model, only=lambda n: tensor_category(n) == "vision" and _BLOCK_STACK.match(n))
+            report.vision_gpu_if_host = vision + kept.get("vision", 0) - streamed + staging
             if config.mm.encoder_weights == "host":
                 report.gpu["vision"] = report.vision_gpu_if_host
                 report.host["vision"] = streamed
@@ -253,7 +259,7 @@ def resident_weights(model, config) -> WeightReport:
     # The engine loads every tensor onto the GPU first; host-streamed encoder blocks leave before
     # finalize_quant, which then holds one layer's source and its finalized copy at once. The
     # embedding table --embed-device cpu moves out only after all of that.
-    loaded = sum(gpu.values()) + rope
+    loaded += rope
     report.load_peak = max(loaded, loaded - streamed_out + staging_in + _largest_finalize_copy(model))
     return report
 
@@ -261,13 +267,15 @@ def resident_weights(model, config) -> WeightReport:
 def _largest_finalize_copy(model) -> int:
     """Bytes of the biggest weight whose kernel rewrites it in finalize (nvfp4 transposes, fp8 repacks):
     during that call the source and the new copy are both on the device."""
+    from freetoken.layers.quantization.embedding.base import EmbeddingKernel
     from freetoken.layers.quantization.linear.base import LinearKernel
 
+    no_op = (LinearKernel.finalize, EmbeddingKernel.finalize)
     biggest = 0
     for _, o in _walk(model):
         kernel = getattr(getattr(o, "quant_method", None), "kernel", None)
         w = getattr(o, "weight", None)
-        if kernel is not None and isinstance(w, torch.Tensor) and type(kernel).finalize is not LinearKernel.finalize:
+        if kernel is not None and isinstance(w, torch.Tensor) and type(kernel).finalize not in no_op:
             biggest = max(biggest, _nbytes(w))
     return biggest
 

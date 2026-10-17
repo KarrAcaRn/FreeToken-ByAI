@@ -221,7 +221,7 @@ def test_attention_reads_packed_cache(dim, dtype, mode):
         actual = decode_paged_attention(**args, indptr=indptr, indices=loc, q_positions=pos,
             attn_logits=torch.empty(1, 6, 8, dim, device="cuda"),
             attn_lse=torch.empty(1, 6, 8, device="cuda"),
-            num_kv_splits=torch.tensor([8], device="cuda", dtype=torch.int32), max_kv_splits=8)
+            max_kv_splits=8)
     else:
         extra = {} if mode == "extend" else dict(k_extend=k[prefix:].view(-1, 2, dim), v_extend=v[prefix:].view(-1, 2, dim))
         actual = extend_paged_attention(**args, **extra,

@@ -50,7 +50,7 @@ def make_shim(metadata_overrides: dict, tmp_path) -> GgufConfigShim:
 
 
 def test_moe_gguf_keeps_moe_path(tmp_path):
-    """A MoE GGUF (has expert_* keys) keeps moe_enabled + q4_0 expert quant."""
+    """A MoE GGUF (has expert_* keys) keeps moe_enabled + gguf expert quant."""
     shim = make_shim({
         "gemma4.expert_count": 128,
         "gemma4.expert_used_count": 8,
@@ -61,7 +61,7 @@ def test_moe_gguf_keeps_moe_path(tmp_path):
     assert cfg.num_experts == 128
     assert cfg.num_experts_per_tok == 8
     assert cfg.moe_intermediate_size == 1024
-    assert cfg.expert_quant == "q4_0"
+    assert cfg.expert_quant == "gguf"
 
 
 def test_dense_gguf_loads_without_expert_keys(tmp_path):
@@ -89,19 +89,6 @@ def test_explicit_zero_experts_is_dense(tmp_path):
     assert cfg.expert_quant == "none"
 
 
-def test_a_dense_gguf_is_still_recognised_as_gguf():
-    # The native-quant layer swap keyed on the Q4_0 expert format, which a dense GGUF does not
-    # have; its recorded tensor layout marks it, or the model is built bf16 and cannot take the
-    # packed weights.
-    from types import SimpleNamespace
-
-    from freetoken.models.gemma4.gguf import is_gguf_model
-
-    assert is_gguf_model(SimpleNamespace(moe_weight_format="q4_0", gguf_quant_types=None))
-    assert is_gguf_model(SimpleNamespace(moe_weight_format="none", gguf_quant_types={"embedding": 2}))
-    assert not is_gguf_model(SimpleNamespace(moe_weight_format="none", gguf_quant_types=None))
-
-
 def test_scalar_head_count_kv_is_broadcast_to_every_layer(tmp_path):
     # llama.cpp writes head_count_kv as a scalar when every layer shares it (upstream #190).
     scalar = parse_gguf_config(make_shim({"gemma4.attention.head_count_kv": 2}, tmp_path))
@@ -111,6 +98,6 @@ def test_scalar_head_count_kv_is_broadcast_to_every_layer(tmp_path):
 
 def test_eseries_metadata_without_a_tensor_table_is_refused(tmp_path):
     # PLE / shared-KV tensor names and types live only in the tensor table (an FTW dir strips it)
-    with pytest.raises(NotImplementedError, match="E-series"):
+    with pytest.raises(NotImplementedError, match="E2B / E4B"):
         parse_gguf_config(make_shim({"gemma4.attention.shared_kv_layers": 2,
                                      "gemma4.embedding_length_per_layer_input": 32}, tmp_path))
