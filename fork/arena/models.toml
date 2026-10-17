@@ -62,6 +62,8 @@ think_format = "gemma4"
 flags = "--kv-cache-dtype fp8"
 
 [gpt-oss-20b]
+# echt page: generation_config has no values; OpenAI model card: temperature 1.0, top_p 1.0
+sampling = { temperature = 1.0, top_p = 1.0 }
 label = "gpt-oss 20B"
 group = "MoE"
 path = "models--openai--gpt-oss-20b/snapshots/*"
@@ -76,6 +78,8 @@ think_format = "gemma4"
 flags = "--kv-cache-dtype fp8 --text-model-only"
 
 [qwen3-30b-a3b]
+# echt page: the GGUF has no generation_config; Qwen3 card (thinking mode): 0.6 / top_k 20 / top_p 0.95
+sampling = { temperature = 0.6, top_k = 20, top_p = 0.95 }
 label = "Qwen3 30B-A3B (Q4_K_M GGUF)"
 group = "MoE"
 path = "models--Qwen--Qwen3-30B-A3B-GGUF/snapshots/*/*.gguf"
@@ -117,6 +121,8 @@ flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.97 --embed-de
 reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphasen); low / medium / xhigh
 
 [glm4_5-air]
+# echt page: no values in checkpoint or card; Z.ai API default for the GLM-4.5 series: 0.6 / top_p 0.95
+sampling = { temperature = 0.6, top_p = 0.95 }
 label = "GLM-4.5-Air (NVFP4)"
 group = "MoE (Offload)"
 path = "models--gesong2077--GLM-4.5-Air-NVFP4/snapshots/*"

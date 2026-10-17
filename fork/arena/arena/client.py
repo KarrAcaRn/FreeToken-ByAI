@@ -101,12 +101,15 @@ def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None
 
 
 def chat(base_url: str, model: str, messages: list, max_tokens: int, api_key: str | None = None,
-         temperature: float = 0.0, extra: dict | None = None, think_limit: float | None = None,
+         temperature: float | None = 0.0, extra: dict | None = None, think_limit: float | None = None,
          write_limit: float | None = None) -> dict:
     body = {
-        "model": model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature,
+        "model": model, "messages": messages, "max_tokens": max_tokens,
         "stream": True, "stream_options": {"include_usage": True}, **(extra or {}),
     }
+    # None: no temperature in the request, so ft serve fills the model's recommended sampling (generation_config)
+    if temperature is not None:
+        body["temperature"] = temperature
     return _stream(base_url.rstrip("/") + "/chat/completions", body, api_key, think_limit, write_limit)
 
 
@@ -116,7 +119,7 @@ def _token_ids(base: str, body: dict, api_key: str | None) -> list[int]:
 
 def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_tokens: int | None = None,
         api_key: str | None = None, extra: dict | None = None, think_limit: float | None = None,
-        write_limit: float | None = None, think_format: str = "think") -> dict:
+        write_limit: float | None = None, think_format: str = "think", temperature: float | None = 0.0) -> dict:
     """One answer: at most think_limit seconds of reasoning, then write_limit seconds for the answer. A model
     still reasoning at think_limit gets its reasoning closed with STOP_THINKING and writes the answer on
     /v1/completions (the radix cache keeps the prefix, so nothing is prefilled twice); the result then has
@@ -131,7 +134,7 @@ def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_token
     mt = min(max_tokens, budget) if max_tokens else budget
     # Token ids carry no image data, so a prompt with images cannot be continued that way.
     images = any(isinstance(m["content"], list) for m in messages)
-    r = chat(base_url, model, messages, mt, api_key=api_key, extra=extra,
+    r = chat(base_url, model, messages, mt, api_key=api_key, extra=extra, temperature=temperature,
              think_limit=None if images else think_limit, write_limit=write_limit)
     r["think_stopped"] = False
     # an aborted stream reports no usage
@@ -146,8 +149,12 @@ def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_token
         prompt += open_ids
     prompt += _token_ids(base, {"input": r["reasoning"].rstrip() + STOP_THINKING + closer,
                                 "add_special_tokens": False}, api_key)
-    body = {"model": model, "prompt": prompt, "max_tokens": max(256, mt - r["completion_tokens"]), "temperature": 0.0,
+    body = {"model": model, "prompt": prompt, "max_tokens": max(256, mt - r["completion_tokens"]),
             "stream": True, "stream_options": {"include_usage": True}}
+    if temperature is not None:
+        body["temperature"] = temperature
+    # sampling values from models.toml must also reach the continuation
+    body.update({k: v for k, v in (extra or {}).items() if k in ("temperature", "top_k", "top_p", "min_p")})
     r2 = _stream(base + "/completions", body, api_key, None, write_limit)
     tok = r["completion_tokens"] + r2["completion_tokens"]
     dec = r["decode_s"] + r2["decode_s"]
