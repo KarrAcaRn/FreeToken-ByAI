@@ -6,6 +6,7 @@
 Prints a line only when the tail of the text currently streaming repeats itself.
 """
 import json
+import re
 import sys
 import time
 import zlib
@@ -19,13 +20,18 @@ def looping(text: str) -> str | None:
     if len(tail) < 1500:
         return None
     # the last 150 characters occur again and again in the tail
-    probe = tail[-150:]
-    n = tail.count(probe)
+    n = tail.count(tail[-150:])
     if n >= 3:
         return f"letzte 150 Zeichen {n}x im Ende"
     ratio = len(zlib.compress(tail.encode())) / len(tail.encode())
     if ratio < 0.12:
         return f"Ende komprimiert auf {ratio:.0%}"
+    # a model that counts up (H1H2_2227, H1H2_2228, ... or M1095,1095 ... M1100,1100) loops just the same;
+    # with the numbers blanked a drawing of similar shapes repeats too, so this needs more repeats
+    norm = re.sub(r"\d+", "0", tail)
+    n = norm.count(norm[-150:])
+    if n >= 6:
+        return f"letzte 150 Zeichen {n}x im Ende (Zahlen ignoriert)"
     return None
 
 
