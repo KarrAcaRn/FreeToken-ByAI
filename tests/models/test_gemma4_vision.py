@@ -102,7 +102,10 @@ def test_vision_mode_marks_only_the_sliding_layers_bidirectional():
     from freetoken.models.config import FullAttentionGroupConfig, SWAAttentionGroupConfig
     from freetoken.models.gemma4 import parse_config
 
-    groups = {type(g): g for g in parse_config(AutoConfig.from_pretrained(CHECKPOINT)).attention_groups}
+    hf_config = AutoConfig.from_pretrained(CHECKPOINT)
+    if getattr(hf_config.text_config, "use_bidirectional_attention", None) != "vision":
+        pytest.skip("this checkpoint attends causally over image blocks (E2B / E4B)")
+    groups = {type(g): g for g in parse_config(hf_config).attention_groups}
     assert groups[SWAAttentionGroupConfig].bidirectional_mm_blocks
     assert not hasattr(groups[FullAttentionGroupConfig], "bidirectional_mm_blocks")
 
@@ -127,7 +130,12 @@ def test_tower_matches_the_reference_on_a_checkpoint():
     torch.set_float32_matmul_precision("highest")
     hf_config = AutoConfig.from_pretrained(CHECKPOINT)
     hf_config.vision_config._attn_implementation = "sdpa"
-    index = json.load(open(os.path.join(CHECKPOINT, "model.safetensors.index.json")))["weight_map"]
+    index_path = os.path.join(CHECKPOINT, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        index = json.load(open(index_path))["weight_map"]
+    else:  # a single-file checkpoint (E2B / E4B)
+        with safe_open(os.path.join(CHECKPOINT, "model.safetensors"), "pt") as f:
+            index = dict.fromkeys(f.keys(), "model.safetensors")
     tower_weights, embed_weights = {}, {}
     for name, file in index.items():
         if name.startswith(("model.vision_tower.", "model.embed_vision.")):
@@ -138,7 +146,9 @@ def test_tower_matches_the_reference_on_a_checkpoint():
         vision = HFVision(hf_config.vision_config).to("cuda", dtype).eval()
         vision.load_state_dict({k: v.to(dtype) for k, v in tower_weights.items()}, strict=True)
         # .to(dtype) also casts the rotary table, which from_pretrained keeps in fp32
-        vision.encoder.rotary_emb.inv_freq = Gemma4VisionRotaryEmbedding.compute_default_rope_parameters(hf_config.vision_config)[0].cuda()
+        # transformers 5.18 renamed the helper
+        rope = getattr(Gemma4VisionRotaryEmbedding, "compute_axial_rope_parameters", None) or Gemma4VisionRotaryEmbedding.compute_default_rope_parameters
+        vision.encoder.rotary_emb.inv_freq = rope(hf_config.vision_config)[0].cuda()
         embed = HFEmbedder(hf_config.vision_config, hf_config.text_config).to("cuda", dtype).eval()
         embed.load_state_dict({k: v.to(dtype) for k, v in embed_weights.items()}, strict=True)
         return lambda pixels, positions: embed(vision(pixel_values=pixels, pixel_position_ids=positions).last_hidden_state)

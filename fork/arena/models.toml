@@ -98,8 +98,8 @@ flags = "--kv-cache-dtype fp8 --text-model-only --speculative-algorithm dflash -
 label = "Muse Glimmer 30B (NVFP4)"
 group = "Groß (dicht)"
 path = "models--RedHatAI--Muse-Glimmer-30B-NVFP4/snapshots/*"
-# mit Vision-Teil OOM beim nvfp4-Finalize (Preflight sagt trotzdem "fits"); text-only: 131k Kontext
-flags = "--kv-cache-dtype fp8 --text-model-only --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"
+# Vision-Teil seit dem Encoder-vor-Finalize-Fix (next 2026-10-15) wieder an; 131k Kontext
+flags = "--kv-cache-dtype fp8 --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"
 
 [qwen3_8-27b]
 label = "Qwen3.8 27B (NVFP4, Denken medium)"
