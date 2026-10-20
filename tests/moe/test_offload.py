@@ -499,6 +499,51 @@ def test_adjust_config_converts_moe_cache_rate_to_cache_size(monkeypatch):
     assert is_offload_moe_strategy(config.moe_strategy)
 
 
+def test_unified_memory_on_hip_auto_picks_fused(monkeypatch):
+    from types import SimpleNamespace
+
+    from freetoken.distributed import DistributedInfo
+    from freetoken.engine.config import EngineConfig
+    from freetoken.engine.engine import _adjust_config, _is_unified_memory_gpu
+
+    # Strix Halo (gfx1151): ROCm torch reports the iGPU through the same is_integrated property.
+    monkeypatch.delenv("FREETOKEN_UNIFIED_MEMORY", raising=False)
+    monkeypatch.setattr(torch.version, "hip", "7.1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: SimpleNamespace(gcnArchName="gfx1151", is_integrated=True),
+    )
+    assert _is_unified_memory_gpu() is True
+
+    config = EngineConfig(
+        model_path="/tmp/freetoken-test-model",
+        tp_info=DistributedInfo(rank=0, size=1),
+        dtype=torch.bfloat16,
+        attention_backend="triton",
+    )
+    object.__setattr__(
+        config,
+        "model_config",
+        SimpleNamespace(
+            has_swa_attention=False,
+            has_linear_attention=False,
+            is_moe=True,
+            num_layers=10,
+            num_moe_layers=10,
+            num_experts=8,
+            expert_quant="nvfp4",
+            moe_strategy="auto",
+        ),
+    )
+
+    _adjust_config(config)
+
+    assert config.moe_strategy == "fused"
+
+
 def test_graph_capture_reuses_warm_offload_cache_before_capture(monkeypatch):
     import freetoken.core as core
     from freetoken.core import Context, Req, get_global_ctx
