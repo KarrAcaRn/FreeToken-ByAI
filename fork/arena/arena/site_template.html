@@ -92,6 +92,12 @@ td.cell { text-align: center; cursor: pointer; padding: 6px; }
 .pill.view { background: var(--skip-bg); color: var(--muted); padding: 4px; }
 .pill .thumb { width: 64px; height: 64px; object-fit: contain; display: block; background: repeating-conic-gradient(var(--line) 0 25%, var(--panel) 0 50%) 0 0 / 10px 10px; border-radius: 4px; }
 .pill.err { background: var(--warn-bg); color: var(--warn); }
+.pill.part { background: var(--warn-bg); color: var(--warn); }
+.pill .thumbs { display: flex; gap: 3px; }
+.pill .thumbs .thumb { width: 44px; height: 44px; }
+details.run { border-top: 1px solid var(--line); padding-top: 10px; }
+details.run > summary { font-weight: 600; color: var(--ink); }
+details.run > div { display: grid; gap: 12px; margin-top: 10px; }
 .pill.stale { outline: 1px dashed var(--muted); }
 td.cell.active .pill { outline: 2px solid var(--accent); }
 .stars-avg { font: 600 0.72rem/1 var(--f-mono); color: var(--accent); letter-spacing: 0.02em; }
@@ -136,8 +142,8 @@ details summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
 <div class="wrap">
   <header>
     <span class="eyebrow">FreeToken · eigene Prüfaufgaben</span>
-    <h1>KI-Prüfstand</h1>
-    <p class="muted" style="margin:0;max-width:70ch">Alle lokal getesteten Modelle bekommen dieselben Aufgaben. Gemessen wird, ob die Aufgabe gelöst wurde, wie lange es dauerte, wie schnell das Modell Tokens erzeugt und wie viele Tokens es dafür brauchte.</p>
+    <h1 id="title">KI-Prüfstand</h1>
+    <p class="muted" id="intro" style="margin:0;max-width:70ch">Alle lokal getesteten Modelle bekommen dieselben Aufgaben. Gemessen wird, ob die Aufgabe gelöst wurde, wie lange es dauerte, wie schnell das Modell Tokens erzeugt und wie viele Tokens es dafür brauchte.</p>
     <div id="banner" class="banner" hidden></div>
     <div class="facts" id="facts"></div>
   </header>
@@ -174,7 +180,7 @@ details summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
     <div class="tasks" id="tasks"></div>
   </section>
 
-  <section class="method">
+  <section class="method" id="method">
     <h2 style="color:var(--ink)">Messmethode</h2>
     <p>Jede Aufgabe läuft einmal pro Modell mit Temperatur 0 über die OpenAI-kompatible Schnittstelle von <span class="mono">ft serve</span>, gestreamt und ohne parallele Anfragen. <b>Zeit</b> ist die Spanne von der Anfrage bis zum letzten Token. <b>tok/s</b> sind die erzeugten Tokens ab dem ersten Token geteilt durch die Zeit danach, also reine Erzeugungsgeschwindigkeit ohne Prefill. <b>Tokens</b> zählt alle erzeugten Tokens inklusive Denkphase (reasoning).</p>
     <p>Programmieraufgaben werden in einer abgeschotteten Umgebung (bubblewrap, ohne Netz) gegen versteckte Tests ausgeführt. SVG-Bilder werden gerendert und pixelweise mit einer Referenz verglichen. Textaufgaben prüfen die letzte Zeile <span class="mono">ANTWORT:</span> auf die erwarteten Begriffe. Ändert sich eine Aufgabe, gelten alte Ergebnisse als veraltet und zählen nicht mehr in der Rangliste.</p>
@@ -231,7 +237,18 @@ function rate(key, r, stars) {
     render();
   });
 }
-const state = (r, t) => !r ? "none" : r.fingerprint !== t.fingerprint ? "stale" : r.status === "ok" ? (r.passed == null ? "view" : r.passed ? "pass" : "fail") : r.status === "skipped" ? "skip" : "err";
+const ECHT = D.mode === "echt";
+const state = (r, t) => !r ? "none" : r.fingerprint !== t.fingerprint ? "stale" : r.status !== "ok" ? (r.status === "skipped" ? "skip" : "err")
+  : r.passed == null ? "view" : r.runs ? (r.solved_runs === r.n ? "pass" : r.solved_runs ? "part" : "fail") : r.passed ? "pass" : "fail";
+// every hand rating of a cell: one per run on the echt page (key#run), else the cell's own
+const cellRatings = (key, r) => r.runs ? r.runs.flatMap((x) => rateFor(key + "#" + x.run, x)) : rateFor(key, r);
+if (ECHT) {
+  document.title = "KI-Prüfstand – echtes Verhalten";
+  document.getElementById("title").textContent = "KI-Prüfstand – echtes Verhalten";
+  document.getElementById("intro").textContent = "Dieselben Aufgaben, aber jedes Modell mit seinen empfohlenen Sampling-Werten (Temperatur usw. aus der Modellkarte) und drei Läufen je Aufgabe. Die Felder zeigen, wie oft ein Modell die Aufgabe gelöst hat und den Mittelwert der Punkte.";
+  document.querySelector(".legend").insertAdjacentHTML("afterbegin", '<span class="pill part">2/3</span>teilweise gelöst (k von 3 Läufen)');
+  document.getElementById("method").querySelector("p").innerHTML = "Jede Aufgabe läuft dreimal pro Modell über <span class=\"mono\">ft serve</span>, ohne Temperatur in der Anfrage: der Server nimmt die empfohlenen Werte aus der <span class=\"mono\">generation_config.json</span> des Modells. <b>k/3</b> zählt die gelösten Läufe; Zeit, tok/s und Tokens sind Mittelwerte der Läufe. Die Seite mit Temperatur 0 und einem Lauf zeigt dagegen, ob sich Ergebnisse durch Änderungen an FreeToken verschieben.";
+}
 
 function facts() {
   const ok = D.results.filter((r) => r.status === "ok");
@@ -266,7 +283,9 @@ function stats(m) {
     if (r.decode_tps) tps.push(r.decode_tps);
     tok += r.completion_tokens || 0; time += r.total_s || 0;
     if (!t.graded || r.passed == null) continue;
-    tried++; passed += r.passed ? r.score : 0; viaFollowup += r.passed && r.followup ? 1 : 0; score += r.score;
+    tried++; score += r.score;
+    if (r.runs) passed += r.runs.reduce((a, x) => a + (x.passed ? x.score : 0), 0) / r.n;
+    else { passed += r.passed ? r.score : 0; viaFollowup += r.passed && r.followup ? 1 : 0; }
   }
   const applicable = ts.filter((t) => t.graded).filter((t) => { const r = res[m.id + "|" + t.id]; return !(r && r.status === "skipped" && r.fingerprint === t.fingerprint); }).length;
   const ran = ts.filter((t) => { const r = res[m.id + "|" + t.id]; return r && r.fingerprint === t.fingerprint && r.status === "ok"; }).length;
@@ -308,11 +327,13 @@ function matrix() {
     h += `<tr><td><div class="model-name">${esc(m.label)}</div></td>`;
     for (const t of ts) {
       const r = res[m.id + "|" + t.id]; const s = state(r, t);
-      const sym = { pass: "✓", fail: "✗", skip: "–", err: "!", none: "", stale: "?", view: "" }[s];
-      const thumb = s === "view" && r.artifact && r.artifact.svg ? `<img class="thumb" alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(r.artifact.svg)}">` : "";
-      const sv = s === "view" ? starsTxt(rateFor(m.id + "|" + t.id, r)) : "";
-      const sub = s === "view" && sv ? `<span class="stars-avg">${sv}</span>` : s === "pass" || s === "fail" || s === "view" ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
-      const extra = ((s === "fail" && r.score > 0) || (s === "pass" && r.score < 1) ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "") + (r && r.retries && r.retries.length && (s === "pass" || s === "fail") ? `<sup>K${r.retries.length}</sup>` : "");
+      const sym = r && r.runs && ["pass", "fail", "part"].includes(s) ? `${r.solved_runs}/${r.n}` : { pass: "✓", fail: "✗", part: "", skip: "–", err: "!", none: "", stale: "?", view: "" }[s];
+      const img = (x) => `<img class="thumb" alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(x.artifact.svg)}">`;
+      const thumb = s !== "view" ? "" : r.runs ? `<span class="thumbs">${r.runs.filter((x) => x.artifact && x.artifact.svg).map(img).join("")}</span>`
+        : r.artifact && r.artifact.svg ? img(r) : "";
+      const sv = s === "view" ? starsTxt(cellRatings(m.id + "|" + t.id, r)) : "";
+      const sub = s === "view" && sv ? `<span class="stars-avg">${sv}</span>` : ["pass", "fail", "part", "view"].includes(s) ? `${fmt(r.decode_tps, 0)} tok/s` : s === "skip" ? "n. a." : s === "err" ? "Fehler" : s === "stale" ? "veraltet" : "offen";
+      const extra = (((s === "fail" || s === "part") && r.score > 0) || (s === "pass" && r.score < 1) ? ` ${fmt(100 * r.score, 0)}%` : "") + (r && r.followup && (s === "pass" || s === "fail") ? "<sup>N</sup>" : "") + (r && r.retries && r.retries.length && (s === "pass" || s === "fail") ? `<sup>K${r.retries.length}</sup>` : "");
       const key = m.id + "|" + t.id;
       h += `<td class="cell ${active === key ? "active" : ""}" data-key="${esc(key)}" tabindex="0"><span class="pill ${s === "stale" ? "none stale" : s}">${thumb}${sym}${extra}<small>${sub}</small></span></td>`;
     }
@@ -327,19 +348,12 @@ function matrix() {
 
 const svgImg = (svg) => `<img alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}">`;
 
-function showDetail(key) {
-  const keepScroll = active === key && !$("#detail").hidden;
-  active = key; matrix();
-  const [mid, tid] = key.split("|");
-  const m = D.models.find((x) => x.id === mid), t = byTask[tid], r = res[key];
-  const el = $("#detail"); el.hidden = false;
-  let h = `<div class="sec-head"><div><span class="eyebrow">${esc(CAT[t.category])} · ${esc(t.level)}</span><h3>${esc(m.label)} – ${esc(t.title)}</h3></div><button class="close" id="close">Schließen</button></div>`;
-  if (!r) h += `<p class="muted">Diese Kombination wurde noch nicht ausgeführt.</p>`;
-  else if (r.status !== "ok") h += `<p>${r.status === "skipped" ? "Nicht anwendbar" : "Fehler"}: ${esc(r.reason)}</p>`;
-  else {
-    if (r.fingerprint !== t.fingerprint) h += `<div class="banner">Die Aufgabe wurde seit diesem Lauf geändert; das Ergebnis ist veraltet.</div>`;
-    h += `<div class="kv">
-      <div><span>Ergebnis</span><b style="color:var(--${r.passed == null ? "muted" : r.passed ? "pass" : "fail"})">${r.passed == null ? "ohne Bewertung" : r.passed ? (r.followup ? "gelöst nach Nachfrage" : r.retries && r.retries.length ? `gelöst im ${r.retries.length + 1}. Durchgang` : "gelöst") : "nicht gelöst"}</b></div>
+const verdictOf = (r) => r.passed == null ? "ohne Bewertung" : r.passed ? (r.followup ? "gelöst nach Nachfrage" : r.retries && r.retries.length ? `gelöst im ${r.retries.length + 1}. Durchgang` : "gelöst") : "nicht gelöst";
+
+// The measurements, check result, rounds, image, rating and answer of one run; rkey keys its hand rating.
+function runBlock(r, t, rkey) {
+  let h = `<div class="kv">
+      <div><span>Ergebnis</span><b style="color:var(--${r.passed == null ? "muted" : r.passed ? "pass" : "fail"})">${verdictOf(r)}</b></div>
       <div ${r.score == null ? "hidden" : ""}><span>Punkte</span><b>${fmt(100 * r.score, 1)} %${r.followup && r.followup.score_factor ? ` <small class="muted">(x${fmt(r.followup.score_factor, 2)})</small>` : ""}</b></div>
       <div><span>Zeit</span><b>${fmtS(r.total_s)}</b></div>
       <div><span>Erstes Token</span><b>${fmtS(r.ttft_s)}</b></div>
@@ -349,25 +363,57 @@ function showDetail(key) {
       <div><span>Tokens raus</span><b>${fmt(r.completion_tokens)}</b></div>
     </div>
     <p style="margin:0"><b>Prüfung:</b> ${esc(r.detail)}</p>`;
-    if (r.followup) h += `<p style="margin:0"><b>Nachfrage:</b> „${esc(r.followup.prompt)}“ – gestellt, weil die erste Antwort nur ${fmt(100 * (r.followup.first_score ?? 0), 0)} % erreichte (${esc(r.followup.first_detail || r.followup.error || "")}).</p>`;
-    if (r.retries && r.retries.length) h += `<details><summary>${r.retries.length} Korrekturdurchgang${r.retries.length > 1 ? "änge" : ""} nach Compiler-Rückmeldung</summary>${r.retries.map((x, i) => `<p style="margin:8px 0 4px"><b>Rückmeldung vor Durchgang ${i + 2}${x.error ? " (Anfrage fehlgeschlagen)" : ""}:</b></p><pre>${esc(x.error || x.detail_before)}</pre>`).join("")}</details>`;
-    if (r.turns && r.turns.length > 1) h += `<details><summary>Verbrauch je Durchgang</summary><table class="turns"><thead><tr><th></th><th>Tokens rein</th><th>Tokens raus</th><th>Zeit</th><th>Denkphase</th><th>Antwort</th></tr></thead><tbody>${r.turns.map((x) => `<tr><td>${esc(x.label)}</td><td>${fmt(x.prompt_tokens)}</td><td>${fmt(x.completion_tokens)}</td><td>${fmtS(x.total_s)}</td><td>${fmt(x.reasoning_chars)} Z.${x.think_stopped ? " (abgebrochen)" : ""}</td><td>${fmt(x.answer_chars)} Z.${x.finish_reason === "time" ? " (Zeit um)" : ""}</td></tr>`).join("")}</tbody></table></details>`;
-    if (r.artifact && r.artifact.svg) {
-      h += `<div class="imgs"><figure>${svgImg(r.artifact.svg)}<figcaption>Antwort des Modells</figcaption></figure>`;
-      if (t.reference_svg) h += `<figure>${svgImg(t.reference_svg)}<figcaption>Referenz</figcaption></figure>`;
-      h += `</div>`;
+  if (r.followup) h += `<p style="margin:0"><b>Nachfrage:</b> „${esc(r.followup.prompt)}“ – gestellt, weil die erste Antwort nur ${fmt(100 * (r.followup.first_score ?? 0), 0)} % erreichte (${esc(r.followup.first_detail || r.followup.error || "")}).</p>`;
+  if (r.retries && r.retries.length) h += `<details><summary>${r.retries.length} Korrekturdurchgang${r.retries.length > 1 ? "änge" : ""} nach Compiler-Rückmeldung</summary>${r.retries.map((x, i) => `<p style="margin:8px 0 4px"><b>Rückmeldung vor Durchgang ${i + 2}${x.error ? " (Anfrage fehlgeschlagen)" : ""}:</b></p><pre>${esc(x.error || x.detail_before)}</pre>`).join("")}</details>`;
+  if (r.turns && r.turns.length > 1) h += `<details><summary>Verbrauch je Durchgang</summary><table class="turns"><thead><tr><th></th><th>Tokens rein</th><th>Tokens raus</th><th>Zeit</th><th>Denkphase</th><th>Antwort</th></tr></thead><tbody>${r.turns.map((x) => `<tr><td>${esc(x.label)}</td><td>${fmt(x.prompt_tokens)}</td><td>${fmt(x.completion_tokens)}</td><td>${fmtS(x.total_s)}</td><td>${fmt(x.reasoning_chars)} Z.${x.think_looped ? " (Schleife, abgebrochen)" : x.think_stopped ? " (abgebrochen)" : ""}</td><td>${fmt(x.answer_chars)} Z.${x.finish_reason === "time" ? " (Zeit um)" : x.finish_reason === "loop" ? " (Schleife, abgebrochen)" : ""}</td></tr>`).join("")}</tbody></table></details>`;
+  if (r.artifact && r.artifact.svg) {
+    h += `<div class="imgs"><figure>${svgImg(r.artifact.svg)}<figcaption>Antwort des Modells</figcaption></figure>`;
+    if (t.reference_svg) h += `<figure>${svgImg(t.reference_svg)}<figcaption>Referenz</figcaption></figure>`;
+    h += `</div>`;
+  }
+  if (!t.graded && r.artifact && r.artifact.svg) {
+    const v = rateFor(rkey, r), mine = myRatings[rkey] && myRatings[rkey].run === r.time ? myRatings[rkey].stars : 0;
+    const hint = !rateDb ? "Bewertung in dieser Ansicht nicht verfügbar." : !canRate ? (rateErr || "Zum Bewerten anmelden (mindestens Mitwirkende)." ) : rateErr || (mine ? "Deine Bewertung. Gleichen Stern erneut klicken zum Entfernen." : "Klick auf einen Stern bewertet das Bild.");
+    h += `<div class="rate"><b>Bewertung</b><span class="btns" role="group" aria-label="Sterne">${[1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= mine ? "on" : ""}" data-rkey="${esc(rkey)}" data-stars="${n}" aria-label="${n} Sterne" aria-pressed="${n === mine}" ${canRate ? "" : "disabled"}>★</button>`).join("")}</span>
+      <span class="stars-avg">${v.length ? starsTxt(v) + " Ø aller" : '<span class="n">noch keine Bewertung</span>'}</span><span class="hint">${esc(hint)}</span></div>`;
+  }
+  h += `<details><summary>Antwort des Modells (${fmt(r.answer_chars ?? (r.answer || "").length)} Zeichen${r.reasoning_chars ? `, dazu ${fmt(r.reasoning_chars)} Zeichen Denkphase` : ""})</summary><pre>${esc(r.answer)}</pre></details>`;
+  h += `<p class="muted mono" style="margin:0;font-size:.78rem">${esc(r.time || "")} · ${esc(r.branch || r.engine || "")} ${esc(r.commit || "")}${r.finish_reason === "length" ? " · Tokenlimit erreicht" : ""}${r.looped ? " · Schleife erkannt und abgebrochen" : ""}</p>`;
+  return h;
+}
+
+function showDetail(key) {
+  const keepScroll = active === key && !$("#detail").hidden;
+  active = key; matrix();
+  const [mid, tid] = key.split("|");
+  const m = D.models.find((x) => x.id === mid), t = byTask[tid], r = res[key];
+  const el = $("#detail"); el.hidden = false;
+  const recOf = {};  // rating key -> the run it rates
+  let h = `<div class="sec-head"><div><span class="eyebrow">${esc(CAT[t.category])} · ${esc(t.level)}</span><h3>${esc(m.label)} – ${esc(t.title)}</h3></div><button class="close" id="close">Schließen</button></div>`;
+  if (!r) h += `<p class="muted">Diese Kombination wurde noch nicht ausgeführt.</p>`;
+  else if (r.status !== "ok") h += `<p>${r.status === "skipped" ? "Nicht anwendbar" : "Fehler"}: ${esc(r.reason)}</p>`;
+  else {
+    if (r.fingerprint !== t.fingerprint) h += `<div class="banner">Die Aufgabe wurde seit diesem Lauf geändert; das Ergebnis ist veraltet.</div>`;
+    if (r.runs) {
+      h += `<div class="kv">
+        <div ${r.passed == null ? "hidden" : ""}><span>Gelöst</span><b>${r.solved_runs} von ${r.n} Läufen</b></div>
+        <div ${r.score == null ? "hidden" : ""}><span>Ø Punkte</span><b>${fmt(100 * r.score, 1)} %</b></div>
+        <div><span>Ø Zeit</span><b>${fmtS(r.total_s)}</b></div>
+        <div><span>Ø Erzeugung</span><b>${fmt(r.decode_tps, 1)} tok/s</b></div>
+        <div><span>Ø Tokens raus</span><b>${fmt(r.completion_tokens)}</b></div>
+      </div>`;
+      for (const [i, x] of r.runs.entries()) {
+        const rk = key + "#" + x.run; recOf[rk] = x;
+        const head = x.status !== "ok" ? `Fehler` : `${verdictOf(x)}${x.score != null ? ` · ${fmt(100 * x.score, 0)} %` : ""} · ${fmtS(x.total_s)}`;
+        h += `<details class="run" ${i === 0 ? "open" : ""}><summary>Lauf ${x.run}: ${head}</summary><div>${x.status === "ok" ? runBlock(x, t, rk) : `<p>${esc(x.reason)}</p>`}</div></details>`;
+      }
+    } else {
+      recOf[key] = r;
+      h += runBlock(r, t, key);
     }
-    if (!t.graded && r.artifact && r.artifact.svg) {
-      const v = rateFor(key, r), mine = myRatings[key] && myRatings[key].run === r.time ? myRatings[key].stars : 0;
-      const hint = !rateDb ? "Bewertung in dieser Ansicht nicht verfügbar." : !canRate ? (rateErr || "Zum Bewerten anmelden (mindestens Mitwirkende)." ) : rateErr || (mine ? "Deine Bewertung. Gleichen Stern erneut klicken zum Entfernen." : "Klick auf einen Stern bewertet das Bild.");
-      h += `<div class="rate"><b>Bewertung</b><span class="btns" role="group" aria-label="Sterne">${[1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= mine ? "on" : ""}" data-stars="${n}" aria-label="${n} Sterne" aria-pressed="${n === mine}" ${canRate ? "" : "disabled"}>★</button>`).join("")}</span>
-        <span class="stars-avg">${v.length ? starsTxt(v) + " Ø aller" : '<span class="n">noch keine Bewertung</span>'}</span><span class="hint">${esc(hint)}</span></div>`;
-    }
-    h += `<details><summary>Antwort des Modells (${fmt(r.answer_chars ?? (r.answer || "").length)} Zeichen${r.reasoning_chars ? `, dazu ${fmt(r.reasoning_chars)} Zeichen Denkphase` : ""})</summary><pre>${esc(r.answer)}</pre></details>`;
-    h += `<p class="muted mono" style="margin:0;font-size:.78rem">${esc(r.time || "")} · ${esc(r.branch || r.engine || "")} ${esc(r.commit || "")}${r.finish_reason === "length" ? " · Tokenlimit erreicht" : ""}</p>`;
   }
   el.innerHTML = h;
-  el.querySelectorAll("button.star").forEach((b) => { b.onclick = () => rate(key, r, Number(b.dataset.stars)); });
+  el.querySelectorAll("button.star").forEach((b) => { b.onclick = () => rate(b.dataset.rkey, recOf[b.dataset.rkey], Number(b.dataset.stars)); });
   $("#close").onclick = () => { el.hidden = true; active = null; matrix(); };
   if (!keepScroll) el.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
 }

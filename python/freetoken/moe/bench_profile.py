@@ -1,18 +1,10 @@
 """Torch-free reader for the ``ft bench bw`` hardware profile (``benchbw/<gpu-uuid>.json``).
 
-The engine consults this at MoE-backend *auto* resolution (``engine.py``) to make the
-offload-vs-hybrid choice hardware-adaptive without importing the (torch-heavy) benchmark
-itself. ``benchbw.py`` writes the profile; this module only reads it.
-
-The join key is the expert *format*: the CPU-MoE-vs-PCIe-gather bandwidth ratio the choice
-rides on is dominated by ``(format, hardware)``, so a profile benched on one workload transfers
-to other models with the same expert format on the same GPU -- as long as their experts are of
-comparable size. The CPU side has a per-expert fixed cost (thread fan-out over a short GEMV),
-so a verdict measured on much larger experts overstates it for a small-expert model: Qwen3.6-
-35B-A3B-NVFP4 (1.7 MB experts) benches at 32 GB/s where the nvfp4 dtype geometry (8.0 MB)
-gives 90 GB/s on the same box, and hybrid then decodes 3x slower than offload. So a per-model
-bench of the served geometry wins, and a dtype verdict is only applied when its expert size is
-within :data:`EXPERT_BYTES_TOLERANCE` of the model's.
+The profile holds one row per MoE layer kind (``layer_kind_key``): the CPU MoE and PCIe gather
+bandwidths benched for that kind on this GPU and host. The engine reads it to set each hybrid
+layer's fetch split, without importing the (torch-heavy) benchmark. ``benchbw.py`` writes it.
+Layers without a row fall back to the engine's own startup measurement, cached per GPU and
+layer kind under ``hybrid_split/`` (``load_startup_hybrid_fraction``).
 """
 
 from __future__ import annotations
@@ -24,66 +16,8 @@ from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
 
-# Bump when a format gains or loses a CPU MoE path: verdicts and fetch fractions from an older profile are stale.
-PROFILE_VERSION = 5
-
-# Engine ``expert_quant`` (models/config.py) -> benchbw format key (offload_cache._BANK_SCHEMAS
-# / benchbw._offload_bank_specs). Only the offload-family formats with a CPU MoE weight path can
-# ever resolve to hybrid; anything not listed falls through unmapped and finds no profile entry
-# (-> None -> offload), which is the safe default.
-_QUANT_TO_BENCH_FORMAT = {
-    "nvfp4": "nvfp4",
-    "ds_fp4": "ds_fp4",
-    "mxfp4": "mxfp4_triton",
-    "bf16": "bf16",
-    "fp8_block": "fp8_block",
-}
-
-
-# A dtype verdict / fetch fraction transfers to a model whose experts are within this factor
-# of the benched ones (either way). Beyond it the entry is skipped and the caller falls back to
-# offload; `ft bench bw --model` for the model's geometry is the remedy.
-EXPERT_BYTES_TOLERANCE = 2.0
-_GEOMETRY_KEYS = ("hidden", "inter", "experts", "top_k")
-_warned: set = set()
-
-
-def _geometry_matches(entry_model, geometry) -> bool:
-    if not isinstance(entry_model, dict) or not geometry:
-        return False
-    return all(entry_model.get(k) == geometry.get(k) for k in _GEOMETRY_KEYS)
-
-
-def _model_entry(prof: dict, fmt: str, geometry) -> dict | None:
-    """``kernels[fmt]`` of the per-model workload benched at exactly ``geometry``, else None."""
-    for wl in (prof.get("workloads") or {}).values():
-        if isinstance(wl, dict) and _geometry_matches(wl.get("model"), geometry):
-            entry = (wl.get("kernels") or {}).get(fmt)
-            if isinstance(entry, dict):
-                return entry
-    return None
-
-
-def _comparable(entry, fmt: str, expert_bytes) -> bool:
-    """Whether ``entry`` (a dtype_kernels / workload kernels entry) was benched on experts of a
-    size comparable to ``expert_bytes``. Unknown on either side -> assumed comparable (older
-    profiles carry no ``expert_bytes``; callers that pass none keep the format-only join)."""
-    benched = entry.get("expert_bytes") if isinstance(entry, dict) else None
-    if not benched or not expert_bytes:
-        return True
-    ratio = max(benched, expert_bytes) / min(benched, expert_bytes)
-    if ratio <= EXPERT_BYTES_TOLERANCE:
-        return True
-    key = (fmt, benched, expert_bytes)
-    if key not in _warned:
-        _warned.add(key)
-        logger.warning(
-            f"benchbw profile: the {fmt!r} entry was benched on {benched / 2**20:.2f} MB experts, "
-            f"this model's are {expert_bytes / 2**20:.2f} MB ({ratio:.1f}x apart); not applying "
-            f"its verdict. Run `ft bench bw --model <preset>` for this model's geometry "
-            f"(see `ft bench bw --help`)"
-        )
-    return False
+# Bump when the row key or the measurements change: rows of another version are not comparable.
+PROFILE_VERSION = 6
 
 
 def _cache_dir() -> str:
@@ -156,10 +90,10 @@ def _usable_profile(
             return None
     if not isinstance(prof, dict):
         return None
-    if not isinstance(prof.get("version"), int) or prof["version"] < PROFILE_VERSION:
+    if prof.get("version") != PROFILE_VERSION:
         logger.warning(
-            f"benchbw profile {src} predates this engine (version {prof.get('version')}, "
-            f"need {PROFILE_VERSION}); ignoring it, rerun `ft bench bw`"
+            f"benchbw profile {src} has version {prof.get('version')}, this engine reads "
+            f"{PROFILE_VERSION}; ignoring it, rerun `ft bench bw`"
         )
         return None
     prof_gpu = (prof.get("gpu") or {}).get("name")
@@ -172,129 +106,50 @@ def _usable_profile(
     return prof
 
 
-def load_backend_recommendation(
-    quant_format: str,
-    gpu_name: str | None = None,
-    path: str | None = None,
-    gpu_uuid: str | None = None,
-    *,
-    expert_bytes: int | None = None,
-    geometry: dict | None = None,
-) -> str | None:
-    """Bench-recommended offload-family backend for ``quant_format`` on this GPU, or ``None``.
+def layer_kind_key(fmt: str, options: dict[str, int], hidden: int, inter: int, top_k: int, cpu_threads: int) -> str:
+    """Row key of one MoE layer kind, e.g. ``gguf[down_type=8,gate_up_type=8]:2816x704:top8:t12``.
 
-    Returns ``"hybrid"`` only when *every* benched workload sharing this expert format
-    recommended hybrid (CPU MoE BW > threshold x PCIe gather BW); a mixed verdict (a
-    near-threshold format) resolves conservatively to ``"offload"``. ``None`` means "no usable
-    profile" (see ``_usable_profile``) or no entry for this format. The caller keeps its own
-    default (offload) on ``None``.
+    ``cpu_threads`` is the CPU executor's worker count: the per-step pool overhead makes the CPU bandwidth depend on it and on ``top_k``."""
+    opts = ",".join(f"{k}={v}" for k, v in sorted(options.items()))
+    fmt = f"{fmt}[{opts}]" if opts else fmt
+    return f"{fmt}:{hidden}x{inter}:top{top_k}:t{cpu_threads}"
 
-    ``geometry`` (``{hidden, inter, experts, top_k}``) selects a per-model bench of exactly the
-    served model first; ``expert_bytes`` (the model's per-expert bank bytes) then gates every
-    other entry through :func:`_comparable`.
-    """
-    fmt = _QUANT_TO_BENCH_FORMAT.get(quant_format, quant_format)
-    prof = _usable_profile(gpu_name, path, gpu_uuid)
-    if prof is None:
+
+def fetch_fraction(row: dict | None) -> float | None:
+    """The hybrid fetch split of a row: of a decode step's expert misses, the fraction to fetch over PCIe so the fetch and the CPU compute finish together.
+
+    From the overlapped pair (both sides measured while running concurrently): pcie_ov / (pcie_ov + cpu_ov); without it, pcie / cpu. Clamped to 1."""
+    if not isinstance(row, dict):
         return None
-
-    # Best: this exact geometry was benched (`ft bench bw --model`).
-    entry = _model_entry(prof, fmt, geometry)
-    if entry is not None and entry.get("recommended") in ("hybrid", "offload"):
-        return entry["recommended"]
-
-    # Next: the per-dtype tuning verdicts (`ft bench bw --dtype`), a direct format->backend
-    # map -- the axis the backend pick keys on -- when benched on comparable experts.
-    dtypes = prof.get("dtypes")
-    if isinstance(dtypes, dict) and dtypes.get(fmt) in ("hybrid", "offload"):
-        if _comparable((prof.get("dtype_kernels") or {}).get(fmt), fmt, expert_bytes):
-            return dtypes[fmt]
-
-    # Fallback: other per-model workloads sharing this format, comparable experts only --
-    # unanimous hybrid -> hybrid; any offload (a near-threshold split) -> offload.
-    workloads = prof.get("workloads")
-    if not isinstance(workloads, dict):
-        return None
-    picks = [
-        entry["recommended"]
-        for wl in workloads.values()
-        if isinstance(wl, dict)
-        for entry in [(wl.get("kernels") or {}).get(fmt)]
-        if isinstance(entry, dict) and entry.get("recommended")
-        and _comparable(entry, fmt, expert_bytes)
-    ]
-    if not picks:
-        return None
-    return "hybrid" if all(p == "hybrid" for p in picks) else "offload"
-
-
-def load_hybrid_fetch_fraction(
-    quant_format: str,
-    gpu_name: str | None = None,
-    path: str | None = None,
-    gpu_uuid: str | None = None,
-    *,
-    expert_bytes: int | None = None,
-    geometry: dict | None = None,
-) -> float | None:
-    """Benched hybrid fetch fraction for ``quant_format``, or ``None``.
-
-    The hybrid backend's bandwidth-matched fetch split: of a decode step's expert misses,
-    fetch this fraction over PCIe and compute the rest on the CPU, so both finish together.
-    Preferred source is the *overlapped* pair (CPU MoE and PCIe gather measured while
-    running concurrently -- the real contention regime): fetched/misses = pcie_ov /
-    (pcie_ov + cpu_ov). Older profiles without it fall back to the standalone bandwidths
-    under a full-DRAM-contention assumption (cpu keeps cpu - pcie under DMA), which
-    reduces to pcie/cpu. A per-model entry of the served ``geometry`` first, then the
-    per-dtype entry, then any per-model entry with this format -- each only when benched on
-    experts comparable to ``expert_bytes``. ``None`` = no usable profile; clamped to [0, 1].
-    """
-    fmt = _QUANT_TO_BENCH_FORMAT.get(quant_format, quant_format)
-    prof = _usable_profile(gpu_name, path, gpu_uuid)
-    if prof is None:
-        return None
-    entries = [_model_entry(prof, fmt, geometry), (prof.get("dtype_kernels") or {}).get(fmt)] + [
-        (wl.get("kernels") or {}).get(fmt)
-        for wl in (prof.get("workloads") or {}).values()
-        if isinstance(wl, dict)
-    ]
-    for entry in entries:
-        if not isinstance(entry, dict) or not _comparable(entry, fmt, expert_bytes):
-            continue
-        fraction = hybrid_fraction_from_entry(entry)
-        if fraction is not None:
-            return fraction
-    return None
-
-
-def hybrid_fraction_from_entry(entry: dict) -> float | None:
-    """The fetch fraction one kernel entry implies (see ``load_hybrid_fetch_fraction``)."""
-    cpu_ov, pcie_ov = entry.get("cpu_moe_overlap_gbs"), entry.get("pcie_gather_overlap_gbs")
+    cpu_ov, pcie_ov = row.get("cpu_moe_overlap_gbs"), row.get("pcie_gather_overlap_gbs")
     if cpu_ov and pcie_ov:
         return min(1.0, pcie_ov / (pcie_ov + cpu_ov))
-    cpu, pcie = entry.get("cpu_moe_gbs"), entry.get("pcie_gather_gbs")
+    cpu, pcie = row.get("cpu_moe_gbs"), row.get("pcie_gather_gbs")
     if cpu and pcie:
         return min(1.0, pcie / cpu)
     return None
 
 
-# The engine's own startup measurement (benchbw.measure_hybrid_split) for a GPU without a
-# usable `ft bench bw` profile. Kept outside benchbw/ so the profile lookup never mistakes it
-# for a profile; one file per GPU, one entry per (format, model geometry).
+def load_layer_kinds(gpu_name: str | None = None, path: str | None = None, gpu_uuid: str | None = None) -> dict | None:
+    """The rows of the usable profile for this GPU (key -> row), or None without one."""
+    prof = _usable_profile(gpu_name, path, gpu_uuid)
+    if prof is None:
+        return None
+    rows = prof.get("layer_kinds")
+    return rows if isinstance(rows, dict) else {}
+
+
+# The engine's own startup measurement (benchbw.measure_hybrid_split) of a layer kind the profile
+# has no row for. Kept outside benchbw/ so the profile lookup never mistakes it for a profile; one
+# file per GPU, one entry per layer kind (``layer_kind_key`` with the requested CPU thread count).
 def _startup_split_path(gpu_uuid: str | None) -> str:
     return os.path.join(_cache_dir(), "hybrid_split", f"{gpu_uuid or 'unknown-gpu'}.json")
-
-
-def startup_split_key(quant_format: str, geometry: dict) -> str:
-    fmt = _QUANT_TO_BENCH_FORMAT.get(quant_format, quant_format)
-    return f"{fmt}:" + "x".join(str(geometry[k]) for k in _GEOMETRY_KEYS)
 
 
 def load_startup_hybrid_fraction(gpu_uuid: str | None, key: str) -> float | None:
     """The cached startup-measured fetch fraction for ``key`` on this GPU, or None."""
     data = _load(_startup_split_path(gpu_uuid)) or {}
-    entry = (data.get("entries") or {}).get(key)
-    return hybrid_fraction_from_entry(entry) if isinstance(entry, dict) else None
+    return fetch_fraction((data.get("entries") or {}).get(key))
 
 
 def save_startup_hybrid_split(gpu_uuid: str | None, key: str, entry: dict) -> None:

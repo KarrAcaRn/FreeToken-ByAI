@@ -150,7 +150,8 @@
       "zhangnju <zhangnju@126.com>"
     ],
     "summary": "Adds ROCm support for RDNA3/RDNA4 with torch 2.14/2.15 and ROCm 7.14/10",
-    "fixup": "CUDA pins untouched, C++20 only for ROCm torch>=2.14, functional memop check with fallback"
+    "fixup": "CUDA pins untouched, C++20 only for ROCm torch>=2.14, functional memop check with fallback",
+    "upstream": "merged"
   },
   "585": {
     "number": 585,
@@ -853,7 +854,9 @@
     "authors": [
       "Poyo-Yon <Poyo-Yon@users.noreply.github.com>"
     ],
-    "summary": "Mixed-quant Gemma-4 GGUFs failed to load; odd tensors are dequantized/repacked and per-expert strides passed"
+    "summary": "Mixed-quant Gemma-4 GGUFs failed to load; odd tensors are dequantized/repacked and per-expert strides passed",
+    "upstream": "closed",
+    "after_upstream_close": "Closed upstream 2026-10-15: #690 rewrote the GGUF path this PR built on (per-tensor ggml types, mixed-type expert pools); an earlier sync already replaced next's #494 code with #690's, nothing to revert."
   },
   "493": {
     "number": 493,
@@ -1378,7 +1381,8 @@
       "Circle-Cheng <yc.22319139@gmail.com>"
     ],
     "superseded_by": "eee1723 (#494)",
-    "summary": "Already covered by #494, which dequantizes Q8_0 and all GGML types via the gguf reference dequantizer"
+    "summary": "Already covered by #494, which dequantizes Q8_0 and all GGML types via the gguf reference dequantizer",
+    "upstream": "closed"
   },
   "359": {
     "number": 359,
@@ -1504,7 +1508,8 @@
     "authors": [
       "Yasitha Herath <35001977+amodhyh@users.noreply.github.com>"
     ],
-    "summary": "Fails to load a standard Llama GGUF, caps context at 8192, ignores Llama 3 rope scaling, no tests"
+    "summary": "Fails to load a standard Llama GGUF, caps context at 8192, ignores Llama 3 rope scaling, no tests",
+    "upstream": "closed"
   },
   "317": {
     "number": 317,
@@ -1554,7 +1559,9 @@
     "authors": [
       "Sebastián Real <tuxevil@gmail.com>"
     ],
-    "summary": "GGUF user-defined tokens (e.g. <think>) were split into subwords; now re-added as atomic tokens when needed"
+    "summary": "GGUF user-defined tokens (e.g. <think>) were split into subwords; now re-added as atomic tokens when needed",
+    "upstream": "closed",
+    "after_upstream_close": "Closed upstream 2026-10-16: #698 (transformers 5.18) registers GGUF USER_DEFINED tokens as added tokens and rebuilt load_gguf_tokenizer on it; an earlier sync already replaced next's #315 code, nothing to revert."
   },
   "300": {
     "number": 300,
@@ -1681,7 +1688,8 @@
     "authors": [
       "bernimccoy <85797556+bernimccoy@users.noreply.github.com>"
     ],
-    "summary": "Offload-vs-hybrid pick used one bench verdict per expert format for all models; now matched to the model's expert size"
+    "summary": "Offload-vs-hybrid pick used one bench verdict per expert format for all models; now matched to the model's expert size",
+    "fixup": "Dropped in the 2026-10-20 sync merge (f54e107d): upstream #734 removed the auto->hybrid profile pick this verdict fed."
   },
   "275": {
     "number": 275,
@@ -2058,7 +2066,8 @@
       "Victor Cruz <vcruz305@gmail.com>"
     ],
     "revisit": "after-queue",
-    "summary": "DeepSeek-V4 too large for this machine"
+    "summary": "DeepSeek-V4 too large for this machine",
+    "upstream": "closed"
   },
   "198": {
     "number": 198,
@@ -2200,7 +2209,9 @@
     "authors": [
       "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
     ],
-    "summary": "Prefill Triton kernels loaded mid-request; warmup now runs on every backend over a length ladder, plus --skip-prefill-warmup"
+    "summary": "Prefill Triton kernels loaded mid-request; warmup now runs on every backend over a length ladder, plus --skip-prefill-warmup",
+    "upstream": "closed",
+    "after_upstream_close": "kept (2026-10-20, user): closed by its author without merge or upstream replacement; upstream still warms only the triton backend at two lengths. Listed under 'Our own additions' in the README."
   },
   "160": {
     "number": 160,
@@ -2246,7 +2257,9 @@
     "authors": [
       "Victor Cruz <vcruz305@gmail.com>"
     ],
-    "summary": "Split multi-shard GGUFs were unopenable; the reader now resolves the shard set and aggregates tensor tables"
+    "summary": "Split multi-shard GGUFs were unopenable; the reader now resolves the shard set and aggregates tensor tables",
+    "upstream": "closed",
+    "after_upstream_close": "Closed upstream 2026-10-15: #690's new GGUF reader finds split files from the -0000N-of-0000M names; an earlier sync already replaced next's #154 code, nothing to revert."
   },
   "153": {
     "number": 153,
@@ -3178,7 +3191,8 @@
       "boqi <33243841+wenlive@users.noreply.github.com>"
     ],
     "reason": "Draft: expert-only GSQ Q2_0 GGUF source for Qwen3.8-Flash-Next (64-weight/18-byte blocks, Triton vector kernel, offload cache only), HF trunk kept; the author asks for maintainer feedback on the external-source contract. Deferred while it is a draft: the queue re-lists it once its head moves. Flash-Next runs here (next-speed), so it is testable once ready: the Q2 experts are ~34 GB and fit in RAM.",
-    "summary": "Draft - revisit when ready; GSQ Q2_0 experts for Flash-Next, testable here once ready"
+    "summary": "Draft - revisit when ready; GSQ Q2_0 experts for Flash-Next, testable here once ready",
+    "upstream": "closed"
   },
   "665": {
     "number": 665,
@@ -3197,5 +3211,82 @@
     ],
     "summary": "Block-fp8 GPU decode skips the routes hybrid decode hands to the CPU instead of computing them with weight 0",
     "fixup": "GPU test that negative slots add nothing (fails before the PR)"
+  },
+  "764": {
+    "number": 764,
+    "title": "fix(moe): prevent stale cpu expert inputs in rocm graphs",
+    "head_sha": "9d2c0da02eb7",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ],
+    "reason": "ROCm-only runtime change (gfx1201 CPU-expert graph replay returns stale inputs): enables the mapped-memory publish/combine kernels on ROCm behind a numeric replay probe; CUDA decisions stay as they are. Not judged on its merits yet: no AMD GPU here, so neither the bug nor the fix can be reproduced.",
+    "summary": "ROCm CPU-expert graph replay fix with a numeric capture probe; no AMD GPU here, not judged yet",
+    "reviewed_at": "2026-10-20",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "763": {
+    "number": 763,
+    "title": "fix(tests): support ROCm in AIME GPU memory checks",
+    "head_sha": "3c3204cf023b",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "revisit_with": 217,
+    "authors": [
+      "LZ-QWQ <lz1830837889@163.com>"
+    ],
+    "reason": "Test-only: the AIME e2e memory check queries torch.cuda.mem_get_info on ROCm instead of nvidia-smi. NVIDIA path unchanged, so nothing to gain on this CUDA-only fork; revisit with the ROCm backend (#217).",
+    "summary": "ROCm fallback for the AIME test's free-VRAM check; CUDA path unchanged, revisit with ROCm (#217)",
+    "reviewed_at": "2026-10-20",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "708": {
+    "number": 708,
+    "title": "feat(models): add nvidia/Qwen3.8-Flash-Next-FP4-Local checkpoint support",
+    "head_sha": "994504613746",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "authors": [
+      "chrisqian <chrisqian@example.com>"
+    ],
+    "reason": "Serves nvidia/Qwen3.8-Flash-Next-FP4-Local (CSF-encoded expert scales, packed e2m1 PLE table, MXFP8 dense projections, index-only tensors/ layout). Upstream #759 already covers the MXFP8 weight_scale alias and quant-config-driven dense reads, so the PR needs a rebase onto it. Not judged on its merits yet: the ~96 GB checkpoint is not downloaded here and the packed PLE stays pinned (25.5 GB) next to the expert RAM tier on 78 GiB RAM.",
+    "summary": "Flash-Next FP4-Local checkpoint (CSF scales, packed PLE); partly covered by #759, checkpoint not here",
+    "reviewed_at": "2026-10-20",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "688": {
+    "number": 688,
+    "title": "fix(server): opt-in backend recovery after runtime CUDA OOM",
+    "head_sha": "a4ebbfda742f",
+    "decision": "feature",
+    "revisit": "after-queue",
+    "authors": [
+      "shangfeng-liu <liusf1987@gmail.com>"
+    ],
+    "reason": "Opt-in --oom-recovery: after a runtime CUDA OOM the backend group is reaped and restarted while the API process stays up; dispatched requests get one terminal error, new ones queue until ready, epochs reject stale replies. Default off, ~1.3k lines (mostly tests), validated on an RTX 4090. Sound, but nothing here needs it now (the KI-Pruefstand restarts ft serve per model anyway); user kept it as a feature to adopt later (2026-10-20).",
+    "summary": "Opt-in --oom-recovery restarts the backend after a runtime CUDA OOM; kept as a feature for later",
+    "reviewed_at": "2026-10-20",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "687": {
+    "number": 687,
+    "title": "fix(rocm): route moe_align around Triton 3.8 miscompile",
+    "head_sha": "5f53b8810371",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "revisit_with": 217,
+    "authors": [
+      "Dan Sedano <47065799+thedandano@users.noreply.github.com>"
+    ],
+    "reason": "ROCm + Triton 3.8 only: tl.histogram comparisons fold to false on the AMD backend, so moe_align is replaced by a PyTorch path there; CUDA keeps the Triton kernel. Not judged on its merits yet: no AMD GPU here; revisit with the ROCm backend (#217).",
+    "summary": "PyTorch moe_align fallback for a Triton 3.8 AMD miscompile; CUDA unchanged, no AMD GPU here",
+    "reviewed_at": "2026-10-20",
+    "commits": [],
+    "gpu_untested": false
   }
 }

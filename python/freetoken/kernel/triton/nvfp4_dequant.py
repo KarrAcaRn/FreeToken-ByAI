@@ -11,7 +11,7 @@ from freetoken.kernel.triton.e4m3_compat import e2m1_code_f32, e4m3_kernel_view,
 def _dequant_nvfp4_kernel(
     packed_ptr,      # [S, OUT, IN // 2] uint8
     scale_ptr,       # [S, OUT, IN // 16] fp8-e4m3 per-block scale (checkpoint native)
-    global_ptr,      # [S, OUT] fp16 per-output-row global scale (weight_scale_2)
+    global_ptr,      # [S, OUT] fp32 per-output-row global scale (weight_scale_2)
     slots_ptr,       # [N] int32 -> cache slot for each output expert
     out_ptr,         # [N, OUT, IN] compute dtype
     OUT: tl.constexpr,

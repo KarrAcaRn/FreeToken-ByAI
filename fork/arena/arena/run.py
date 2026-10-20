@@ -23,9 +23,14 @@ from .tasks import load_tasks
 
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = Path(os.environ.get("ARENA_RESULTS", ROOT / "results" / "runs.jsonl"))
+# --echt: every model with its recommended sampling (no temperature in the request), RUNS runs per task
+RUNS = 1
+TEMPERATURE: float | None = 0.0
 
 
-MIN_CONTEXT = 80_000  # below this a model is not usable for real work (user, 2026-10-15: first 100k, then 80k)
+# below this a model is not usable for real work (user, 2026-10-15: first 100k, then 80k); a slow model cannot
+# write more than its time limits allow anyway, so 40k is enough there (user, 2026-10-17)
+MIN_CONTEXT = {"schnell": 80_000, "langsam": 40_000}
 # Seconds to think, then seconds to write the answer, by decode speed (user, 2026-10-15). Each follow-up
 # or correction round gets the same again. models.toml can pin a model with tempo = "langsam" / "schnell".
 SLOW_TPS = 35
@@ -59,10 +64,27 @@ def latest_results() -> dict:
     return out
 
 
+def latest_runs() -> dict:
+    """(model, task) -> {run number: newest record}; records without "run" are run 1."""
+    out: dict = {}
+    if RESULTS.exists():
+        for line in RESULTS.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                out.setdefault((r["model"], r["task"]), {})[r.get("run", 1)] = r
+    return out
+
+
+def _run_current(rec: dict | None, t) -> bool:
+    return bool(rec) and rec.get("fingerprint") == t.fingerprint and rec["status"] in ("ok", "skipped")
+
+
 def save_transcript(rec: dict, turns: list) -> str:
     """Full reasoning + answer of every round as markdown under results/transcripts/ (local, not in git);
     runs.jsonl only keeps the answers."""
-    path = RESULTS.parent / "transcripts" / rec["model"] / f"{rec['task']}-{rec['time'].replace(':', '')}.md"
+    run = f"-r{rec['run']}" if RUNS > 1 else ""
+    sub = "transcripts-echt" if RUNS > 1 else "transcripts"
+    path = RESULTS.parent / sub / rec["model"] / f"{rec['task']}-{rec['time'].replace(':', '')}{run}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     parts = [f"# {rec['model']} - {rec['task']} ({rec['time']})\n"]
     for x in turns:
@@ -89,110 +111,118 @@ def git_rev(path: str) -> str | None:
 def run_tasks(url: str, model_id: str, served: str, caps: set, ctx: int | None, tasks, meta: dict, force: bool, api_key=None,
               extra: dict | None = None, think_format: str = "think", tier: str = "schnell"):
     think_limit, write_limit = LIMITS[tier]
-    done = latest_results()
+    done = latest_runs()
     for t in tasks:
-        old = done.get((model_id, t.id))
-        if old and old.get("fingerprint") == t.fingerprint and old["status"] in ("ok", "skipped") and not force:
-            print(f"  {t.id}: aktuelles Ergebnis vorhanden, übersprungen (--force zum Wiederholen)")
-            continue
-        rec = {"model": model_id, "task": t.id, "fingerprint": t.fingerprint,
-               "time": dt.datetime.now().isoformat(timespec="seconds"), **meta}
-        missing = t.needs - caps
-        approx_prompt = len(t.prompt) // 3 + 800 * len(t.images)
-        if missing:
-            rec.update(status="skipped", reason="kann das Modell nicht: " + ", ".join(sorted(missing)))
-        elif ctx and t.max_tokens and approx_prompt + t.max_tokens > ctx:
-            rec.update(status="skipped", reason=f"Kontext zu klein (~{approx_prompt} + {t.max_tokens} > {ctx} Tokens)")
-        else:
-            def chat(msgs):
-                return ask(url, served, msgs, ctx=ctx, max_tokens=t.max_tokens, api_key=api_key, extra=extra,
-                           think_limit=think_limit, write_limit=write_limit, think_format=think_format)
-            try:
-                r = chat(t.messages())
-            except urllib.error.HTTPError as e:
-                rec.update(status="error", reason=f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}")
-            except Exception as e:
-                rec.update(status="error", reason=repr(e)[:300])
+        for run in range(1, RUNS + 1):
+            label = t.id + (f" (Lauf {run}/{RUNS})" if RUNS > 1 else "")
+            if _run_current(done.get((model_id, t.id), {}).get(run), t) and not force:
+                print(f"  {label}: aktuelles Ergebnis vorhanden, übersprungen (--force zum Wiederholen)")
+                continue
+            rec = {"model": model_id, "task": t.id, "run": run, "fingerprint": t.fingerprint,
+                   "time": dt.datetime.now().isoformat(timespec="seconds"), **meta}
+            missing = t.needs - caps
+            approx_prompt = len(t.prompt) // 3 + 800 * len(t.images)
+            if missing:
+                rec.update(status="skipped", reason="kann das Modell nicht: " + ", ".join(sorted(missing)))
+            elif ctx and t.max_tokens and approx_prompt + t.max_tokens > ctx:
+                rec.update(status="skipped", reason=f"Kontext zu klein (~{approx_prompt} + {t.max_tokens} > {ctx} Tokens)")
             else:
-                c = t.check(r["content"])
-                r["label"] = "Antwort"
-                turns = [r]
-                answer = r["content"]
-                asked = None
-                fu = next((f for f in t.followups if not c.passed and c.missing is not None
-                           and any(m in c.missing for m in f["when_missing"])
-                           and all(x in (c.found or []) for x in f["when_found"])), None)
-                if fu is not None:
-                    msgs = t.messages() + [{"role": "assistant", "content": r["content"]},
-                                           {"role": "user", "content": fu["prompt"]}]
-                    try:
-                        r2 = chat(msgs)
-                    except Exception as e:
-                        asked = {"prompt": fu["prompt"], "error": repr(e)[:300]}
-                    else:
-                        r2["label"] = "Nachfrage"
-                        turns.append(r2)
-                        answer = r["content"] + "\n\n--- Nachfrage: " + fu["prompt"] + " ---\n\n" + r2["content"]
-                        first = c
-                        c = t.check(answer)
-                        c.score = round(c.score * fu["score_factor"], 3)
-                        c.detail += f" (nach Nachfrage x{fu['score_factor']:g})"
-                        asked = {"prompt": fu["prompt"], "first_score": first.score, "first_detail": first.detail,
-                                 "score_factor": fu["score_factor"]}
-                rounds = None
-                rt = t.retries
-                if rt and not c.passed and c.kind in rt["on"]:
-                    # Feed the checker's complaint back and let the model fix its answer; each extra round costs rt["penalty"].
-                    rounds = []
-                    msgs = t.messages() + [{"role": "assistant", "content": r["content"]}]
-                    while not c.passed and c.kind in rt["on"] and len(rounds) < rt["max"]:
-                        prompt = rt["prompt"].replace("{detail}", c.detail[:4000])
-                        msgs.append({"role": "user", "content": prompt})
+                def chat(msgs):
+                    return ask(url, served, msgs, ctx=ctx, max_tokens=t.max_tokens, api_key=api_key, extra=extra,
+                               think_limit=think_limit, write_limit=write_limit, think_format=think_format,
+                               temperature=TEMPERATURE)
+                try:
+                    r = chat(t.messages())
+                except urllib.error.HTTPError as e:
+                    rec.update(status="error", reason=f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}")
+                except Exception as e:
+                    rec.update(status="error", reason=repr(e)[:300])
+                else:
+                    c = t.check(r["content"])
+                    r["label"] = "Antwort"
+                    turns = [r]
+                    answer = r["content"]
+                    asked = None
+                    fu = next((f for f in t.followups if not c.passed and c.missing is not None
+                               and any(m in c.missing for m in f["when_missing"])
+                               and all(x in (c.found or []) for x in f["when_found"])), None)
+                    if fu is not None:
+                        msgs = t.messages() + [{"role": "assistant", "content": r["content"]},
+                                               {"role": "user", "content": fu["prompt"]}]
                         try:
-                            rn = chat(msgs)
+                            r2 = chat(msgs)
                         except Exception as e:
-                            rounds.append({"detail_before": c.detail[:2000], "error": repr(e)[:300]})
-                            break
-                        rn["label"] = f"Durchgang {len(rounds) + 2}"
-                        turns.append(rn)
-                        msgs.append({"role": "assistant", "content": rn["content"]})
-                        rounds.append({"detail_before": c.detail[:2000]})
-                        answer += f"\n\n--- Durchgang {len(rounds) + 1}, Rückmeldung: ---\n{c.detail[:2000]}\n\n--- Antwort: ---\n\n" + rn["content"]
-                        c = t.check(rn["content"])
-                    n = len([x for x in rounds if "error" not in x])
-                    if n:
-                        c.score = round(max(0.0, c.score - rt["penalty"] * n), 3)
-                        c.detail += f" (nach {n} Korrektur{'en' if n > 1 else ''}, -{rt['penalty'] * n:g})"
-                tok = sum(x["completion_tokens"] or 0 for x in turns)
-                dec = sum(x["decode_s"] for x in turns)
-                rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,
-                           answer=answer[-20000:], reasoning_chars=sum(len(x["reasoning"]) for x in turns),
-                           followup=asked, retries=rounds, tempo=tier, think_limit=think_limit, write_limit=write_limit,
-                           think_stopped=sum(x["think_stopped"] for x in turns), timed_out=sum(x["finish_reason"] == "time" for x in turns), finish_reason=turns[-1]["finish_reason"], 
-                           # every round reads the whole conversation again, so "in" is the sum over rounds
-                           prompt_tokens=sum(x["prompt_tokens"] or 0 for x in turns) or None,
-                           answer_chars=sum(len(x["content"]) for x in turns),
-                           turns=[{"label": x["label"], "prompt_tokens": x["prompt_tokens"], "completion_tokens": x["completion_tokens"],
-                                   "total_s": x["total_s"], "reasoning_chars": len(x["reasoning"]), "answer_chars": len(x["content"]),
-                                   "think_stopped": x["think_stopped"], "finish_reason": x["finish_reason"]} for x in turns],
-                           completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
-                           decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
-                           prefill_tps=r["prefill_tps"])
-                rec["transcript"] = save_transcript(rec, turns)
-                if rec["think_stopped"]:
-                    rec["detail"] += f" (Denken nach {think_limit / 60:g} min abgebrochen)"
-                if turns[-1]["finish_reason"] == "time" and not c.passed:
-                    rec["detail"] += f" (Schreibzeit {write_limit / 60:g} min abgelaufen)"
-                if turns[-1]["finish_reason"] == "length" and not c.passed:
-                    rec["detail"] += " (Kontext voll)" if not t.max_tokens else f" (Tokenlimit {t.max_tokens} erreicht)"
-        append(rec)
-        if rec["status"] == "ok":
-            fu = (" nach Nachfrage" if rec.get("followup") else "") + (f" nach {len(rec['retries'])} Korrekturen" if rec.get("retries") else "")
-            verdict = "zur Ansicht" if rec["passed"] is None else "BESTANDEN" if rec["passed"] else "nicht bestanden"
-            print(f"  {t.id}: {verdict}{fu} score={rec['score']} "
-                  f"{rec['completion_tokens']} tok, {rec['total_s']} s, {rec['decode_tps']} tok/s - {rec['detail'][:100]}")
-        else:
-            print(f"  {t.id}: {rec['status']} - {rec['reason']}")
+                            asked = {"prompt": fu["prompt"], "error": repr(e)[:300]}
+                        else:
+                            r2["label"] = "Nachfrage"
+                            turns.append(r2)
+                            answer = r["content"] + "\n\n--- Nachfrage: " + fu["prompt"] + " ---\n\n" + r2["content"]
+                            first = c
+                            c = t.check(answer)
+                            c.score = round(c.score * fu["score_factor"], 3)
+                            c.detail += f" (nach Nachfrage x{fu['score_factor']:g})"
+                            asked = {"prompt": fu["prompt"], "first_score": first.score, "first_detail": first.detail,
+                                     "score_factor": fu["score_factor"]}
+                    rounds = None
+                    rt = t.retries
+                    if rt and not c.passed and c.kind in rt["on"]:
+                        # Feed the checker's complaint back and let the model fix its answer; each extra round costs rt["penalty"].
+                        rounds = []
+                        msgs = t.messages() + [{"role": "assistant", "content": r["content"]}]
+                        while not c.passed and c.kind in rt["on"] and len(rounds) < rt["max"]:
+                            prompt = rt["prompt"].replace("{detail}", c.detail[:4000])
+                            msgs.append({"role": "user", "content": prompt})
+                            try:
+                                rn = chat(msgs)
+                            except Exception as e:
+                                rounds.append({"detail_before": c.detail[:2000], "error": repr(e)[:300]})
+                                break
+                            rn["label"] = f"Durchgang {len(rounds) + 2}"
+                            turns.append(rn)
+                            msgs.append({"role": "assistant", "content": rn["content"]})
+                            rounds.append({"detail_before": c.detail[:2000]})
+                            answer += f"\n\n--- Durchgang {len(rounds) + 1}, Rückmeldung: ---\n{c.detail[:2000]}\n\n--- Antwort: ---\n\n" + rn["content"]
+                            c = t.check(rn["content"])
+                        n = len([x for x in rounds if "error" not in x])
+                        if n:
+                            c.score = round(max(0.0, c.score - rt["penalty"] * n), 3)
+                            c.detail += f" (nach {n} Korrektur{'en' if n > 1 else ''}, -{rt['penalty'] * n:g})"
+                    tok = sum(x["completion_tokens"] or 0 for x in turns)
+                    dec = sum(x["decode_s"] for x in turns)
+                    rec.update(status="ok", passed=c.passed, score=c.score, detail=c.detail, artifact=c.artifact,
+                               answer=answer[-20000:], reasoning_chars=sum(len(x["reasoning"]) for x in turns),
+                               followup=asked, retries=rounds, tempo=tier, think_limit=think_limit, write_limit=write_limit,
+                               think_stopped=sum(x["think_stopped"] for x in turns), timed_out=sum(x["finish_reason"] == "time" for x in turns), finish_reason=turns[-1]["finish_reason"],
+                               looped=sum(bool(x.get("think_looped")) + (x["finish_reason"] == "loop") for x in turns),
+                               # every round reads the whole conversation again, so "in" is the sum over rounds
+                               prompt_tokens=sum(x["prompt_tokens"] or 0 for x in turns) or None,
+                               answer_chars=sum(len(x["content"]) for x in turns),
+                               turns=[{"label": x["label"], "prompt_tokens": x["prompt_tokens"], "completion_tokens": x["completion_tokens"],
+                                       "total_s": x["total_s"], "reasoning_chars": len(x["reasoning"]), "answer_chars": len(x["content"]),
+                                       "think_stopped": x["think_stopped"], "think_looped": bool(x.get("think_looped")),
+                                       "finish_reason": x["finish_reason"]} for x in turns],
+                               completion_tokens=tok, ttft_s=r["ttft_s"], total_s=round(sum(x["total_s"] for x in turns), 3),
+                               decode_tps=round((tok - len(turns)) / dec, 1) if dec > 0 and tok > len(turns) else None,
+                               prefill_tps=r["prefill_tps"])
+                    rec["transcript"] = save_transcript(rec, turns)
+                    if any(x.get("think_looped") for x in turns):
+                        rec["detail"] += " (Denken wegen Schleife abgebrochen)"
+                    elif rec["think_stopped"]:
+                        rec["detail"] += f" (Denken nach {think_limit / 60:g} min abgebrochen)"
+                    if turns[-1]["finish_reason"] == "loop" and not c.passed:
+                        rec["detail"] += " (Antwort wegen Schleife abgebrochen)"
+                    if turns[-1]["finish_reason"] == "time" and not c.passed:
+                        rec["detail"] += f" (Schreibzeit {write_limit / 60:g} min abgelaufen)"
+                    if turns[-1]["finish_reason"] == "length" and not c.passed:
+                        rec["detail"] += " (Kontext voll)" if not t.max_tokens else f" (Tokenlimit {t.max_tokens} erreicht)"
+            append(rec)
+            if rec["status"] == "ok":
+                fu = (" nach Nachfrage" if rec.get("followup") else "") + (f" nach {len(rec['retries'])} Korrekturen" if rec.get("retries") else "")
+                verdict = "zur Ansicht" if rec["passed"] is None else "BESTANDEN" if rec["passed"] else "nicht bestanden"
+                print(f"  {label}: {verdict}{fu} score={rec['score']} "
+                      f"{rec['completion_tokens']} tok, {rec['total_s']} s, {rec['decode_tps']} tok/s - {rec['detail'][:100]}")
+            else:
+                print(f"  {label}: {rec['status']} - {rec['reason']}")
 
 
 def serve(model_id: str, m: dict, port: int, log: Path):
@@ -257,7 +287,14 @@ def main():
     ap.add_argument("--port", type=int, default=19190)
     ap.add_argument("--force", action="store_true", help="auch Aufgaben mit aktuellem Ergebnis wiederholen")
     ap.add_argument("--tasks-dir", default=str(ROOT / "aufgaben"))
+    ap.add_argument("--echt", action="store_true",
+                    help="echtes Verhalten: empfohlene Sampling-Werte des Modells, 3 Läufe je Aufgabe, results/echt.jsonl")
     a = ap.parse_args()
+    if a.echt:
+        global RESULTS, RUNS, TEMPERATURE
+        if "ARENA_RESULTS" not in os.environ:
+            RESULTS = ROOT / "results" / "echt.jsonl"
+        RUNS, TEMPERATURE = 3, None
 
     tasks = load_tasks(Path(a.tasks_dir), a.task)
     if not tasks:
@@ -281,9 +318,9 @@ def main():
             why = load_models(include_removed=True).get(mid, {}).get("removed")
             raise SystemExit(f"{mid} ist gestrichen: {why}" if why else f"unbekanntes Modell {mid}; bekannt: {', '.join(models)}")
         m = models[mid]
-        done = latest_results()
-        todo = [t for t in tasks if a.force or (done.get((mid, t.id)) or {}).get("fingerprint") != t.fingerprint
-                or done[(mid, t.id)]["status"] == "error"]
+        done = latest_runs()
+        todo = [t for t in tasks if a.force or not all(_run_current(done.get((mid, t.id), {}).get(n), t)
+                                                       for n in range(1, RUNS + 1))]
         if not todo:
             print(f"[{mid}] alles aktuell")
             continue
@@ -299,12 +336,6 @@ def main():
         try:
             ctx = get_json(url + "/models")["data"][0].get("context_length")
             print(f"[{mid}] bereit nach {load_s} s, Kontext {ctx}")
-            if not ctx or ctx < m.get("min_context", MIN_CONTEXT):
-                print(f"[{mid}] Kontext {ctx} unter {MIN_CONTEXT}: Flags in models.toml anpassen oder das Modell streichen")
-                for t in todo:
-                    append({"model": mid, "task": t.id, "fingerprint": t.fingerprint, "status": "error",
-                            "reason": f"Kontext {ctx} unter {MIN_CONTEXT} Tokens", "time": dt.datetime.now().isoformat(timespec="seconds")})
-                continue
             meta = {"engine": "freetoken", "commit": git_rev(tree), "branch": Path(tree).name, "load_s": load_s, "ctx": ctx}
             # request fields per model, e.g. reasoning_effort = "medium" (Qwen3.8 defaults to xhigh)
             extra = {"reasoning_effort": m["reasoning_effort"]} if m.get("reasoning_effort") else None
@@ -313,6 +344,17 @@ def main():
             tier, tps = speed_tier(url, mid, m, extra=extra)
             meta["probe_tps"] = tps
             print(f"[{mid}] Tempo {tier} ({tps} tok/s): {LIMITS[tier][0] / 60:g} min denken, {LIMITS[tier][1] / 60:g} min schreiben")
+            need = m.get("min_context", MIN_CONTEXT[tier])
+            if not ctx or ctx < need:
+                print(f"[{mid}] Kontext {ctx} unter {need} ({tier}): Flags in models.toml anpassen oder das Modell streichen")
+                for t in todo:
+                    append({"model": mid, "task": t.id, "fingerprint": t.fingerprint, "status": "error",
+                            "reason": f"Kontext {ctx} unter {need} Tokens ({tier})", "time": dt.datetime.now().isoformat(timespec="seconds")})
+                continue
+            if TEMPERATURE is None and m.get("sampling"):
+                # the checkpoint carries no recommended sampling; models.toml supplies the model card's values
+                extra = {**(extra or {}), **m["sampling"]}
+                meta["sampling"] = m["sampling"]
             run_tasks(url, mid, mid, set(m.get("caps", [])), ctx, todo, meta, True, extra=extra,
                       think_format=m.get("think_format", "think"), tier=tier)
         finally:
