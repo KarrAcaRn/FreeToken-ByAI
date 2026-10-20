@@ -377,13 +377,7 @@ class CpuMoeExecutor:
             self._watchdog.start()
 
         if torch.version.hip is not None:
-            # The flag probe alone misses stale shared IO in HIP graphs using memcpy + memops.
-            self._graph_capture_safe = self._flag_sync and self._kernel_io
-            if self._graph_capture_safe:
-                reason = self._probe_kernel_graph_io()
-                if reason:
-                    self._graph_capture_safe = False
-                    logger.warning_rank0(f"cpu-moe kernel IO graph probe failed ({reason}); using eager decode")
+            self._check_hip_graph_capture()
 
         fmt_label = "; ".join(f"{_format_label(name, opts)}: {n} layers" for (name, opts), n in layer_counts.items())
         logger.info_rank0(
@@ -402,14 +396,37 @@ class CpuMoeExecutor:
             torch.version.hip is None or (self._kernel_io and dtype == torch.bfloat16)
         )
 
+    def _check_hip_graph_capture(self) -> None:
+        # The flag probe alone misses stale shared IO in HIP graphs using memcpy + memops.
+        self._graph_capture_safe = self._flag_sync and self._kernel_io
+        if self._graph_capture_safe:
+            reason = self._run_kernel_graph_probe()
+            if reason:
+                self._graph_capture_safe = False
+                logger.warning_rank0(f"cpu-moe kernel IO graph probe failed ({reason}); using eager decode")
+
+    def _run_kernel_graph_probe(self) -> str:
+        """Run the graph probe; a capture/replay error rejects graphs instead of failing startup."""
+        try:
+            return self._probe_kernel_graph_io()
+        except Exception as exc:
+            if self._unhealthy:
+                raise
+            # Drain the probe's work so eager decode starts from an idle stream; an error here is sticky and fatal.
+            torch.cuda.synchronize(self.device)
+            return f"capture/replay raised {type(exc).__name__}: {exc}"
+
     def _probe_kernel_graph_io(self) -> str:
-        """Check distinct tasks sharing IO, including CPU-route skips, before engine capture."""
+        """Check distinct tasks sharing IO, including CPU-route skips and the hybrid add_to combine, before engine capture."""
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            hidden = torch.empty(3, 1, self.H, device="cuda", dtype=torch.bfloat16)
-            ids = torch.empty(3, 1, self.top_k, device="cuda", dtype=torch.int32)
-            weights = torch.empty(3, 1, self.top_k, device="cuda", dtype=torch.float32)
+            hidden = torch.empty(3, 1, self.H, device=self.device, dtype=torch.bfloat16)
+            ids = torch.empty(3, 1, self.top_k, device=self.device, dtype=torch.int32)
+            weights = torch.empty(3, 1, self.top_k, device=self.device, dtype=torch.float32)
+            # Separate add_to targets for graph and eager: the combine accumulates into them in place.
+            graph_acc = torch.empty(1, self.H, device=self.device, dtype=torch.bfloat16)
+            eager_acc = torch.empty_like(graph_acc)
             base = torch.arange(3 * self.H, dtype=torch.float32).reshape(3, 1, self.H)
             routes = torch.arange(3 * self.top_k).reshape(3, 1, self.top_k)
 
@@ -419,26 +436,35 @@ class CpuMoeExecutor:
                 cpu_ids[step % 3].fill_(-1)
                 ids.copy_(cpu_ids)
                 weights.copy_(((routes + step) % 7 + 1).float() / (7 * self.top_k))
+                acc = ((base[1] + step * 5) % 13 - 6) / 32
+                graph_acc.copy_(acc.bfloat16())
+                eager_acc.copy_(acc.bfloat16())
 
-            def forward():
-                return [self.decode(i % self.num_layers, hidden[i], weights[i], ids[i]) for i in range(3)]
+            def forward(acc):
+                outs = [self.decode(i % self.num_layers, hidden[i], weights[i], ids[i]) for i in range(3)]
+                # The hybrid backend's overlap path: submit, then combine into the GPU-routed partial sum.
+                pending = self.decode_submit(1 % self.num_layers, hidden[1], weights[1], ids[1])
+                outs.append(self.decode_sync(pending, add_to=acc))
+                return outs
 
             inputs(0)
-            forward()
+            forward(eager_acc)
             stream.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
-                captured = forward()
+                captured = forward(graph_acc)
             for step in range(1, 4):
                 inputs(step)
                 graph.replay()
                 stream.synchronize()
                 # Eager must follow replay: otherwise it can prefill shared IO and hide stale graph inputs.
-                eager = forward()
+                eager = forward(eager_acc)
                 stream.synchronize()
                 self.raise_if_unhealthy()
-                if any(not torch.equal(got, expected) for got, expected in zip(captured, eager)):
+                if any(not torch.equal(got, expected) for got, expected in zip(captured[:3], eager[:3])):
                     return "graph output differs from eager with distinct task inputs"
+                if not torch.equal(captured[3], eager[3]):
+                    return "graph add_to combine differs from eager"
         return ""
 
     def _make_table(self, layers: list[torch.Tensor]) -> torch.Tensor:
