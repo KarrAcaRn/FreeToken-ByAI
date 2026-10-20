@@ -3288,5 +3288,80 @@
     "reviewed_at": "2026-10-20",
     "commits": [],
     "gpu_untested": false
+  },
+  "686": {
+    "number": 686,
+    "title": "perf(qwen4): add opt-in layer-major long prefill",
+    "head_sha": "63858faa584d",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "shangfeng-liu <liusf1987@gmail.com>"
+    ],
+    "reason": "Opt-in --prefill-layer-major for Qwen3.8-Flash-Next: a long offloaded prefill (<=32k new tokens) runs each decoder layer over all chunks before the next, so streamed experts are reused (32k first text 21.9 -> 11.0 s). Only eligible with pinned PLE, TP=1, one request. Not judged on its merits yet: here Flash-Next needs --ple-backend disk (pinned PLE is 47.7 GiB next to the experts in 78 GiB RAM), which the PR excludes, and the GPU driver is down (2026-10-20).",
+    "summary": "Layer-major long prefill for Flash-Next offload (32k TTFT ~2x); needs pinned PLE, ours runs disk PLE",
+    "revisit": "after-queue"
+  },
+  "668": {
+    "number": 668,
+    "title": "test(moe): grant one bf16 ulp only at rounding ties in the ds_fp4 transcription check",
+    "head_sha": "7080dad4c200",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "Test-only: the ds_fp4 transcription check allows one bf16 ulp exactly where a route's output sits on a rounding tie (sm_120 accumulation order flips it). Behaviour unchanged and the failure is reported on sm_120 only; per the no-test-only rule it comes via the upstream sync.",
+    "summary": "Test tolerance for a bf16 rounding tie in the ds_fp4 check (fails on sm_120); test-only, comes via upstream",
+    "revisit": "when upstream merges"
+  },
+  "761": {
+    "number": 761,
+    "title": "feat(mimo): add text-only MiMo v2.6 Flash support [draft]",
+    "head_sha": "8dc469eb0840",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "JC Mata <jcmh0782@gmail.com>"
+    ],
+    "reason": "Draft (author asks for design discussion first), 8.1k lines: MiMo v2.6 Flash text model plus shared changes (FTW dtypes, 192-wide RoPE, tool-call parser fixes affecting Qwen3-Coder/MiniMax/Muse-Glimmer). Revisit when it leaves draft.",
+    "summary": "Draft - revisit when ready; MiMo v2.6 Flash text support plus shared parser/RoPE changes",
+    "revisit": "when ready"
+  },
+  "742": {
+    "number": 742,
+    "title": "feat(moe): fetch locked-layer experts through pinned staging [draft]",
+    "head_sha": "fc862c2e6000",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ],
+    "reason": "Draft without a description (maintainer's work in progress). Revisit when it leaves draft.",
+    "summary": "Draft - revisit when ready",
+    "revisit": "when ready"
+  },
+  "680": {
+    "number": 680,
+    "title": "fix(moe): admit a wide offloaded decode step's experts 128 at a time [draft]",
+    "head_sha": "fd740ad32461",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "reason": "Draft: offload decode steps with more than 256 routes (>25 requests at top-10) admit their distinct experts 128 at a time instead of one lru_ensure call that spills or fails to compile past 1024 ids. Revisit when it leaves draft; this fork serves 1-5 requests, so it does not hit the limit.",
+    "summary": "Draft - revisit when ready; splits wide offload decode expert admission (>25 requests at top-10)",
+    "revisit": "when ready"
   }
 }
