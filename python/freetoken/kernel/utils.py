@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
 import os
 import pathlib
@@ -99,6 +100,47 @@ def _hip_cflags(extra: List[str], arch_list: List[str]) -> List[str]:
     return DEFAULT_HIP_CFLAGS + extra + [f"--offload-arch={arch}" for arch in arch_list]
 
 
+_HIP_SONAME = re.compile(r"libamdhip64\.so\.\d+(\.\d+)*")
+
+
+def _rocm_compat_link_dir(selected_runtime: pathlib.Path) -> pathlib.Path:
+    """A cache dir holding an unversioned ``libamdhip64.so`` link to ``selected_runtime``.
+
+    The dir is keyed by the runtime, so installs side by side never fight over one link."""
+    xdg_cache = os.environ.get("XDG_CACHE_HOME", "")
+    # The XDG spec says to ignore a relative XDG_CACHE_HOME.
+    cache_root = pathlib.Path(xdg_cache) if os.path.isabs(xdg_cache) else pathlib.Path.home() / ".cache"
+    key = hashlib.sha1(str(selected_runtime).encode()).hexdigest()[:12]
+    link_dir = cache_root / "freetoken" / "rocm-lib" / key
+    link_dir.mkdir(parents=True, exist_ok=True)
+    compat_link = link_dir / "libamdhip64.so"
+    refusal = f"Refusing to replace non-symlink ROCm compatibility file: {compat_link}"
+    if not compat_link.is_symlink():
+        if compat_link.exists():
+            raise RuntimeError(refusal)
+        try:
+            compat_link.symlink_to(selected_runtime)
+            return link_dir
+        except FileExistsError:
+            pass  # a concurrent creator won; check what it left
+    try:
+        current_runtime = compat_link.resolve(strict=True)
+    except (OSError, RuntimeError):  # missing target or a symlink loop: stale
+        current_runtime = None
+    if current_runtime != selected_runtime:
+        if not compat_link.is_symlink():
+            raise RuntimeError(refusal)
+        # Stage it per process and rename it into place, so tensor-parallel ranks never see a missing link.
+        replacement = link_dir / f".libamdhip64.so.{os.getpid()}.tmp"
+        replacement.unlink(missing_ok=True)
+        try:
+            replacement.symlink_to(selected_runtime)
+            replacement.replace(compat_link)
+        finally:
+            replacement.unlink(missing_ok=True)
+    return link_dir
+
+
 @cache
 def _rocm_link_flags() -> List[str]:
     """Make ROCm's runtime library discoverable to JIT link commands.
@@ -126,40 +168,19 @@ def _rocm_link_flags() -> List[str]:
 
     def soname_version(path: pathlib.Path) -> tuple[int, ...]:
         # Numeric order: libamdhip64.so.10 is newer than .so.9.
-        suffix = path.name.partition(".so.")[2]
-        return tuple(int(part) if part.isdigit() else -1 for part in suffix.split("."))
+        return tuple(int(part) for part in path.name.partition(".so.")[2].split("."))
 
     for rocm_home in dict.fromkeys(candidates):
         for library_dir in (rocm_home / "lib64", rocm_home / "lib"):
             unversioned = library_dir / "libamdhip64.so"
             link_dir = library_dir
             if not unversioned.exists():
-                versioned = list(library_dir.glob("libamdhip64.so.*"))
+                # Only real sonames: e.g. a libamdhip64.so.7.debug must never be linked.
+                versioned = [path for path in library_dir.glob("libamdhip64.so.*") if _HIP_SONAME.fullmatch(path.name)]
                 if not versioned:
                     continue
-                cache_root = pathlib.Path(os.environ.get("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache")
-                link_dir = cache_root / "freetoken" / "rocm-lib"
-                link_dir.mkdir(parents=True, exist_ok=True)
-                compat_link = link_dir / "libamdhip64.so"
                 selected_runtime = max(versioned, key=soname_version).resolve()
-                if compat_link.exists() and not compat_link.is_symlink():
-                    raise RuntimeError(f"Refusing to replace non-symlink ROCm compatibility file: {compat_link}")
-                current_runtime = None
-                if compat_link.is_symlink():
-                    try:
-                        current_runtime = compat_link.resolve(strict=True)
-                    except FileNotFoundError:
-                        pass
-                # A link left by an older or removed ROCm install is replaced. Stage it per process and
-                # rename it into place, so tensor-parallel ranks never see a missing link.
-                if current_runtime != selected_runtime:
-                    replacement = link_dir / f".libamdhip64.so.{os.getpid()}.tmp"
-                    replacement.unlink(missing_ok=True)
-                    try:
-                        replacement.symlink_to(selected_runtime)
-                        replacement.replace(compat_link)
-                    finally:
-                        replacement.unlink(missing_ok=True)
+                link_dir = _rocm_compat_link_dir(selected_runtime)
 
             return [f"-L{link_dir}", f"-Wl,-rpath,{library_dir}"]
 

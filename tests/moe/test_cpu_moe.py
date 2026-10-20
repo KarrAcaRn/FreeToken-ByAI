@@ -547,7 +547,7 @@ def test_cpu_moe_hip_probe_error_recovery(hip_probe_fault_library, fault):
 
 
 @pytest.mark.skipif(torch.version.hip is None, reason="requires ROCm")
-@pytest.mark.parametrize("fallback", ["kernel-probe", "graph-data", "fp16"])
+@pytest.mark.parametrize("fallback", ["kernel-probe", "graph-data", "graph-accumulate", "probe-raises", "fp16"])
 def test_cpu_moe_hip_unsafe_graph_keeps_eager_usable(monkeypatch, fallback):
     from freetoken.kernel import _cpu_moe
     from freetoken.moe.cpu_executor import CpuMoeExecutor
@@ -562,6 +562,25 @@ def test_cpu_moe_hip_unsafe_graph_keeps_eager_usable(monkeypatch, fallback):
             return out + 1 if torch.cuda.is_current_stream_capturing() else out
 
         monkeypatch.setattr(CpuMoeExecutor, "decode_sync", corrupt_capture)
+    elif fallback == "graph-accumulate":
+        original = CpuMoeExecutor.decode_sync
+
+        def corrupt_accumulate(self, pending, add_to=None):
+            out = original(self, pending, add_to)
+            return out + 1 if add_to is not None and torch.cuda.is_current_stream_capturing() else out
+
+        monkeypatch.setattr(CpuMoeExecutor, "decode_sync", corrupt_accumulate)
+    elif fallback == "probe-raises":
+        original = CpuMoeExecutor.decode_submit
+        raised = []
+
+        def fail_first_capture(self, *args, **kwargs):
+            if torch.cuda.is_current_stream_capturing() and not raised:
+                raised.append(True)
+                raise RuntimeError("injected capture failure")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(CpuMoeExecutor, "decode_submit", fail_first_capture)
 
     cache = _make_cache(3, 8, 256, 128, scale=0.03)
     ex = CpuMoeExecutor(
@@ -570,7 +589,7 @@ def test_cpu_moe_hip_unsafe_graph_keeps_eager_usable(monkeypatch, fallback):
     )
     dtype = torch.float16 if fallback == "fp16" else torch.bfloat16
     assert not ex.graph_capture_safe(dtype)
-    if fallback == "graph-data":
+    if fallback in ("graph-data", "graph-accumulate", "probe-raises"):
         assert ex._kernel_io, "must test rejection of the full data protocol, not the kernel capability probe"
     hidden = torch.randn(1, 256, device="cuda", dtype=torch.bfloat16).to(dtype)
     ids = torch.tensor([[0, 2, -1, 5]], device="cuda", dtype=torch.int32)
