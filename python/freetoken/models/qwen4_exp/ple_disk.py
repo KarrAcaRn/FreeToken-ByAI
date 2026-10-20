@@ -1,4 +1,4 @@
-"""Disk-backed PLE table (--ple-backend disk): the C++ store hashes n-gram windows and batch-reads rows from the checkpoint's fp8 shard tensors into pinned staging; the captured ``lookup`` is a fixed-shape H2D copy + dequant.
+"""Disk-backed PLE table (--ple-backend disk): the C++ store hashes n-gram windows and batch-reads rows from the checkpoint's fp8 or bf16 shard tensors into pinned staging; the captured ``lookup`` is a fixed-shape H2D copy + dequant.
 
 Hash windows are pure functions of ``req.input_ids`` + ``device_len`` (prefix hits, restores and COW forks need no bookkeeping); the decode input token lives device-side under overlap scheduling and is read back here.
 """
@@ -43,9 +43,10 @@ class PleRowSource:
     row_bytes: int
     row_stride: int
     scale: float
-    # packed ggml rows (a GGUF table) of ``row_values`` values each; None for one fp8 byte per value
+    # packed ggml rows (a GGUF table) of ``row_values`` values each; None for float rows of ``row_dtype``
     ggml_type: int | None = None
     row_values: int | None = None
+    row_dtype: torch.dtype = torch.float8_e4m3fn
 
     @property
     def total_rows(self) -> int:
@@ -61,9 +62,11 @@ def source_from_safetensors(folder: str, qwen4_args) -> PleRowSource:
         [paths.index(path) for path, _ in shards.parts],
         [offset for _, offset in shards.parts],
         shards.rows_per_part,
-        shards.cols,
-        shards.cols,
+        shards.row_bytes,
+        shards.row_bytes,
         float(shards.scale),
+        row_values=shards.cols,
+        row_dtype=shards.dtype,
     )
 
 
@@ -106,11 +109,11 @@ class DiskRowTable:
         from freetoken.layers.quantization.ggml_types import float_dtype
 
         self.num_rows = source.total_rows
-        self.head_dim = source.row_values or source.row_bytes  # fp8: one byte per element
+        self.head_dim = source.row_values or source.row_bytes
         self._ggml_type = source.ggml_type
         self._row_bytes = source.row_bytes
         # float rows (fp8, or F32 / F16 / BF16 in a GGUF) are only cast; quantized ggml rows go through ggml
-        self._row_dtype = torch.float8_e4m3fn if source.ggml_type is None else float_dtype(source.ggml_type)
+        self._row_dtype = source.row_dtype if source.ggml_type is None else float_dtype(source.ggml_type)
         self.dtype = dtype
         self.heads = int(hash_constants["num_ngram_heads"])
         self.scale = source.scale
