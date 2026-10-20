@@ -12,6 +12,8 @@
 //   gfx1101 — RX 7900 GRE
 //   gfx1102 — RX 7700 / XT
 //   gfx1103 — RX 7600 / XT
+//   gfx1150 — RDNA 3.5 integrated GPU (Strix Point)
+//   gfx1151 — RDNA 3.5 integrated GPU (Strix Halo)
 //   gfx1200 — RX 9060 family
 //   gfx1201 — RX 9070 family / Radeon AI PRO R9700
 
@@ -109,9 +111,7 @@
 #endif
 
 #ifndef cudaDevAttrCanUseHostPointerForRegisteredMem
-// HIP does not expose this attribute; assume UVA identity on ROCm (true on Linux).
-// TODO(ROCm): re-enable proper UVA query if HIP adds this attribute.
-#define cudaDevAttrCanUseHostPointerForRegisteredMem hipDeviceAttributeUnifiedAddressing
+#define cudaDevAttrCanUseHostPointerForRegisteredMem hipDeviceAttributeCanUseHostPointerForRegisteredMem
 #endif
 
 #ifndef cudaFuncSetAttribute

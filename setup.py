@@ -44,16 +44,22 @@ def _rocm_paths() -> tuple[list[str], list[str], str]:
         candidates.append(Path(next(iter(spec.submodule_search_locations))))
     candidates.append(Path("/opt/rocm"))
 
+    def soname_version(path: Path) -> tuple[int, ...]:
+        # Numeric order: libamdhip64.so.10 is newer than .so.9.
+        suffix = path.name.partition(".so.")[2]
+        return tuple(int(part) if part.isdigit() else -1 for part in suffix.split("."))
+
     for rocm_home in dict.fromkeys(candidates):
         include_dir = rocm_home / "include"
-        library_dir = rocm_home / "lib"
         if not (include_dir / "hip" / "hip_runtime.h").exists():
             continue
-        if (library_dir / "libamdhip64.so").exists():
-            return [str(include_dir)], [str(library_dir)], "amdhip64"
-        versioned = sorted(library_dir.glob("libamdhip64.so.*"))
-        if versioned:
-            return [str(include_dir)], [str(library_dir)], f":{versioned[-1].name}"
+        for library_dir in (rocm_home / "lib64", rocm_home / "lib"):
+            if (library_dir / "libamdhip64.so").exists():
+                return [str(include_dir)], [str(library_dir)], "amdhip64"
+            versioned = list(library_dir.glob("libamdhip64.so.*"))
+            if versioned:
+                newest = max(versioned, key=soname_version)
+                return [str(include_dir)], [str(library_dir)], f":{newest.name}"
 
     searched = ", ".join(str(path) for path in dict.fromkeys(candidates))
     raise RuntimeError(

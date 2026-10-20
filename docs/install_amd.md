@@ -7,7 +7,8 @@ the current integration and qualification status.
 ## Requirements
 
 - Linux x86_64
-- AMD RDNA3/RDNA4 GPU (`gfx1100`-`gfx1103`, `gfx1200`, or `gfx1201`)
+- AMD RDNA3/RDNA4 GPU (`gfx1100`-`gfx1103`, `gfx1200`, or `gfx1201`), or an
+  RDNA 3.5 integrated GPU (`gfx1150`, `gfx1151`; untested, see below)
 - ROCm 7.14 with PyTorch 2.11 or 2.14, or ROCm 10 with PyTorch 2.15
 - Python >= 3.10
 
@@ -48,6 +49,25 @@ CUDA-only, and FreeToken uses its Triton and PyTorch fallbacks instead.
 
 Set both architecture variables to `gfx1200` for RX 9060 family GPUs, or to the
 actual target reported by `rocminfo`.
+
+## Strix Halo (gfx1151, unified memory)
+
+Not validated on this branch yet. The GPU shares system DRAM with the CPU:
+
+- Set `FREETOKEN_ROCM_ARCH=gfx1151 PYTORCH_ROCM_ARCH=gfx1151` (`gfx1150` for
+  Strix Point) and leave `HSA_OVERRIDE_GFX_VERSION` unset; the PyTorch build
+  must ship native gfx1151 kernels.
+- The memory HIP reports is what FreeToken sizes the KV and expert caches from.
+  Either give the GPU a large BIOS UMA carve-out, or keep the carve-out small
+  and raise the GTT limit (for example `ttm.pages_limit` on the kernel command
+  line). Check `torch.cuda.mem_get_info()` and start with `--memory-ratio 0.8`
+  so the OS keeps enough RAM.
+- On a GPU that reports `is_integrated`, `--moe-strategy auto` picks the
+  resident `fused` MoE path (log: `Unified-memory GPU detected`).
+  `FREETOKEN_UNIFIED_MEMORY=1` forces this when the probe is wrong, `0`
+  disables it.
+- If CUDA graph capture fails, run with `--cuda-graph-max-bs 0`; if startup
+  fails in the prefill warmup, add `--skip-prefill-warmup`.
 
 ## Known ROCm differences
 
