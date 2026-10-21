@@ -3241,7 +3241,8 @@
     "summary": "ROCm fallback for the AIME test's free-VRAM check; CUDA path unchanged, revisit with ROCm (#217)",
     "reviewed_at": "2026-10-20",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "708": {
     "number": 708,
@@ -3347,7 +3348,8 @@
     ],
     "reason": "Draft without a description (maintainer's work in progress). Revisit when it leaves draft.",
     "summary": "Draft - revisit when ready",
-    "revisit": "when ready"
+    "revisit": "when ready",
+    "upstream": "merged"
   },
   "680": {
     "number": 680,
@@ -3363,5 +3365,81 @@
     "reason": "Draft: offload decode steps with more than 256 routes (>25 requests at top-10) admit their distinct experts 128 at a time instead of one lru_ensure call that spills or fails to compile past 1024 ids. Revisit when it leaves draft; this fork serves 1-5 requests, so it does not hit the limit.",
     "summary": "Draft - revisit when ready; splits wide offload decode expert admission (>25 requests at top-10)",
     "revisit": "when ready"
+  },
+  "777": {
+    "number": 777,
+    "title": "test(models): cover the Ornith-1.5-122B NVFP4 export",
+    "head_sha": "0cbc243f1834",
+    "decision": "deferred",
+    "revisit": "when upstream merges",
+    "authors": [
+      "chrisqian <chrisqian@example.com>"
+    ],
+    "reason": "Docs row + quant-config/tokenizer test case for ornith-ai/Ornith-1.5-122B-NVFP4 (no loader change; the qwen3_5_moe loader already serves it). Test/docs-only, so per the no-test-only rule it comes via the upstream sync. Its second commit deletes AGENTS.md's AI policy block, a governance change that is upstream's call, not ours.",
+    "summary": "Ornith-1.5-122B docs row + tests only (no code); also drops AGENTS.md's AI policy, comes via upstream",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "776": {
+    "number": 776,
+    "title": "fix(ple): add rocm disk wait-sync support",
+    "head_sha": "b2ad14130c84",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "revisit_with": 217,
+    "authors": [
+      "LZ-QWQ <lz1830837889@163.com>"
+    ],
+    "reason": "ROCm-only: HIP signal memory + stream memops for the disk PLE / Engram row store's wait-sync, and a HIP-only CPU worker that fills PLE rows before replay because hipGraphUpload does not prevent the large-graph first-launch deadlock. CUDA logic unchanged. Not judged on its merits yet: no AMD GPU here. Candidate for the next-ROCm test branch.",
+    "summary": "ROCm wait-sync for disk PLE/Engram rows (HIP signal memory, pre-replay worker); no AMD GPU here",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "774": {
+    "number": 774,
+    "title": "feat(gguf): serve DeepSeek-V4 Flash and Pro GGUF checkpoints on deepseek4",
+    "head_sha": "39f6b7e5d0fe",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "llama.cpp deepseek4 GGUF reader on #690's GGUF quant kind for DeepSeek-V4 Flash/Pro (config from GGUF KVs, compressor layout from the tensor table, yarn fallback). Not judged on its merits yet: every DeepSeek-V4 release is far beyond this machine's 24 GB VRAM + 78 GiB RAM, so it cannot be loaded here.",
+    "summary": "DeepSeek-V4 Flash/Pro GGUF reader on the new GGUF path; models far too large to run here",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "781": {
+    "number": 781,
+    "title": "perf(attention): fuse short bf16 decode output gates on gfx1201 [draft]",
+    "head_sha": "62cfaa68ef9a",
+    "decision": "deferred",
+    "revisit": "when ready",
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ],
+    "reason": "Draft: fuses the bf16 attention output sigmoid gate into the Triton decode stage2, auto-dispatched only on ROCm gfx1201 (B1/512 graph). Revisit when it leaves draft; no AMD GPU here.",
+    "summary": "Draft - revisit when ready; fused decode output gate for gfx1201 (ROCm only)",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "779": {
+    "number": 779,
+    "title": "perf(kernel): add opt-in hip fp8 decode kernels for r9700 [draft]",
+    "head_sha": "ca5a5eb9837c",
+    "decision": "deferred",
+    "revisit": "when ready",
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ],
+    "reason": "Draft: opt-in (FREETOKEN_USE_ARK=1) native HIP W8A16 block-fp8 M=1 dense and MoE decode kernels for the R9700. Revisit when it leaves draft; no AMD GPU here.",
+    "summary": "Draft - revisit when ready; opt-in HIP fp8 decode kernels for R9700 (ROCm only)",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
   }
 }
