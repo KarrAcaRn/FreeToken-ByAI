@@ -2963,17 +2963,18 @@
   },
   "616": {
     "number": 616,
-    "head_sha": "62e8ff7b099c",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "c261539a87dc",
+    "reviewed_at": "2026-10-21",
     "title": "fix(server): name the lifecycle stage in every API's 503 [draft]",
-    "decision": "deferred",
-    "reason": "Draft. next already shares one gate across the four APIs (#191, 3970669) and names 'failed' correctly; the remaining gap it would close is 'stopping', which next still reports as a cache rebuild. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "decision": "superseded",
+    "reason": "next already does this: all four APIs go through the shared maintenance gate (#191, 3970669) and maintenance_unavailable_detail names loading, failed and stopping (dab442cd). The new head only re-words the same mapping.",
     "commits": [],
     "gpu_untested": false,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
-    "summary": "Draft - revisit when ready; next's shared gate (#191) still calls 'stopping' a rebuild"
+    "summary": "next's shared gate (#191) + dab442cd already name loading/failed/stopping in every API's 503",
+    "superseded_by": "dab442cd"
   },
   "615": {
     "number": 615,
@@ -3441,5 +3442,65 @@
     "reviewed_at": "2026-10-21",
     "commits": [],
     "gpu_untested": false
+  },
+  "676": {
+    "number": 676,
+    "head_sha": "9ed4e79d5660",
+    "reviewed_at": "2026-10-21",
+    "title": "feat(moe): load a short prefill chunk's experts on demand through the slot cache [draft]",
+    "decision": "deferred",
+    "reason": "Draft: --moe-prefill-demand-tokens N loads a short prefill chunk's routed experts through the slot cache instead of streaming the whole layer (#579; ~2.6 s TTFT floor on Flash-Next offload). Relevant for our Flash-Next offload runs; conflicts with main since #742/#778. Revisit when ready.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "summary": "Draft - revisit when ready; short prefill chunks load only their routed experts via the slot cache (offload TTFT)",
+    "revisit": "when ready"
+  },
+  "674": {
+    "number": 674,
+    "head_sha": "2023f9f39b96",
+    "reviewed_at": "2026-10-21",
+    "title": "perf(moe): promote recurring hybrid misses into empty cache slots [draft]",
+    "decision": "deferred",
+    "reason": "Draft, no tests: when hybrid auto-fetch rounds a step's misses to zero fetches, promote one recurring miss into an empty slot. #778 (now on main) added FREETOKEN_HYBRID_FETCH_ROUND (min-wait/stochastic/prefer-fetch), which covers part of the zero-fetch case but not the empty-slot rule; the PR now conflicts with #778. Revisit when ready/rebased.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ],
+    "summary": "Draft - revisit when ready; fill empty hybrid cache slots with recurring misses (partly overlaps #778 rounding modes)",
+    "revisit": "when ready"
+  },
+  "672": {
+    "number": 672,
+    "head_sha": "f5fa784b8cff",
+    "reviewed_at": "2026-10-21",
+    "title": "feat(kvcache): --kv-placement host keeps the QSA K/V in pinned host memory [draft]",
+    "decision": "deferred",
+    "reason": "Draft (part of #568): --kv-placement host keeps Flash-Next's QSA K/V slabs in mapped pinned host memory, decode reads selected tokens over PCIe, prefill stages pages into a device window. Interesting for long Flash-Next contexts on the 4090; large (19 files). Revisit when ready.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "summary": "Draft - revisit when ready; QSA K/V in pinned host memory for 1M-token Flash-Next context",
+    "revisit": "when ready"
+  },
+  "667": {
+    "number": 667,
+    "head_sha": "124385293ca9",
+    "reviewed_at": "2026-10-21",
+    "title": "fix(rocm): verify native cpu moe graph handshake on rocm 10 [draft]",
+    "decision": "deferred",
+    "reason": "Draft, ROCm only: native CPU-MoE graph handshake on ROCm 10 (cpu_moe_ext.cpp, cpu_executor). No AMD GPU here; conflicts with main. Revisit when ready.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ],
+    "summary": "Draft - revisit when ready; ROCm 10 native CPU-MoE graph handshake (ROCm only)",
+    "revisit": "when ready"
   }
 }
