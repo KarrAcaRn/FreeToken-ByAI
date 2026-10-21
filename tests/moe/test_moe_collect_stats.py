@@ -3,7 +3,10 @@
 The counters themselves are accumulated device-side inside ``ensure_experts`` and were
 already covered; what was missing until this flag existed was any way to turn them on from
 the command line or read them back. These tests cover that wiring -- the flag reaching
-``ServerArgs``, and the emit formatting the numbers and resetting the window afterwards.
+``ServerArgs``, and the emit formatting the numbers. Since upstream #742 the miss counters
+belong to ``OffloadMoeCache.decode_stats_line`` (one line per decode log line, which resets
+them), so the periodic emit only adds the worst layers and the routing oracle bound and
+never resets the window itself.
 """
 
 import contextlib
@@ -78,10 +81,11 @@ def _emit(cache, caplog):
     return "\n".join(r.getMessage() for r in caplog.records)
 
 
-def test_emit_reports_and_resets_the_window(caplog):
+def test_emit_reports_worst_layers_and_oracle_without_resetting(caplog):
     cache = _StubCache()
     out = _emit(cache, caplog)
-    assert "miss_rate=0.250" in out
+    # the per-window miss/fetch line is decode_stats_line's (#742); not duplicated here
+    assert "miss_rate=" not in out
     # The oracle bound is the whole point of the report: it says how much room a different
     # eviction policy could possibly have.
     assert "oracle_hit=0.764" in out
@@ -89,13 +93,8 @@ def test_emit_reports_and_resets_the_window(caplog):
     # Ranked worst-first, and the layer that never ran is left out entirely.
     assert "L0=0.500, L1=0.100" in out
     assert "L2" not in out
-    assert cache.reset_calls == 1
-
-
-def test_hybrid_split_only_reported_for_hybrid(caplog):
-    assert "fetch_rate" not in _emit(_StubCache(decode_target="gpu"), caplog)
-    caplog.clear()
-    assert "fetch_rate=0.750" in _emit(_StubCache(decode_target="hybrid"), caplog)
+    # decode_stats_line owns the window reset
+    assert cache.reset_calls == 0
 
 
 def test_idle_window_emits_nothing_and_keeps_counters(caplog):

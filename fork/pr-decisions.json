@@ -3241,7 +3241,8 @@
     "summary": "ROCm fallback for the AIME test's free-VRAM check; CUDA path unchanged, revisit with ROCm (#217)",
     "reviewed_at": "2026-10-20",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "708": {
     "number": 708,
@@ -3286,6 +3287,158 @@
     "reason": "ROCm + Triton 3.8 only: tl.histogram comparisons fold to false on the AMD backend, so moe_align is replaced by a PyTorch path there; CUDA keeps the Triton kernel. Not judged on its merits yet: no AMD GPU here; revisit with the ROCm backend (#217).",
     "summary": "PyTorch moe_align fallback for a Triton 3.8 AMD miscompile; CUDA unchanged, no AMD GPU here",
     "reviewed_at": "2026-10-20",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "686": {
+    "number": 686,
+    "title": "perf(qwen4): add opt-in layer-major long prefill",
+    "head_sha": "63858faa584d",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "shangfeng-liu <liusf1987@gmail.com>"
+    ],
+    "reason": "Opt-in --prefill-layer-major for Qwen3.8-Flash-Next: a long offloaded prefill (<=32k new tokens) runs each decoder layer over all chunks before the next, so streamed experts are reused (32k first text 21.9 -> 11.0 s). Only eligible with pinned PLE, TP=1, one request. Not judged on its merits yet: here Flash-Next needs --ple-backend disk (pinned PLE is 47.7 GiB next to the experts in 78 GiB RAM), which the PR excludes, and the GPU driver is down (2026-10-20).",
+    "summary": "Layer-major long prefill for Flash-Next offload (32k TTFT ~2x); needs pinned PLE, ours runs disk PLE",
+    "revisit": "after-queue"
+  },
+  "668": {
+    "number": 668,
+    "title": "test(moe): grant one bf16 ulp only at rounding ties in the ds_fp4 transcription check",
+    "head_sha": "7080dad4c200",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "Test-only: the ds_fp4 transcription check allows one bf16 ulp exactly where a route's output sits on a rounding tie (sm_120 accumulation order flips it). Behaviour unchanged and the failure is reported on sm_120 only; per the no-test-only rule it comes via the upstream sync.",
+    "summary": "Test tolerance for a bf16 rounding tie in the ds_fp4 check (fails on sm_120); test-only, comes via upstream",
+    "revisit": "when upstream merges"
+  },
+  "761": {
+    "number": 761,
+    "title": "feat(mimo): add text-only MiMo v2.6 Flash support [draft]",
+    "head_sha": "8dc469eb0840",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "JC Mata <jcmh0782@gmail.com>"
+    ],
+    "reason": "Draft (author asks for design discussion first), 8.1k lines: MiMo v2.6 Flash text model plus shared changes (FTW dtypes, 192-wide RoPE, tool-call parser fixes affecting Qwen3-Coder/MiniMax/Muse-Glimmer). Revisit when it leaves draft.",
+    "summary": "Draft - revisit when ready; MiMo v2.6 Flash text support plus shared parser/RoPE changes",
+    "revisit": "when ready"
+  },
+  "742": {
+    "number": 742,
+    "title": "feat(moe): fetch locked-layer experts through pinned staging [draft]",
+    "head_sha": "fc862c2e6000",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ],
+    "reason": "Draft without a description (maintainer's work in progress). Revisit when it leaves draft.",
+    "summary": "Draft - revisit when ready",
+    "revisit": "when ready",
+    "upstream": "merged"
+  },
+  "680": {
+    "number": 680,
+    "title": "fix(moe): admit a wide offloaded decode step's experts 128 at a time [draft]",
+    "head_sha": "fd740ad32461",
+    "reviewed_at": "2026-10-20",
+    "decision": "deferred",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "reason": "Draft: offload decode steps with more than 256 routes (>25 requests at top-10) admit their distinct experts 128 at a time instead of one lru_ensure call that spills or fails to compile past 1024 ids. Revisit when it leaves draft; this fork serves 1-5 requests, so it does not hit the limit.",
+    "summary": "Draft - revisit when ready; splits wide offload decode expert admission (>25 requests at top-10)",
+    "revisit": "when ready"
+  },
+  "777": {
+    "number": 777,
+    "title": "test(models): cover the Ornith-1.5-122B NVFP4 export",
+    "head_sha": "0cbc243f1834",
+    "decision": "deferred",
+    "revisit": "when upstream merges",
+    "authors": [
+      "chrisqian <chrisqian@example.com>"
+    ],
+    "reason": "Docs row + quant-config/tokenizer test case for ornith-ai/Ornith-1.5-122B-NVFP4 (no loader change; the qwen3_5_moe loader already serves it). Test/docs-only, so per the no-test-only rule it comes via the upstream sync. Its second commit deletes AGENTS.md's AI policy block, a governance change that is upstream's call, not ours.",
+    "summary": "Ornith-1.5-122B docs row + tests only (no code); also drops AGENTS.md's AI policy, comes via upstream",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "776": {
+    "number": 776,
+    "title": "fix(ple): add rocm disk wait-sync support",
+    "head_sha": "b2ad14130c84",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "revisit_with": 217,
+    "authors": [
+      "LZ-QWQ <lz1830837889@163.com>"
+    ],
+    "reason": "ROCm-only: HIP signal memory + stream memops for the disk PLE / Engram row store's wait-sync, and a HIP-only CPU worker that fills PLE rows before replay because hipGraphUpload does not prevent the large-graph first-launch deadlock. CUDA logic unchanged. Not judged on its merits yet: no AMD GPU here. Candidate for the next-ROCm test branch.",
+    "summary": "ROCm wait-sync for disk PLE/Engram rows (HIP signal memory, pre-replay worker); no AMD GPU here",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "774": {
+    "number": 774,
+    "title": "feat(gguf): serve DeepSeek-V4 Flash and Pro GGUF checkpoints on deepseek4",
+    "head_sha": "39f6b7e5d0fe",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "llama.cpp deepseek4 GGUF reader on #690's GGUF quant kind for DeepSeek-V4 Flash/Pro (config from GGUF KVs, compressor layout from the tensor table, yarn fallback). Not judged on its merits yet: every DeepSeek-V4 release is far beyond this machine's 24 GB VRAM + 78 GiB RAM, so it cannot be loaded here.",
+    "summary": "DeepSeek-V4 Flash/Pro GGUF reader on the new GGUF path; models far too large to run here",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "781": {
+    "number": 781,
+    "title": "perf(attention): fuse short bf16 decode output gates on gfx1201 [draft]",
+    "head_sha": "62cfaa68ef9a",
+    "decision": "deferred",
+    "revisit": "when ready",
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ],
+    "reason": "Draft: fuses the bf16 attention output sigmoid gate into the Triton decode stage2, auto-dispatched only on ROCm gfx1201 (B1/512 graph). Revisit when it leaves draft; no AMD GPU here.",
+    "summary": "Draft - revisit when ready; fused decode output gate for gfx1201 (ROCm only)",
+    "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "779": {
+    "number": 779,
+    "title": "perf(kernel): add opt-in hip fp8 decode kernels for r9700 [draft]",
+    "head_sha": "ca5a5eb9837c",
+    "decision": "deferred",
+    "revisit": "when ready",
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ],
+    "reason": "Draft: opt-in (FREETOKEN_USE_ARK=1) native HIP W8A16 block-fp8 M=1 dense and MoE decode kernels for the R9700. Revisit when it leaves draft; no AMD GPU here.",
+    "summary": "Draft - revisit when ready; opt-in HIP fp8 decode kernels for R9700 (ROCm only)",
+    "reviewed_at": "2026-10-21",
     "commits": [],
     "gpu_untested": false
   }
