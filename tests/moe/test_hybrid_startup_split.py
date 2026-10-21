@@ -53,6 +53,7 @@ def two_kinds(tmp_path, monkeypatch):
     monkeypatch.setattr(benchbw, "measure_hybrid_split", measure)
     engine = SimpleNamespace(model=None, device=torch.device("cpu"),
                              cpu_moe_executor=SimpleNamespace(num_threads=6, isa="avx2"))
+    engine._profile_layer_rows = lambda: eng.Engine._profile_layer_rows(engine)
     config = SimpleNamespace(moe_hybrid_max_fetch=-1, moe_cpu_threads=0, tp_info=SimpleNamespace(size=1))
     return eng, engine, config, benched
 
@@ -70,7 +71,7 @@ def test_startup_bench_covers_only_the_kinds_without_a_row(two_kinds):
 def test_profile_rows_first_then_the_startup_split(two_kinds):
     eng, engine, config, _ = two_kinds
     split = eng.Engine._startup_hybrid_fractions(engine, config)
-    cache = SimpleNamespace(hybrid_max_fetch=None, hybrid_fetch_fraction=None)
+    cache = SimpleNamespace(hybrid_max_fetch=None, hybrid_fetch_fraction=None, locked_hybrid=frozenset())
     eng.Engine._resolve_hybrid_fetch(engine, config, cache, split)
     assert cache.hybrid_max_fetch == 1
     assert cache.hybrid_fetch_fraction == [pytest.approx(0.4), pytest.approx(0.25), pytest.approx(0.4)]

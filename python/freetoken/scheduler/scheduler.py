@@ -205,9 +205,11 @@ class Scheduler(SchedulerIOMixin):
         self._kv_ladder = (
             self._make_kv_ladder_policy() if getattr(config, "enable_kv_ladder", False) else None
         )
+        moe_cache = getattr(self.engine, "moe_offload_cache", None)
         self.status_reporter = SchedulerStatusReporter(
             log=logger.info_rank0,
             decode_log_interval=config.decode_log_interval,
+            moe_stats=self._moe_stats_line if config.moe_collect_stats and moe_cache is not None else None,
         )
 
         # Initialize the I/O mixin
@@ -260,6 +262,11 @@ class Scheduler(SchedulerIOMixin):
             policy.max_context_tokens,
         )
         return policy
+
+    def _moe_stats_line(self) -> str | None:
+        # on the engine stream, so the read and the zeroing fall between decode replays
+        with torch.cuda.stream(self.engine.stream):
+            return self.engine.moe_offload_cache.decode_stats_line()
 
     def run_when_idle(self) -> None:
         """Called when the scheduler is idle to perform background tasks."""

@@ -66,10 +66,10 @@ class EngineConfig:
     moe_cache_policy: str = "lru"
     moe_prefill_overlap: bool = True
     # Prefill hit/miss split: serve cache-resident experts D2D during prefill
-    # prefetch instead of re-streaming the full layer over PCIe. Needs CUDA >= 12.8
-    # (cudaMemcpyBatchAsync), else falls back to full-layer copies; no-op unless
-    # moe_cache_size > 2 * num_experts. The slot cache starts preloaded, so without it
-    # every prefill streams all experts (~0.8 s on Qwen3.6-35B-A3B over PCIe 4.0).
+    # prefetch instead of re-streaming the full layer over PCIe. Needs CUDA >= 13.0
+    # (cudaMemcpyBatchAsync) or HIP (hipMemcpyBatchAsync), else falls back to full-layer
+    # copies; no-op unless moe_cache_size > 2 * num_experts. The slot cache starts preloaded,
+    # so without it every prefill streams all experts (~0.8 s on Qwen3.6-35B-A3B over PCIe 4.0).
     moe_prefill_hit_d2d: bool = True
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
     # CPU MoE backend (--moe-strategy cpu): number of CPU worker threads computing
@@ -98,6 +98,13 @@ class EngineConfig:
     # a layer kind without a `ft bench bw` row gets the split measured at startup
     # (cached per GPU and layer kind; FREETOKEN_HYBRID_STARTUP_BENCH=0 -> fixed cap of 1).
     moe_hybrid_max_fetch: int = -1
+    # Hybrid with locked layers (banks the pin quota could not take, OS-locked instead): a locked layer keeps GPU
+    # slots of its own pools and fetches this share of each decode step's misses through pinned staging; the rest
+    # are computed on the CPU. -1 (default) = auto: per layer from its `ft bench bw` row (bench_profile.locked_fetch_fraction),
+    # a fixed cap of 1 without one. 0 = locked layers decode on the CPU only. moe_locked_max_fetch caps the fetches per
+    # (layer, step) and sizes the staging (that many rows of the widest expert, per bank).
+    moe_locked_fetch: float = -1.0
+    moe_locked_max_fetch: int = 8
     cuda_graph_bs: List[int] | None = None
     cuda_graph_max_bs: int | None = None
     page_size: int = 1
@@ -156,6 +163,13 @@ class EngineConfig:
     speculative_adaptive: bool = True
 
     def __post_init__(self):
+        if not (self.moe_locked_fetch == -1 or 0.0 <= self.moe_locked_fetch <= 1.0):
+            raise ValueError(f"moe_locked_fetch must be -1 (auto) or in [0, 1], got {self.moe_locked_fetch}")
+        if self.moe_locked_fetch > 0 and round(self.moe_locked_fetch * (1 << 16)) == 0:
+            # the ensure kernel takes the share in Q16: this one rounds to 0 and the layers would never fetch
+            raise ValueError(f"moe_locked_fetch {self.moe_locked_fetch} rounds to 0 in Q16; pass 0 to keep locked layers CPU-only")
+        if self.moe_locked_max_fetch < 1:
+            raise ValueError(f"moe_locked_max_fetch must be at least 1, got {self.moe_locked_max_fetch}")
         if self.moe_backend is None:
             return
         if self.moe_strategy != "auto":
