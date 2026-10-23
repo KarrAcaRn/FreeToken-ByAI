@@ -300,8 +300,11 @@ def _make_backend(dsa: bool, latent=80, dv=64, idx_dim=32, idx_heads=16, topk=64
     import freetoken.core as core
     from freetoken.attention.dsa import DSAAttnBackend
     from freetoken.core import Context, set_global_ctx
+    from freetoken.distributed import set_tp_info, try_get_tp_info
     from freetoken.kvcache.dsa_pool import DSAKVCache, MLAKVCache
 
+    if try_get_tp_info() is None:  # the backend splits heads by TP size; run alone, nothing set it
+        set_tp_info(rank=0, size=1)
     core._GLOBAL_CTX = None  # test-only: the helper builds a fresh ctx per scenario
     ctx = Context(page_size=1)
     ctx.page_table = torch.zeros(4, pages, dtype=torch.int32, device="cuda")
