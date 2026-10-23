@@ -70,6 +70,16 @@ path = "models--openai--gpt-oss-20b/snapshots/*"
 think_format = "harmony"
 flags = "--kv-cache-dtype fp8"
 
+[flint-nvfp4]
+# echt page: the GGUF has no generation_config; RecursiveSI/flint's: 1.0 / top_p 0.95 / top_k 20
+sampling = { temperature = 1.0, top_p = 0.95, top_k = 20 }
+label = "Flint 40B-A2.5B (NVFP4 GGUF)"
+group = "MoE"
+path = "models--RecursiveSI--flint-nvfp4-gguf/snapshots/*/flint-nvfp4.gguf"
+# Messung 2026-10-23 (4090): offload/fp8 ~200-212 tok/s, dieses Rezept 220-228 bei 97k
+# Kontext (mehr Expert-Slots), nvfp4-KV 154k aber -10 %, hybrid -5 %, ModelOpt-Export nur 133-141, Doku-Rezept 72-78
+flags = "--kv-cache-dtype fp8 --max-running-requests 1 --embed-device cpu --memory-ratio 0.95"
+
 [gemma4-26b-a4b]
 label = "Gemma 4 26B-A4B (NVFP4)"
 group = "MoE"
