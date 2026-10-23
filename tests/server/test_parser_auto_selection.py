@@ -173,3 +173,8 @@ def test_every_qwen3_instruct_checkpoint_skips_the_reasoning_parser():
         assert args.reasoning_parser == reasoning, model_path
     args, _ = _qwen3_moe("Qwen/Qwen3-Coder-30B-A3B-Instruct")
     assert args.reasoning_parser is None
+
+
+def test_flint_uses_optional_reasoning_and_xml_tool_calls():
+    assert _inferred("FlintForCausalLM") == ("glm47", "flint")
+    assert _inferred("FlintGGUFForCausalLM") == ("glm47", "flint")
