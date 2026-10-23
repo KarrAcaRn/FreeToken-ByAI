@@ -184,7 +184,8 @@
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
-    "summary": "NVFP4 MoE prefill experts dequantized by bit placement, ~6x faster GEMM with bit-identical output"
+    "summary": "NVFP4 MoE prefill experts dequantized by bit placement, ~6x faster GEMM with bit-identical output",
+    "upstream": "closed"
   },
   "575": {
     "number": 575,
@@ -3070,7 +3071,8 @@
     "fixup": "Regression test for both fallbacks with fp32 and bf16 inputs ([519dff0](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/519dff0))",
     "authors": [
       "taking-lying-flat <1615405@qq.com>"
-    ]
+    ],
+    "upstream": "merged"
   },
   "637": {
     "number": 637,
@@ -3211,7 +3213,8 @@
       "taking-lying-flat <1615405@qq.com>"
     ],
     "summary": "Block-fp8 GPU decode skips the routes hybrid decode hands to the CPU instead of computing them with weight 0",
-    "fixup": "GPU test that negative slots add nothing (fails before the PR)"
+    "fixup": "GPU test that negative slots add nothing (fails before the PR)",
+    "upstream": "merged"
   },
   "764": {
     "number": 764,
@@ -3411,7 +3414,8 @@
     "summary": "DeepSeek-V4 Flash/Pro GGUF reader on the new GGUF path; models far too large to run here",
     "reviewed_at": "2026-10-21",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "781": {
     "number": 781,
@@ -3502,5 +3506,87 @@
     ],
     "summary": "Draft - revisit when ready; ROCm 10 native CPU-MoE graph handshake (ROCm only)",
     "revisit": "when ready"
+  },
+  "810": {
+    "number": 810,
+    "title": "feat(gguf): serve image input on glm5-next ggufs from a glm5v mmproj",
+    "head_sha": "8d4819c3be6f",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "Adds the glm5v mmproj vision tower to the glm5-next GGUF path (gguf_mm_config, iter_mmproj_weights, registry switch to the ConditionalGeneration class) on top of upstream's new mmproj stack (#803). GLM-5.3-Flash GGUF + mmproj are not on this machine, so not judged on its merits yet.",
+    "summary": "Image input for glm5-next GGUFs via a glm5v mmproj; GLM-5.3-Flash GGUF not available here",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "806": {
+    "number": 806,
+    "title": "feat: add --embed-weights host for a pinned host embedding table",
+    "head_sha": "1d9a79c8498b",
+    "decision": "deferred",
+    "revisit": "when upstream merges",
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ],
+    "reason": "A second implementation of our own #596 (--embed-device cpu, on next since a53a5b5): pins untied embedding tables at load time and lets the index kernel and ggml get_rows read them zero-copy. Extras over ours: quantized GGUF token_embd tables and no load-time VRAM peak; ours has the ft info forecast/tip and the 27B measurement. User (2026-10-23): keep ours; whichever of #596/#806 upstream merges, next follows (then alias the other flag and port the missing parts).",
+    "summary": "Competes with our own #596 (--embed-device cpu); kept ours, follow whichever upstream merges",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "805": {
+    "number": 805,
+    "title": "fix(kernel): convert fp32 to e4m3 in one rounding on sm_89",
+    "head_sha": "e7f22fd7454f",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>"
+    ],
+    "reason": "Same sm_89 double rounding (fp32 -> fp16 -> e4m3) our 8236bb3 fixed with round_e4m3 first; #805 emits one cvt.rn.satfinite instead and also covers the dsv4 fused MoE and dsv41 pack quantizers. Our kernel changes reverted for it (tests kept) so next matches upstream. RTX 4090: e4m3/fp8 kernel suites green, static quant 73.7 us vs 73.6 us (4096x5120), 3.3 vs 3.6 us at 1 row.",
+    "summary": "sm_89 fp32->e4m3 cast rounded twice; one cvt instruction now, replaces our round-first fix",
+    "fixup": "Reverted our 8236bb3 kernel changes, kept its tests; merge kept next's e2m1_code_f32 decode in dsv4 fused_moe",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "3f2c262",
+      "9d92131"
+    ],
+    "gpu_untested": false
+  },
+  "797": {
+    "number": 797,
+    "title": "feat(flint): add nvfp4 modelopt and gguf support",
+    "head_sha": "711a86ef11c6",
+    "decision": "adopted",
+    "authors": [
+      "Jesús Jódar Piernas <jesusjodarpiernas@gmail.com>"
+    ],
+    "reason": "New Flint model family (49 layers, 256 experts top-6, sinks, hybrid full/SWA attention) for the ModelOpt NVFP4 export and the official NVFP4 GGUF, with flint reasoning parser and glm47 tool calls. Merge conflicts only in tests/args (combined with our Qwen3-Instruct parser rule). RTX 4090, doc recipe (hybrid, 1024 cache, 8k ctx): GGUF decode ~64-78 tok/s at 5.1 GiB VRAM, ModelOpt ~58-64 tok/s at 7.2 GiB; both answer merge_intervals + tests correctly and emit a correct tool call; checkpoint tests (FREETOKEN_FLINT_MODEL/GGUF) 223 passed.",
+    "summary": "Flint MoE (ModelOpt NVFP4 + official GGUF); both run on the 4090, decode ~60-78 tok/s at 8k ctx",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "2ce557b"
+    ],
+    "gpu_untested": false
+  },
+  "795": {
+    "number": 795,
+    "title": "perf(attention): drop redundant activation copies in glm5 dsa prefill",
+    "head_sha": "2143c9c6b01d",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "glm_dsa_sparse_attn takes strided q and an out= workspace slice, so glm5_next prefill skips a contiguous q copy and an output copy; adds an int32 q/o addressing guard. Combined with next's fp8/nvfp4 latent KV arguments (all kernel variants already read q strides). RTX 4090: test_glm_dsa incl. the new strided/out-slice tests and the DSA suites green; perf not measured (no GLM-5 model here).",
+    "summary": "GLM-5 DSA prefill skips q/out copies (strided q, out= slice) plus an int32 addressing guard",
+    "fixup": "glm_dsa test helper sets TP info so the ragged-prefill test also runs alone",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "ca74b5b",
+      "6b72bab"
+    ],
+    "gpu_untested": false
   }
 }
