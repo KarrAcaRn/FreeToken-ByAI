@@ -32,6 +32,7 @@ from freetoken.kernel.triton.e4m3_compat import (
     e4m3_native_cx,
     e4m3_u8_to_f32,
     f32_to_e4m3,
+    round_e4m3,
 )
 
 FP8 = torch.float8_e4m3fn
