@@ -2642,8 +2642,8 @@
   },
   "586": {
     "number": 586,
-    "head_sha": "b3e07f458e57",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "60f1abe119c2",
+    "reviewed_at": "2026-10-23",
     "title": "refactor(hf): merge an override into the section's own dict, with no fallback [draft]",
     "decision": "deferred",
     "reason": "Draft. Two-line refactor of _with_overrides (follows #573): drop the empty-dict fallback that only a property-computed config section reaches, so such an override fails with a KeyError at the merge. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -2656,8 +2656,8 @@
   },
   "583": {
     "number": 583,
-    "head_sha": "6d575bc9e766",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "35088b03b46d",
+    "reviewed_at": "2026-10-23",
     "title": "fix(engine): size memory pools against the VRAM other processes leave free on Windows [draft]",
     "decision": "deferred",
     "reason": "Draft. Windows/WDDM only: take min(cudaMemGetInfo, NVML free) so pools do not overcommit beside a desktop; Linux path unchanged. Windows cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -2670,8 +2670,8 @@
   },
   "582": {
     "number": 582,
-    "head_sha": "5374f7ed8fbc",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "d2e4d1022791",
+    "reviewed_at": "2026-10-23",
     "title": "test(quant): skip declined local checkpoints and label cache paths portably [draft]",
     "decision": "deferred",
     "reason": "Draft. test_quant_config skips a checkpoint whose scheme FreeToken declines (NotImplementedError) instead of failing, and labels cache paths portably (Windows). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -2685,8 +2685,8 @@
   "581": {
     "number": 581,
     "title": "fix(windows): read checkpoints without O_DIRECT, posix_fadvise or PROT_READ [draft]",
-    "head_sha": "c9be561fbed6",
-    "reviewed_at": "2026-10-07",
+    "head_sha": "499d44b59fe8",
+    "reviewed_at": "2026-10-23",
     "decision": "deferred",
     "reason": "Draft (Windows): read checkpoints without O_DIRECT/posix_fadvise/PROT_READ (range readers share one fan-out, madvise only where mmap has it). Windows cannot be tested here; overlaps the Windows part of #298. Head c9be561 per the API (refs/pull/581/head still served c186323 on 2026-10-07). Deferred while it is a draft: the queue re-lists it once its head moves.",
     "commits": [],
@@ -2699,8 +2699,8 @@
   "580": {
     "number": 580,
     "title": "fix(windows): serve over loopback ZMQ and a selector event loop [draft]",
-    "head_sha": "1b0ee4401c8b",
-    "reviewed_at": "2026-10-07",
+    "head_sha": "effa99ea35eb",
+    "reviewed_at": "2026-10-23",
     "decision": "deferred",
     "reason": "Draft (Windows): loopback ZMQ and a selector event loop for serving on Windows, now also skips expandable segments on win32. Windows cannot be tested here; overlaps the Windows part of #298. Its one Linux-relevant commit (set the allocator config through torch 2.11's _accelerator_setAllocatorSettings) is already on next (36a467b, with a fallback for older torch). Deferred while it is a draft: the queue re-lists it once its head moves.",
     "commits": [],
@@ -2979,8 +2979,8 @@
   },
   "615": {
     "number": 615,
-    "head_sha": "df2550a14e11",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "d2a55edc4946",
+    "reviewed_at": "2026-10-23",
     "title": "fix(engine): start a single rank without a rendezvous port [draft]",
     "decision": "deferred",
     "reason": "Draft. A single rank would form its gloo group over a temporary FileStore instead of a TCP rendezvous, so a busy --port+1 / 2333 no longer fails the load (#301). next (with #461's loopback bind and --dist-port) still binds a port for one rank, so it is not covered. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -2993,8 +2993,8 @@
   },
   "614": {
     "number": 614,
-    "head_sha": "a8498c7e96e2",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "7df3c6dd2219",
+    "reviewed_at": "2026-10-23",
     "title": "fix(server): leak no semaphores when a signal stops the server [draft]",
     "decision": "deferred",
     "reason": "Draft. Of its two halves, next already gives the scheduler worker a thread-level tqdm lock (ff58945); the other half, releasing the startup ack queue once the backend is ready, is not covered. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -3007,8 +3007,8 @@
   },
   "613": {
     "number": 613,
-    "head_sha": "707fbd5fa072",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "1926ddd0626a",
+    "reviewed_at": "2026-10-23",
     "title": "fix(server)!: answer /health with 503 until the server accepts requests [draft]",
     "decision": "deferred",
     "reason": "Draft. /health would answer 503 unless serving (body unchanged), so readiness probes such as llama-swap wait for the model; in-repo consumers (daemon proxy, ft ctl, bench wait_ready) are adapted. Breaking for clients that poll /health for 200; our own serve helpers read the body's status, check them when revisiting. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -3155,8 +3155,8 @@
   "656": {
     "number": 656,
     "title": "fix(moe): refuse e8m0 scale code 0xFF when MXFP4 expert pieces are read [draft]",
-    "head_sha": "176d38cfbe6d",
-    "reviewed_at": "2026-10-10",
+    "head_sha": "0a2e1e8217e1",
+    "reviewed_at": "2026-10-23",
     "decision": "deferred",
     "commits": [],
     "gpu_untested": true,
@@ -3358,8 +3358,8 @@
   "680": {
     "number": 680,
     "title": "fix(moe): admit a wide offloaded decode step's experts 128 at a time [draft]",
-    "head_sha": "fd740ad32461",
-    "reviewed_at": "2026-10-20",
+    "head_sha": "333eedd0aa88",
+    "reviewed_at": "2026-10-23",
     "decision": "deferred",
     "commits": [],
     "gpu_untested": false,
@@ -3449,8 +3449,8 @@
   },
   "676": {
     "number": 676,
-    "head_sha": "9ed4e79d5660",
-    "reviewed_at": "2026-10-21",
+    "head_sha": "5b2f0a08befb",
+    "reviewed_at": "2026-10-23",
     "title": "feat(moe): load a short prefill chunk's experts on demand through the slot cache [draft]",
     "decision": "deferred",
     "reason": "Draft: --moe-prefill-demand-tokens N loads a short prefill chunk's routed experts through the slot cache instead of streaming the whole layer (#579; ~2.6 s TTFT floor on Flash-Next offload). Relevant for our Flash-Next offload runs; conflicts with main since #742/#778. Revisit when ready.",
@@ -3587,6 +3587,84 @@
       "ca74b5b",
       "6b72bab"
     ],
+    "gpu_untested": false
+  },
+  "790": {
+    "number": 790,
+    "title": "fix(sampling): bound top-k before int32 conversion",
+    "head_sha": "278267e06389",
+    "decision": "adopted",
+    "authors": [
+      "wenlive <33243841+wenlive@users.noreply.github.com>"
+    ],
+    "reason": "A top_k larger than int32 (e.g. 2**31 meaning 'all') overflowed when the per-row list became a device int32 tensor; it is now clamped to the vocab size first. Merged cleanly; sampling suites green on the 4090.",
+    "summary": "Huge top_k overflowed the int32 sampling tensor; now clamped to the vocabulary size",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "e920eb4"
+    ],
+    "gpu_untested": false
+  },
+  "788": {
+    "number": 788,
+    "title": "fix(scheduler): preserve shared sampling parameters when clipping",
+    "head_sha": "3352fdd6c8a1",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "wenlive <33243841+wenlive@users.noreply.github.com>"
+    ],
+    "reason": "Clipping max_tokens to the context mutated the SamplingParams object in place, which offline LLM.generate shares across prompts, so one long prompt shortened all others. Now the request gets a copy. Scheduler suites green on the 4090.",
+    "summary": "Clipping max_tokens mutated SamplingParams shared by offline requests; clips a copy now",
+    "fixup": "next clips in _admit_user_msg (kv ladder split), so the copy-on-clip moved there",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "7602430"
+    ],
+    "gpu_untested": false
+  },
+  "802": {
+    "number": 802,
+    "title": "perf(moe): fuse selection-biased sigmoid routing",
+    "head_sha": "e9135e657353",
+    "decision": "superseded",
+    "superseded_by": 804,
+    "authors": [
+      "rainhjrui <296351199+rainhjrui@users.noreply.github.com>"
+    ],
+    "reason": "Upstream merged #804 (fused sigmoid + selection-bias routing Triton kernel) for the same five MoE blocks (glm4_moe, glm5_next, glm_moe_dsa, minimax_m2/m3); this draft also adds ~14k lines of validation logs and binary activations.",
+    "summary": "Fused sigmoid routing already on main via #804 for the same models",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "809": {
+    "number": 809,
+    "title": "fix(gguf): rename the ggml shim's type_info lookup, ambiguous under MSVC",
+    "head_sha": "98eac8169a17",
+    "decision": "deferred",
+    "revisit": "when ready",
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "reason": "Draft. Renames the ggml shim's type_info lookup that collides with MSVC's global type_info (Windows build only); behaviour unchanged on Linux. Revisit when ready.",
+    "summary": "Draft - revisit when ready; MSVC-only rename in the ggml shim",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "792": {
+    "number": 792,
+    "title": "perf(ple): add an opt-in bounded disk row cache",
+    "head_sha": "9694725a0f14",
+    "decision": "deferred",
+    "revisit": "when ready",
+    "authors": [
+      "wenlive <33243841+wenlive@users.noreply.github.com>"
+    ],
+    "reason": "Draft. Opt-in bounded host cache for disk-backed PLE rows (row_store ext + flag). Relevant for Qwen3.8-Flash-Next with --ple-backend disk, which runs here; revisit when ready and measure on Flash-Next then.",
+    "summary": "Draft - revisit when ready; opt-in bounded PLE disk row cache (Flash-Next relevant)",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
     "gpu_untested": false
   }
 }
