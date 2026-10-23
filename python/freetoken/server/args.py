@@ -252,6 +252,8 @@ def parse_args(
             " ".join(str(v) for v in text_cfg.get("architectures", []) or []),
         ]
         marker = " ".join(candidates).lower()
+        if "flint" in marker:
+            return "glm47"
         if "gpt_oss" in marker or "gpt-oss" in marker or "gptoss" in marker:
             return "gpt_oss"
         # M3 first: its marker also contains the bare "minimax" substring, but the
@@ -303,6 +305,8 @@ def parse_args(
             " ".join(str(v) for v in text_cfg.get("architectures", []) or []),
         ]
         marker = " ".join(candidates).lower()
+        if "flint" in marker:
+            return "flint"
         # Qwen3 Instruct checkpoints (Instruct-2507, Qwen3-VL-*-Instruct, Qwen3-Coder-*-Instruct)
         # do not emit thinking markers, although they share an architecture with a Thinking variant.
         checkpoint_name = model_path.lower()
@@ -691,6 +695,15 @@ def parse_args(
         metavar="{vision,audio}",
         help="Encoder towers to leave unbuilt; every input they would serve is rejected.",
     )
+    parser.add_argument(
+        "--mmproj",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="llama.cpp vision tower (mmproj GGUF) for a GGUF model. Default: a *mmproj*.gguf that fits the model "
+        "in the model file's folder (BF16 > F32 > F16 > quantized when several are there); none found, or files of "
+        "several models, serves text only.",
+    )
 
     parser.add_argument(
         "--image-min-tokens",
@@ -833,7 +846,7 @@ def parse_args(
         default="auto",
         choices=[
             "auto", "off", "deepseekv32", "gpt_oss", "qwen3", "glm",
-            "minimax", "minimax_m3", "muse_glimmer", "gemma4",
+            "minimax", "minimax_m3", "muse_glimmer", "gemma4", "flint",
         ],
         help=(
             "Reasoning parser that splits chain-of-thought into reasoning_content "
@@ -1359,6 +1372,17 @@ def parse_args(
     for tls_path in ("ssl_certfile", "ssl_keyfile"):
         if kwargs[tls_path] and kwargs[tls_path].startswith("~"):
             kwargs[tls_path] = os.path.expanduser(kwargs[tls_path])
+
+    # every process reads the GGUF config, tokenizer workers included, so the choice travels in the environment
+    from freetoken.models.gguf.mmproj import MMPROJ_ENV
+
+    os.environ.pop(MMPROJ_ENV, None)
+    if (mmproj := kwargs.pop("mmproj")) is not None:
+        from freetoken.models.gguf.reader import is_gguf_path
+
+        if not is_gguf_path(kwargs["model_path"]):
+            parser.error("--mmproj needs a .gguf model file")
+        os.environ[MMPROJ_ENV] = os.path.abspath(os.path.expanduser(mmproj))
 
     # a bad media root is a deployment mistake; fail at startup, not per request
     if kwargs["allowed_local_media_path"]:

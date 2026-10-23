@@ -22,6 +22,7 @@ from freetoken.kernel.triton.e4m3_compat import (
     e4m3_kernel_view,
     e4m3_native_cx,
     e4m3_u8_to_f32,
+    f32_to_e4m3,
     round_e4m3,
 )
 
@@ -52,10 +53,10 @@ def _act_quant_kernel(
     amax = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-10)
     s = amax / 448.0  # [BLOCK_M] fp32 per-token-group scale (e4m3 finite max = 448)
     y = tl.clamp(x / s[:, None], -448.0, 448.0)
-    # Rounded here even when native: sm_89's fp32 -> e4m3 goes through fp16 and double-rounds.
-    y = round_e4m3(y)  # e4m3-grid values into the wrapper's bf16 buffer when emulated
     if e4m3_native_cx():
-        y = y.to(tl.float8e4nv)
+        y = f32_to_e4m3(y)
+    else:
+        y = round_e4m3(y)  # e4m3-grid values into the wrapper's bf16 buffer
     tl.store(y_ptr + offs_m[:, None] * stride_ym + offs_k[None, :] * stride_yk, y, mask=m_mask[:, None])
     tl.store(s_ptr + offs_m * stride_sm + pid_k * stride_sk, s, mask=m_mask)
 

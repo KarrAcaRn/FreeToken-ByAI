@@ -184,7 +184,8 @@
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
-    "summary": "NVFP4 MoE prefill experts dequantized by bit placement, ~6x faster GEMM with bit-identical output"
+    "summary": "NVFP4 MoE prefill experts dequantized by bit placement, ~6x faster GEMM with bit-identical output",
+    "upstream": "closed"
   },
   "575": {
     "number": 575,
@@ -2641,8 +2642,8 @@
   },
   "586": {
     "number": 586,
-    "head_sha": "b3e07f458e57",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "60f1abe119c2",
+    "reviewed_at": "2026-10-23",
     "title": "refactor(hf): merge an override into the section's own dict, with no fallback [draft]",
     "decision": "deferred",
     "reason": "Draft. Two-line refactor of _with_overrides (follows #573): drop the empty-dict fallback that only a property-computed config section reaches, so such an override fails with a KeyError at the merge. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -2655,8 +2656,8 @@
   },
   "583": {
     "number": 583,
-    "head_sha": "6d575bc9e766",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "35088b03b46d",
+    "reviewed_at": "2026-10-23",
     "title": "fix(engine): size memory pools against the VRAM other processes leave free on Windows [draft]",
     "decision": "deferred",
     "reason": "Draft. Windows/WDDM only: take min(cudaMemGetInfo, NVML free) so pools do not overcommit beside a desktop; Linux path unchanged. Windows cannot be tested here. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -2669,8 +2670,8 @@
   },
   "582": {
     "number": 582,
-    "head_sha": "5374f7ed8fbc",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "d2e4d1022791",
+    "reviewed_at": "2026-10-23",
     "title": "test(quant): skip declined local checkpoints and label cache paths portably [draft]",
     "decision": "deferred",
     "reason": "Draft. test_quant_config skips a checkpoint whose scheme FreeToken declines (NotImplementedError) instead of failing, and labels cache paths portably (Windows). Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -2684,8 +2685,8 @@
   "581": {
     "number": 581,
     "title": "fix(windows): read checkpoints without O_DIRECT, posix_fadvise or PROT_READ [draft]",
-    "head_sha": "c9be561fbed6",
-    "reviewed_at": "2026-10-07",
+    "head_sha": "499d44b59fe8",
+    "reviewed_at": "2026-10-23",
     "decision": "deferred",
     "reason": "Draft (Windows): read checkpoints without O_DIRECT/posix_fadvise/PROT_READ (range readers share one fan-out, madvise only where mmap has it). Windows cannot be tested here; overlaps the Windows part of #298. Head c9be561 per the API (refs/pull/581/head still served c186323 on 2026-10-07). Deferred while it is a draft: the queue re-lists it once its head moves.",
     "commits": [],
@@ -2698,8 +2699,8 @@
   "580": {
     "number": 580,
     "title": "fix(windows): serve over loopback ZMQ and a selector event loop [draft]",
-    "head_sha": "1b0ee4401c8b",
-    "reviewed_at": "2026-10-07",
+    "head_sha": "effa99ea35eb",
+    "reviewed_at": "2026-10-23",
     "decision": "deferred",
     "reason": "Draft (Windows): loopback ZMQ and a selector event loop for serving on Windows, now also skips expandable segments on win32. Windows cannot be tested here; overlaps the Windows part of #298. Its one Linux-relevant commit (set the allocator config through torch 2.11's _accelerator_setAllocatorSettings) is already on next (36a467b, with a fallback for older torch). Deferred while it is a draft: the queue re-lists it once its head moves.",
     "commits": [],
@@ -2963,22 +2964,23 @@
   },
   "616": {
     "number": 616,
-    "head_sha": "62e8ff7b099c",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "c261539a87dc",
+    "reviewed_at": "2026-10-21",
     "title": "fix(server): name the lifecycle stage in every API's 503 [draft]",
-    "decision": "deferred",
-    "reason": "Draft. next already shares one gate across the four APIs (#191, 3970669) and names 'failed' correctly; the remaining gap it would close is 'stopping', which next still reports as a cache rebuild. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
+    "decision": "superseded",
+    "reason": "next already does this: all four APIs go through the shared maintenance gate (#191, 3970669) and maintenance_unavailable_detail names loading, failed and stopping (dab442cd). The new head only re-words the same mapping.",
     "commits": [],
     "gpu_untested": false,
     "authors": [
       "Yevhenii <evgeny.kotyrlo@gmail.com>"
     ],
-    "summary": "Draft - revisit when ready; next's shared gate (#191) still calls 'stopping' a rebuild"
+    "summary": "next's shared gate (#191) + dab442cd already name loading/failed/stopping in every API's 503",
+    "superseded_by": "dab442cd"
   },
   "615": {
     "number": 615,
-    "head_sha": "df2550a14e11",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "d2a55edc4946",
+    "reviewed_at": "2026-10-23",
     "title": "fix(engine): start a single rank without a rendezvous port [draft]",
     "decision": "deferred",
     "reason": "Draft. A single rank would form its gloo group over a temporary FileStore instead of a TCP rendezvous, so a busy --port+1 / 2333 no longer fails the load (#301). next (with #461's loopback bind and --dist-port) still binds a port for one rank, so it is not covered. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -2991,8 +2993,8 @@
   },
   "614": {
     "number": 614,
-    "head_sha": "a8498c7e96e2",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "7df3c6dd2219",
+    "reviewed_at": "2026-10-23",
     "title": "fix(server): leak no semaphores when a signal stops the server [draft]",
     "decision": "deferred",
     "reason": "Draft. Of its two halves, next already gives the scheduler worker a thread-level tqdm lock (ff58945); the other half, releasing the startup ack queue once the backend is ready, is not covered. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -3005,8 +3007,8 @@
   },
   "613": {
     "number": 613,
-    "head_sha": "707fbd5fa072",
-    "reviewed_at": "2026-10-06",
+    "head_sha": "1926ddd0626a",
+    "reviewed_at": "2026-10-23",
     "title": "fix(server)!: answer /health with 503 until the server accepts requests [draft]",
     "decision": "deferred",
     "reason": "Draft. /health would answer 503 unless serving (body unchanged), so readiness probes such as llama-swap wait for the model; in-repo consumers (daemon proxy, ft ctl, bench wait_ready) are adapted. Breaking for clients that poll /health for 200; our own serve helpers read the body's status, check them when revisiting. Deferred while it is a draft: the queue re-lists it once its head moves (the author keeps working or marks it ready).",
@@ -3069,7 +3071,8 @@
     "fixup": "Regression test for both fallbacks with fp32 and bf16 inputs ([519dff0](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/519dff0))",
     "authors": [
       "taking-lying-flat <1615405@qq.com>"
-    ]
+    ],
+    "upstream": "merged"
   },
   "637": {
     "number": 637,
@@ -3152,8 +3155,8 @@
   "656": {
     "number": 656,
     "title": "fix(moe): refuse e8m0 scale code 0xFF when MXFP4 expert pieces are read [draft]",
-    "head_sha": "176d38cfbe6d",
-    "reviewed_at": "2026-10-10",
+    "head_sha": "0a2e1e8217e1",
+    "reviewed_at": "2026-10-23",
     "decision": "deferred",
     "commits": [],
     "gpu_untested": true,
@@ -3210,7 +3213,8 @@
       "taking-lying-flat <1615405@qq.com>"
     ],
     "summary": "Block-fp8 GPU decode skips the routes hybrid decode hands to the CPU instead of computing them with weight 0",
-    "fixup": "GPU test that negative slots add nothing (fails before the PR)"
+    "fixup": "GPU test that negative slots add nothing (fails before the PR)",
+    "upstream": "merged"
   },
   "764": {
     "number": 764,
@@ -3354,8 +3358,8 @@
   "680": {
     "number": 680,
     "title": "fix(moe): admit a wide offloaded decode step's experts 128 at a time [draft]",
-    "head_sha": "fd740ad32461",
-    "reviewed_at": "2026-10-20",
+    "head_sha": "333eedd0aa88",
+    "reviewed_at": "2026-10-23",
     "decision": "deferred",
     "commits": [],
     "gpu_untested": false,
@@ -3410,7 +3414,8 @@
     "summary": "DeepSeek-V4 Flash/Pro GGUF reader on the new GGUF path; models far too large to run here",
     "reviewed_at": "2026-10-21",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "781": {
     "number": 781,
@@ -3439,6 +3444,226 @@
     "reason": "Draft: opt-in (FREETOKEN_USE_ARK=1) native HIP W8A16 block-fp8 M=1 dense and MoE decode kernels for the R9700. Revisit when it leaves draft; no AMD GPU here.",
     "summary": "Draft - revisit when ready; opt-in HIP fp8 decode kernels for R9700 (ROCm only)",
     "reviewed_at": "2026-10-21",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "676": {
+    "number": 676,
+    "head_sha": "5b2f0a08befb",
+    "reviewed_at": "2026-10-23",
+    "title": "feat(moe): load a short prefill chunk's experts on demand through the slot cache [draft]",
+    "decision": "deferred",
+    "reason": "Draft: --moe-prefill-demand-tokens N loads a short prefill chunk's routed experts through the slot cache instead of streaming the whole layer (#579; ~2.6 s TTFT floor on Flash-Next offload). Relevant for our Flash-Next offload runs; conflicts with main since #742/#778. Revisit when ready.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "summary": "Draft - revisit when ready; short prefill chunks load only their routed experts via the slot cache (offload TTFT)",
+    "revisit": "when ready"
+  },
+  "674": {
+    "number": 674,
+    "head_sha": "2023f9f39b96",
+    "reviewed_at": "2026-10-21",
+    "title": "perf(moe): promote recurring hybrid misses into empty cache slots [draft]",
+    "decision": "deferred",
+    "reason": "Draft, no tests: when hybrid auto-fetch rounds a step's misses to zero fetches, promote one recurring miss into an empty slot. #778 (now on main) added FREETOKEN_HYBRID_FETCH_ROUND (min-wait/stochastic/prefer-fetch), which covers part of the zero-fetch case but not the empty-slot rule; the PR now conflicts with #778. Revisit when ready/rebased.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ],
+    "summary": "Draft - revisit when ready; fill empty hybrid cache slots with recurring misses (partly overlaps #778 rounding modes)",
+    "revisit": "when ready"
+  },
+  "672": {
+    "number": 672,
+    "head_sha": "f5fa784b8cff",
+    "reviewed_at": "2026-10-21",
+    "title": "feat(kvcache): --kv-placement host keeps the QSA K/V in pinned host memory [draft]",
+    "decision": "deferred",
+    "reason": "Draft (part of #568): --kv-placement host keeps Flash-Next's QSA K/V slabs in mapped pinned host memory, decode reads selected tokens over PCIe, prefill stages pages into a device window. Interesting for long Flash-Next contexts on the 4090; large (19 files). Revisit when ready.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "summary": "Draft - revisit when ready; QSA K/V in pinned host memory for 1M-token Flash-Next context",
+    "revisit": "when ready"
+  },
+  "667": {
+    "number": 667,
+    "head_sha": "124385293ca9",
+    "reviewed_at": "2026-10-21",
+    "title": "fix(rocm): verify native cpu moe graph handshake on rocm 10 [draft]",
+    "decision": "deferred",
+    "reason": "Draft, ROCm only: native CPU-MoE graph handshake on ROCm 10 (cpu_moe_ext.cpp, cpu_executor). No AMD GPU here; conflicts with main. Revisit when ready.",
+    "commits": [],
+    "gpu_untested": false,
+    "authors": [
+      "zihaomu <zihaomu@outlook.com>"
+    ],
+    "summary": "Draft - revisit when ready; ROCm 10 native CPU-MoE graph handshake (ROCm only)",
+    "revisit": "when ready"
+  },
+  "810": {
+    "number": 810,
+    "title": "feat(gguf): serve image input on glm5-next ggufs from a glm5v mmproj",
+    "head_sha": "8d4819c3be6f",
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "Adds the glm5v mmproj vision tower to the glm5-next GGUF path (gguf_mm_config, iter_mmproj_weights, registry switch to the ConditionalGeneration class) on top of upstream's new mmproj stack (#803). GLM-5.3-Flash GGUF + mmproj are not on this machine, so not judged on its merits yet.",
+    "summary": "Image input for glm5-next GGUFs via a glm5v mmproj; GLM-5.3-Flash GGUF not available here",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "806": {
+    "number": 806,
+    "title": "feat: add --embed-weights host for a pinned host embedding table",
+    "head_sha": "1d9a79c8498b",
+    "decision": "deferred",
+    "revisit": "when upstream merges",
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ],
+    "reason": "A second implementation of our own #596 (--embed-device cpu, on next since a53a5b5): pins untied embedding tables at load time and lets the index kernel and ggml get_rows read them zero-copy. Extras over ours: quantized GGUF token_embd tables and no load-time VRAM peak; ours has the ft info forecast/tip and the 27B measurement. User (2026-10-23): keep ours; whichever of #596/#806 upstream merges, next follows (then alias the other flag and port the missing parts).",
+    "summary": "Competes with our own #596 (--embed-device cpu); kept ours, follow whichever upstream merges",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "805": {
+    "number": 805,
+    "title": "fix(kernel): convert fp32 to e4m3 in one rounding on sm_89",
+    "head_sha": "e7f22fd7454f",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>"
+    ],
+    "reason": "Same sm_89 double rounding (fp32 -> fp16 -> e4m3) our 8236bb3 fixed with round_e4m3 first; #805 emits one cvt.rn.satfinite instead and also covers the dsv4 fused MoE and dsv41 pack quantizers. Our kernel changes reverted for it (tests kept) so next matches upstream. RTX 4090: e4m3/fp8 kernel suites green, static quant 73.7 us vs 73.6 us (4096x5120), 3.3 vs 3.6 us at 1 row.",
+    "summary": "sm_89 fp32->e4m3 cast rounded twice; one cvt instruction now, replaces our round-first fix",
+    "fixup": "Reverted our 8236bb3 kernel changes, kept its tests; merge kept next's e2m1_code_f32 decode in dsv4 fused_moe",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "3f2c262",
+      "9d92131"
+    ],
+    "gpu_untested": false
+  },
+  "797": {
+    "number": 797,
+    "title": "feat(flint): add nvfp4 modelopt and gguf support",
+    "head_sha": "711a86ef11c6",
+    "decision": "adopted",
+    "authors": [
+      "Jesús Jódar Piernas <jesusjodarpiernas@gmail.com>"
+    ],
+    "reason": "New Flint model family (49 layers, 256 experts top-6, sinks, hybrid full/SWA attention) for the ModelOpt NVFP4 export and the official NVFP4 GGUF, with flint reasoning parser and glm47 tool calls. Merge conflicts only in tests/args (combined with our Qwen3-Instruct parser rule). RTX 4090, doc recipe (hybrid, 1024 cache, 8k ctx): GGUF decode ~64-78 tok/s at 5.1 GiB VRAM, ModelOpt ~58-64 tok/s at 7.2 GiB; both answer merge_intervals + tests correctly and emit a correct tool call; checkpoint tests (FREETOKEN_FLINT_MODEL/GGUF) 223 passed.",
+    "summary": "Flint MoE (ModelOpt NVFP4 + official GGUF); both run on the 4090, decode ~60-78 tok/s at 8k ctx",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "2ce557b"
+    ],
+    "gpu_untested": false
+  },
+  "795": {
+    "number": 795,
+    "title": "perf(attention): drop redundant activation copies in glm5 dsa prefill",
+    "head_sha": "2143c9c6b01d",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "glm_dsa_sparse_attn takes strided q and an out= workspace slice, so glm5_next prefill skips a contiguous q copy and an output copy; adds an int32 q/o addressing guard. Combined with next's fp8/nvfp4 latent KV arguments (all kernel variants already read q strides). RTX 4090: test_glm_dsa incl. the new strided/out-slice tests and the DSA suites green; perf not measured (no GLM-5 model here).",
+    "summary": "GLM-5 DSA prefill skips q/out copies (strided q, out= slice) plus an int32 addressing guard",
+    "fixup": "glm_dsa test helper sets TP info so the ragged-prefill test also runs alone",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "ca74b5b",
+      "6b72bab"
+    ],
+    "gpu_untested": false
+  },
+  "790": {
+    "number": 790,
+    "title": "fix(sampling): bound top-k before int32 conversion",
+    "head_sha": "278267e06389",
+    "decision": "adopted",
+    "authors": [
+      "wenlive <33243841+wenlive@users.noreply.github.com>"
+    ],
+    "reason": "A top_k larger than int32 (e.g. 2**31 meaning 'all') overflowed when the per-row list became a device int32 tensor; it is now clamped to the vocab size first. Merged cleanly; sampling suites green on the 4090.",
+    "summary": "Huge top_k overflowed the int32 sampling tensor; now clamped to the vocabulary size",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "e920eb4"
+    ],
+    "gpu_untested": false
+  },
+  "788": {
+    "number": 788,
+    "title": "fix(scheduler): preserve shared sampling parameters when clipping",
+    "head_sha": "3352fdd6c8a1",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "wenlive <33243841+wenlive@users.noreply.github.com>"
+    ],
+    "reason": "Clipping max_tokens to the context mutated the SamplingParams object in place, which offline LLM.generate shares across prompts, so one long prompt shortened all others. Now the request gets a copy. Scheduler suites green on the 4090.",
+    "summary": "Clipping max_tokens mutated SamplingParams shared by offline requests; clips a copy now",
+    "fixup": "next clips in _admit_user_msg (kv ladder split), so the copy-on-clip moved there",
+    "reviewed_at": "2026-10-23",
+    "commits": [
+      "7602430"
+    ],
+    "gpu_untested": false
+  },
+  "802": {
+    "number": 802,
+    "title": "perf(moe): fuse selection-biased sigmoid routing",
+    "head_sha": "e9135e657353",
+    "decision": "superseded",
+    "superseded_by": 804,
+    "authors": [
+      "rainhjrui <296351199+rainhjrui@users.noreply.github.com>"
+    ],
+    "reason": "Upstream merged #804 (fused sigmoid + selection-bias routing Triton kernel) for the same five MoE blocks (glm4_moe, glm5_next, glm_moe_dsa, minimax_m2/m3); this draft also adds ~14k lines of validation logs and binary activations.",
+    "summary": "Fused sigmoid routing already on main via #804 for the same models",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "809": {
+    "number": 809,
+    "title": "fix(gguf): rename the ggml shim's type_info lookup, ambiguous under MSVC",
+    "head_sha": "98eac8169a17",
+    "decision": "deferred",
+    "revisit": "when ready",
+    "authors": [
+      "Yevhenii <evgeny.kotyrlo@gmail.com>"
+    ],
+    "reason": "Draft. Renames the ggml shim's type_info lookup that collides with MSVC's global type_info (Windows build only); behaviour unchanged on Linux. Revisit when ready.",
+    "summary": "Draft - revisit when ready; MSVC-only rename in the ggml shim",
+    "reviewed_at": "2026-10-23",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "792": {
+    "number": 792,
+    "title": "perf(ple): add an opt-in bounded disk row cache",
+    "head_sha": "9694725a0f14",
+    "decision": "deferred",
+    "revisit": "when ready",
+    "authors": [
+      "wenlive <33243841+wenlive@users.noreply.github.com>"
+    ],
+    "reason": "Draft. Opt-in bounded host cache for disk-backed PLE rows (row_store ext + flag). Relevant for Qwen3.8-Flash-Next with --ple-backend disk, which runs here; revisit when ready and measure on Flash-Next then.",
+    "summary": "Draft - revisit when ready; opt-in bounded PLE disk row cache (Flash-Next relevant)",
+    "reviewed_at": "2026-10-23",
     "commits": [],
     "gpu_untested": false
   }
