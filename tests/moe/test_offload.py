@@ -1406,8 +1406,6 @@ def test_host_bank_maps_without_mmap_flags(monkeypatch):
 
 def test_host_ram_fits_parallel_sizes_subdirectory_shards(tmp_path, monkeypatch):
     """The RAM probe must size the shards the reader will actually open, indexed subdirectory layouts included."""
-    import builtins
-    import io
     import json
 
     from freetoken.moe.expert_banks import _host_ram_fits_parallel
@@ -1426,17 +1424,8 @@ def test_host_ram_fits_parallel_sizes_subdirectory_shards(tmp_path, monkeypatch)
             }
         )
     )
-    real_open = builtins.open
-
-    def fake_open(meminfo):
-        def open_(file, *args, **kwargs):
-            if str(file) == "/proc/meminfo":
-                return io.StringIO(meminfo)
-            return real_open(file, *args, **kwargs)
-
-        return open_
-
-    monkeypatch.setattr(builtins, "open", fake_open("MemAvailable:           512 kB\n"))
+    # next reads MemAvailable via freetoken.memory (cgroup-aware), not builtins.open
+    monkeypatch.setattr("freetoken.memory.available_host_memory", lambda: 512 * 1024)
     assert not _host_ram_fits_parallel(str(tmp_path))
-    monkeypatch.setattr(builtins, "open", fake_open("MemAvailable:     999999999 kB\n"))
+    monkeypatch.setattr("freetoken.memory.available_host_memory", lambda: 1 << 40)
     assert _host_ram_fits_parallel(str(tmp_path))
