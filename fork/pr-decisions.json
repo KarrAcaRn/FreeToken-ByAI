@@ -72,7 +72,7 @@
     "head_sha": "9e1029f85bbe",
     "reviewed_at": "2026-10-04",
     "decision": "own",
-    "reason": "Our own PR, opened from feat/cpu-embedding (credits #456's author). The feature is on next since a53a5b5 (merge 85c52d9), plus the ft info tip.",
+    "reason": "Our own PR, opened from feat/cpu-embedding (credits #456's author). The feature is on next since a53a5b5 (merge 85c52d9), plus the ft info tip. Superseded upstream by #806 (--embed-weights host, merged 2026-10-23); next follows #806 since 2026-10-24 (070584e) and keeps --embed-device cpu as its alias.",
     "commits": [
       "a53a5b5"
     ],
@@ -81,7 +81,7 @@
       "KarrAcaRn <claude2@owayo.com>"
     ],
     "upstream_followup": "our own upstream PR",
-    "summary": "Input embedding table in pinned host RAM: +75k tokens of context on the 27B (our own PR to upstream)",
+    "summary": "Input embedding table in pinned host RAM; superseded upstream by #806, next follows it (--embed-device cpu is an alias)",
     "upstream": "closed"
   },
   "589": {
@@ -3535,10 +3535,12 @@
     "authors": [
       "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
     ],
-    "reason": "A second implementation of our own #596 (--embed-device cpu, on next since a53a5b5): pins untied embedding tables at load time and lets the index kernel and ggml get_rows read them zero-copy. Extras over ours: quantized GGUF token_embd tables and no load-time VRAM peak; ours has the ft info forecast/tip and the 27B measurement. User (2026-10-23): keep ours; whichever of #596/#806 upstream merges, next follows (then alias the other flag and port the missing parts).",
-    "summary": "Competes with our own #596 (--embed-device cpu); kept ours, follow whichever upstream merges",
+    "reason": "A second implementation of our own #596 (--embed-device cpu, on next since a53a5b5): pins untied embedding tables at load time and lets the index kernel and ggml get_rows read them zero-copy. Extras over ours: quantized GGUF token_embd tables and no load-time VRAM peak; ours has the ft info forecast/tip and the 27B measurement. User (2026-10-23): keep ours; whichever of #596/#806 upstream merges, next follows (then alias the other flag and port the missing parts). Follow-up 2026-10-24: upstream merged #806, so next follows it since 2026-10-24 (070584e): --embed-device cpu is an alias of --embed-weights host, our post-load move and Triton gather are gone (the index kernel is as fast), and we kept the ft info forecast/tip and the per-table tie check (gemma4's per-layer table moves on tied models).",
+    "summary": "Upstream's version of our own #596; next follows it since 2026-10-24, --embed-device cpu is its alias",
     "reviewed_at": "2026-10-23",
-    "commits": [],
+    "commits": [
+      "070584e"
+    ],
     "gpu_untested": false,
     "upstream": "merged"
   },

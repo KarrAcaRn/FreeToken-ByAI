@@ -271,12 +271,12 @@ closed drop out of these tables; the JSON keeps their decisions.
   instead of only 8192 tokens. Where the KV is cheap next to an expert slot the context grows a
   lot for a few slots: Qwen3.8-Flash-Next 8.3k -> 101k tokens and Qwen3.6-35B-A3B 8.3k -> 159k,
   each for about 5% decode speed. `--kv-reserve-share 0` restores the old split.
-- **CPU-resident input embeddings** (`--embed-device cpu`): the input-embedding table moves to
+- **CPU-resident input embeddings** (`--embed-weights host`): the input-embedding table lives in
   pinned host RAM and the GPU reads the looked-up rows over PCIe, inside the CUDA graphs. On
   Qwen3.8-27B with the fp8 KV cache the context grows from 25k to 100k tokens, with the same
-  prefill and decode speed and token-identical greedy output. `ft info` prices the flag and
-  suggests it. The idea comes from [#456](https://github.com/FlashML-org/FreeToken/pull/456); to
-  be offered upstream as its own pull request.
+  prefill and decode speed and token-identical greedy output. Upstream merged this as
+  [#806](https://github.com/FlashML-org/FreeToken/pull/806); we added the `ft info` forecast and
+  tip, gemma4's per-layer table on tied models, and keep our older `--embed-device cpu` as an alias.
 - **Speculative decoding with DFlash/DFlash2** (built on
   [#258](https://github.com/FlashML-org/FreeToken/pull/258)): `--speculative-algorithm dflash
   --speculative-draft-model-path z-lab/Qwen3.8-27B-DFlash2 --speculative-draft-quant fp8`. We

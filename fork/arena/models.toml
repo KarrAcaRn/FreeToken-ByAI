@@ -78,7 +78,7 @@ group = "MoE"
 path = "models--RecursiveSI--flint-nvfp4-gguf/snapshots/*/flint-nvfp4.gguf"
 # Messung 2026-10-23 (4090): offload/fp8 ~200-212 tok/s, dieses Rezept 220-228 bei 97k
 # Kontext (mehr Expert-Slots), nvfp4-KV 154k aber -10 %, hybrid -5 %, ModelOpt-Export nur 133-141, Doku-Rezept 72-78
-flags = "--kv-cache-dtype fp8 --max-running-requests 1 --embed-device cpu --memory-ratio 0.95"
+flags = "--kv-cache-dtype fp8 --max-running-requests 1 --embed-weights host --memory-ratio 0.95"
 
 [gemma4-26b-a4b]
 label = "Gemma 4 26B-A4B (NVFP4)"
@@ -113,13 +113,13 @@ label = "Muse Glimmer 30B (NVFP4)"
 group = "Groß (dicht)"
 path = "models--RedHatAI--Muse-Glimmer-30B-NVFP4/snapshots/*"
 # Vision-Teil seit dem Encoder-vor-Finalize-Fix (next 2026-10-15) wieder an; 131k Kontext
-flags = "--kv-cache-dtype fp8 --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"
+flags = "--kv-cache-dtype fp8 --embed-weights host --max-running-requests 1 --max-prefill-length 4096"
 
 [qwen3_8-27b]
 label = "Qwen3.8 27B (NVFP4, Denken medium)"
 group = "Groß (dicht)"
 path = "models--RadixArk--Qwen3.8-27B-NVFP4/snapshots/*"
-flags = "--kv-cache-dtype fp8 --text-model-only --memory-ratio 0.95 --embed-device cpu --max-running-requests 1 --max-prefill-length 4096"  # 99.5k Kontext (nvfp4-KV: ~190k, langsamer)
+flags = "--kv-cache-dtype fp8 --text-model-only --memory-ratio 0.95 --embed-weights host --max-running-requests 1 --max-prefill-length 4096"  # 99.5k Kontext (nvfp4-KV: ~190k, langsamer)
 reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphasen); low / medium / xhigh
 
 [qwen3_8-27b-dflash]
@@ -127,7 +127,7 @@ label = "Qwen3.8 27B (NVFP4 + DFlash, Denken medium)"
 group = "Groß (dicht)"
 path = "models--RadixArk--Qwen3.8-27B-NVFP4/snapshots/*"
 # Draft-Modell braucht VRAM: nur mit nvfp4-KV, 1 Anfrage, kleinen Prefill-Blöcken ~81k Kontext (Prognose)
-flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.97 --embed-device cpu --max-running-requests 1 --max-prefill-length 2048 --cuda-graph-max-bs 1 --speculative-algorithm dflash --speculative-draft-model-path /home/basti/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4 --speculative-draft-quant fp8"
+flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.97 --embed-weights host --max-running-requests 1 --max-prefill-length 2048 --cuda-graph-max-bs 1 --speculative-algorithm dflash --speculative-draft-model-path /home/basti/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4 --speculative-draft-quant fp8"
 reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphasen); low / medium / xhigh
 
 [glm4_5-air]
