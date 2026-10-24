@@ -70,22 +70,56 @@ class PLETableBackend(Protocol):
 
 
 class GpuResidentTable:
-    """PLE table held whole in GPU memory; ``index_select`` oracle for the pinned-host backend."""
+    """PLE table held whole in GPU memory; ``index_select`` oracle for the pinned-host backend.
+
+    Native fp8/bf16 tables read one row per value and apply the scalar ``scale``. Packed e2m1
+    tables (FP4-Local) pass the per-16 e4m3 ``scale_tensor`` rows and the global ``scale``.
+    """
 
     def __init__(
-        self, weight: torch.Tensor, scale: float = 1.0, dtype: torch.dtype | None = None
+        self,
+        weight: torch.Tensor,
+        scale: float = 1.0,
+        dtype: torch.dtype | None = None,
+        scale_tensor: torch.Tensor | None = None,
     ) -> None:
         self.weight = weight
         self.scale = float(scale)
-        self.num_rows, self.head_dim = weight.shape
+        self.scale_tensor = scale_tensor
+        if scale_tensor is None:
+            self.num_rows, self.head_dim = weight.shape
+        else:
+            assert weight.dtype == torch.uint8, "packed PLE tables hold e2m1, two per byte"
+            assert scale_tensor.dtype == torch.float8_e4m3fn, "per-16 PLE scales are e4m3 bytes"
+            assert scale_tensor.shape == (weight.shape[0], weight.shape[1] // 8), "one scale per 16 values"
+            self.num_rows = weight.shape[0]
+            self.head_dim = weight.shape[1] * 2
+            # e2m1: 0, +/-0.5, +/-1, +/-1.5, +/-2, +/-3, +/-4, +/-6 (sign = bit 3)
+            self._lut = torch.tensor(
+                [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+                dtype=torch.float32,
+                device=weight.device,
+            )
         self.dtype = dtype if dtype is not None else (
             torch.bfloat16 if weight.dtype.itemsize < 2 else weight.dtype
         )
 
     def lookup(self, row_ids: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
-        rows = self.weight.index_select(0, row_ids.reshape(-1)).to(self.dtype)
-        if self.scale != 1.0:
-            rows = rows * self.scale
+        if self.scale_tensor is None:
+            rows = self.weight.index_select(0, row_ids.reshape(-1)).to(self.dtype)
+            if self.scale != 1.0:
+                rows = rows * self.scale
+        else:
+            flat = row_ids.reshape(-1)
+            packed = self.weight.index_select(0, flat)
+            scales = self.scale_tensor.index_select(0, flat).view(torch.float8_e4m3fn).float()
+            nibbles = packed.to(torch.int64)  # this torch build rejects uint8 indices
+            lo = self._lut[nibbles & 0x0F]
+            hi = self._lut[(nibbles >> 4) & 0x0F]
+            rows = torch.stack((lo, hi), dim=2).reshape(flat.shape[0], self.head_dim)
+            if self.scale != 1.0:
+                scales = scales * self.scale
+            rows = (rows * scales.repeat_interleave(16, dim=1)).to(self.dtype)
         rows = rows.view(*row_ids.shape[:-1], -1)
         if out is None:
             return rows
@@ -121,12 +155,12 @@ class PinnedUVATable:
     """PLE table left in pinned host memory; rows are gathered over UVA by a Triton kernel.
 
     ``weight`` must be the filled and ``pin()``ed ``HostBank.tensor`` from
-    ``weight.load_ple_table`` (``[num_rows, head_dim]``, fp8-e4m3 or bf16); an unregistered host
-    buffer is not device-addressable and the kernel faults on it. ``scale`` is the checkpoint's
-    scalar ``weight_scale``. With ``scales`` (a pinned fp8 bank ``[num_rows, head_dim // 16]``)
-    ``weight`` is instead the packed NVFP4 bank ``[num_rows, head_dim // 2]`` uint8 and ``scale``
-    is its global scalar. Gathers emit bf16 into a staging buffer, one per captured decode size
-    and one growable buffer for everything else.
+    ``weight.load_ple_table`` (``[num_rows, head_dim]`` fp8-e4m3 or bf16, or ``[num_rows,
+    head_dim // 2]`` packed e2m1 with the per-16 e4m3 ``scale_tensor`` rows); an unregistered
+    host buffer is not device-addressable and the kernel faults on it. ``scale`` is the
+    checkpoint's scalar scale (``weight_scale``, or ``weight_scale_2`` for packed tables).
+    Gathers emit bf16 into a staging buffer, one per captured decode size and one growable buffer
+    for everything else.
 
     ``prefetch`` runs the gather on a private stream and the next ``lookup`` joins it. ``lookup``
     returns a view of that staging buffer, so the rows must be consumed before the next lookup.
@@ -137,23 +171,23 @@ class PinnedUVATable:
         weight: torch.Tensor,
         scale: float = 1.0,
         *,
-        scales: torch.Tensor | None = None,
         device: torch.device | None = None,
         prefetch: bool = True,
+        scale_tensor: torch.Tensor | None = None,
     ) -> None:
         assert weight.device.type == "cpu" and weight.is_contiguous()
-        if scales is None:
+        if scale_tensor is None:
             assert weight.dtype in (torch.float8_e4m3fn, torch.bfloat16), weight.dtype
             head_dim = weight.shape[1]
         else:
-            assert weight.dtype is torch.uint8 and scales.dtype is torch.float8_e4m3fn
-            assert scales.device.type == "cpu" and scales.is_contiguous()
+            assert weight.dtype is torch.uint8 and scale_tensor.dtype is torch.float8_e4m3fn
+            assert scale_tensor.device.type == "cpu" and scale_tensor.is_contiguous()
             head_dim = weight.shape[1] * 2
-            assert tuple(scales.shape) == (weight.shape[0], head_dim // 16), scales.shape
+            assert tuple(scale_tensor.shape) == (weight.shape[0], head_dim // 16), scale_tensor.shape
         from freetoken.kernel.pinned import device_ptr
 
         self.weight = weight
-        self.scales = scales
+        self.scale_tensor = scale_tensor
         self.scale = float(scale)
         self.num_rows, self.head_dim = weight.shape[0], head_dim
         self.dtype = torch.bfloat16
@@ -161,7 +195,7 @@ class PinnedUVATable:
         self._device = device or torch.device("cuda", torch.cuda.current_device())
         # WDDM maps registered host memory at a different device address; on Linux/UVA this is data_ptr
         self._table_ptr = device_ptr(weight)
-        self._scales_ptr: int | None = device_ptr(scales) if scales is not None else None
+        self._scale_ptr = device_ptr(scale_tensor) if scale_tensor is not None else None
         self._stream = torch.cuda.Stream(device=self._device) if prefetch else None
         self._staging: torch.Tensor | None = None
         self._graph_staging: dict[int, torch.Tensor] = {}
@@ -193,7 +227,7 @@ class PinnedUVATable:
             dst,
             self.scale,
             self._is_fp8,
-            self._scales_ptr,
+            scale_ptr=self._scale_ptr,
         )
 
     def prefetch(self, row_ids: torch.Tensor) -> None:

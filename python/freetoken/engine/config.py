@@ -35,6 +35,7 @@ class EngineConfig:
     quant_backend: str | None = None
     # PLE table backend: "disk" reads rows from the checkpoint files per fill, "pinned" preloads the table into page-locked host RAM.
     # The default is "disk" where setup.py builds its row store (Linux), "pinned" elsewhere.
+    # NVFP4 (packed e2m1) tables fall back to "pinned"; the disk row store streams native rows only.
     ple_backend: str = "disk" if sys.platform == "linux" else "pinned"
     # --embed-device: "cpu" keeps the untied input-embedding table in pinned host RAM, read by
     # the GPU in place over PCIe (a few rows per decode step); its VRAM goes to the KV pool.

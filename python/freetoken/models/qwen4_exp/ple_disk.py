@@ -19,7 +19,7 @@ from freetoken.core import Batch
 from freetoken.kernel.pinned import alloc_pinned_tensor
 from freetoken.utils import init_logger
 
-from .weight import scan_ple_table
+from .weight import ple_folder_is_packed, scan_ple_table
 
 _IO_URING_ENV = "FREETOKEN_PLE_IO_URING"
 _SYNC_ENV = "FREETOKEN_PLE_SYNC"  # auto | wait | gate
@@ -56,6 +56,11 @@ class PleRowSource:
 
 def source_from_safetensors(folder: str, qwen4_args) -> PleRowSource:
     """Map the checkpoint's ``ngram_embedding.shard_<i>`` tensors in place: one extent per shard, no copy."""
+    if ple_folder_is_packed(folder):
+        raise NotImplementedError(
+            f"the disk PLE backend reads native rows only; {folder} holds a packed e2m1 "
+            "(NVFP4) table -- use the pinned backend (--ple-backend pinned)"
+        )
     shards = scan_ple_table(folder, qwen4_args)
     paths = list(dict.fromkeys(path for path, _ in shards.parts))
     return PleRowSource(

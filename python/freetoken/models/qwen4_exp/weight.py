@@ -26,9 +26,10 @@ from freetoken.distributed import get_tp_info
 from freetoken.models.qwen3_vl.weight import rename_vl_prefix
 
 from freetoken.models.config import VISION_KEY_PREFIXES
-from freetoken.models.loader import drop_page_cache, iter_weight_files
+from freetoken.models.loader import drop_page_cache, iter_weight_files, safetensors_weight_map
 from freetoken.models.nvfp4_banks import (
     Nvfp4ExpertSourceSpec,
+    decode_csf_scales,
 )
 from freetoken.layers.quantization import QuantConfig, QuantKind, QuantScheme, get_quant_config
 from freetoken.models.register import get_model_spec
@@ -59,6 +60,21 @@ _LINEAR_LEAVES = frozenset({
 _DROPPED_SUFFIXES = frozenset({"input_scale", "input_global_scale"})
 _ELEM_DTYPES = {"e4m3": torch.float8_e4m3fn, "e2m1": torch.uint8}
 _QUANT_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2, torch.uint8, torch.int8)
+
+# FP4-Local stores the routed-expert block scales as lossless CSF slab pairs instead of the
+# plain E4M3 matrix; decode_csf_scales expands each pair back into the matrix the banks read.
+_CSF_KINDS = ("weight_scale.nvfp4_csf_fixed", "weight_scale.nvfp4_csf_exceptions")
+
+# The vision tower bypasses the scheme-driven reader (its leaves are not in _LINEAR_LEAVES),
+# so its role-named ModelOpt scales are renamed here instead; text dense roles go through
+# QuantConfig storage aliases in _DenseReader.
+_VISION_PREFIXES = ("model.visual.", "visual.")
+_SCALE_SUFFIXES = (".weight_scale", ".weight_scale_2", ".input_scale")
+_MODEL_SCALE_ROLE = (
+    (QuantKind.MXFP8, ".weight_scale", "weight_scale_inv"),
+    (QuantKind.NVFP4, ".weight_scale", "weight_scale"),
+    (QuantKind.NVFP4, ".weight_scale_2", "weight_global"),
+)
 
 # The n-gram table itself: too big for the dense state dict, loaded by load_ple_table.
 _PLE_TABLE_INFIX = ".ple.ple_embedding.ngram_embedding."
@@ -100,7 +116,94 @@ def _rename(raw_name: str) -> str | None:
     # static KV-cache scales of the quantizers; the KV cache runs in the engine's dtype
     if raw_name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
         return None
+    if raw_name.startswith(_VISION_PREFIXES) and raw_name.endswith(_SCALE_SUFFIXES):
+        return _rename_scaled(raw_name)
     return rename_vl_prefix(raw_name)
+
+
+def _rename_scaled(raw_name: str) -> str | None:
+    """Keep a vision scale when the scheme that stores it names it after the model's role.
+
+    The vision tower bypasses _DenseReader, so nvidia's MIXED_PRECISION role names are mapped
+    here: the MXFP8 block scale ``weight_scale`` -> ``weight_scale_inv``, the NVFP4 per-tensor
+    global ``weight_scale_2`` -> ``weight_global``. Routed experts read their scales through the
+    bank readers, so a scheme there keeps nothing.
+    """
+    quant = get_quant_config()
+    if quant is None or _EXPERT_RE.search(raw_name):
+        return None
+    module, suffix = _split_scale_suffix(raw_name)
+    if suffix is None:
+        return None
+    scheme = quant.scheme_for_name(module)
+    if scheme is None:
+        return None
+    for kind, csuf, role in _MODEL_SCALE_ROLE:
+        if scheme.kind is kind and suffix == csuf:
+            return rename_vl_prefix(module) + "." + role
+    return None
+
+
+def _split_scale_suffix(raw_name: str) -> tuple[str, str | None]:
+    for suffix in _SCALE_SUFFIXES:
+        if raw_name.endswith(suffix):
+            return raw_name[: -len(suffix)], suffix
+    return raw_name, None
+
+
+class _GlobalExpander:
+    """Expand a scalar vision NVFP4 ``weight_global`` to the model's ``[out]`` fp32 buffer.
+
+    nvidia's W4A16 exports store the per-tensor global as a scalar fp32, while the linear's
+    buffer holds one entry per output row (load_state_dict asserts the exact shape). The global
+    and its ``.weight`` arrive in either order, so the expansion is flushed once both are seen.
+    """
+
+    def __init__(self) -> None:
+        self._scalars: dict[str, torch.Tensor] = {}
+        self._rows: dict[str, int] = {}
+
+    def on_weight(self, module: str, rows: int) -> tuple[str, torch.Tensor] | None:
+        self._rows[module] = rows
+        scalar = self._scalars.pop(module, None)
+        return None if scalar is None else self._expand(module, scalar, rows)
+
+    def on_global(self, name: str, tensor: torch.Tensor) -> tuple[str, torch.Tensor] | None:
+        """A ready pair, or None for a scalar still waiting for its weight."""
+        if tensor.numel() != 1:
+            rows = self._rows.get(name[: -len(".weight_global")])
+            if rows is not None and tensor.numel() != rows:
+                raise ValueError(
+                    f"{name} holds {tensor.numel()} elements for a weight with {rows} output rows"
+                )
+            return name, tensor
+        module = name[: -len(".weight_global")]
+        if module in self._rows:
+            return self._expand(module, tensor, self._rows[module])
+        self._scalars[module] = tensor
+        return None
+
+    def check_complete(self) -> None:
+        if self._scalars:
+            raise ValueError(f"scalar weight_global without a weight: {sorted(self._scalars)}")
+
+    @staticmethod
+    def _expand(module: str, scalar: torch.Tensor, rows: int) -> tuple[str, torch.Tensor]:
+        return module + ".weight_global", _per_row_scale(scalar, rows)
+
+
+def _emit_vision(globals_: _GlobalExpander, name: str, tensor: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
+    """Yield one vision tensor, flushing a scalar ``weight_global`` once its weight is seen."""
+    if name.endswith(".weight_global"):
+        pair = globals_.on_global(name, tensor)
+        if pair is not None:
+            yield pair
+        return
+    yield name, tensor
+    if name.endswith(".weight"):
+        pair = globals_.on_weight(name.rpartition(".")[0], tensor.shape[0])
+        if pair is not None:
+            yield pair
 
 
 def _per_row_scale(scale: torch.Tensor, rows: int) -> torch.Tensor:
@@ -273,6 +376,7 @@ def iter_weights(
     hf_config = cached_load_hf_config(model_path)
     spec = get_model_spec(hf_config.architectures[0])
     reader = _DenseReader(get_quant_config(), spec.packed_modules_mapping)
+    globals_ = _GlobalExpander()  # the vision tower's scalar weight_globals bypass the reader
     for file in tqdm(
         iter_weight_files(model_path),
         desc="Loading weights",
@@ -286,12 +390,16 @@ def iter_weights(
                 if not include_vision and name.startswith(VISION_KEY_PREFIXES):
                     continue
                 tensor = f.get_tensor(raw_name)
-                emitted = None if name.startswith(VISION_KEY_PREFIXES) else reader.add(name, tensor)
+                if name.startswith(VISION_KEY_PREFIXES):
+                    yield from _emit_vision(globals_, name, tensor)
+                    continue
+                emitted = reader.add(name, tensor)
                 if emitted is None:
                     yield name, tensor
                 else:
                     yield from emitted
 
+    globals_.check_complete()
     if reader.pending:
         lines = reader.missing()
         shown = "\n  ".join(lines[:8]) + (f"\n  ... {len(lines) - 8} more" if len(lines) > 8 else "")
@@ -300,12 +408,16 @@ def iter_weights(
 
 def iter_vision_weights(model_path: str, device: torch.device) -> Iterator[tuple[str, torch.Tensor]]:
     """The vision tower alone, named as iter_weights names it."""
+    globals_ = _GlobalExpander()
     for file in iter_weight_files(model_path):
         with safetensors.safe_open(file, framework="pt", device=str(device)) as f:
             for raw_name in f.keys():
                 name = _rename(raw_name)
-                if name is not None and name.startswith(VISION_KEY_PREFIXES):
-                    yield name, f.get_tensor(raw_name)
+                if name is None or not name.startswith(VISION_KEY_PREFIXES):
+                    continue
+                tensor = f.get_tensor(raw_name)
+                yield from _emit_vision(globals_, name, tensor)
+    globals_.check_complete()
 
 
 # ======================================================================================
@@ -359,7 +471,10 @@ def _ple_table_files(folder: str) -> list[str]:
 
 def ple_table_is_packed(model_path: str) -> bool:
     """True when the n-gram table shards are NVFP4-packed: reads headers, no payloads."""
-    folder = download_hf_weight(model_path)
+    return ple_folder_is_packed(download_hf_weight(model_path))
+
+
+def ple_folder_is_packed(folder: str) -> bool:
     for path in _ple_table_files(folder):
         header, _ = _safetensors_header(path)
         for key, meta in header.items():
@@ -515,6 +630,8 @@ def scan_ple_table(folder: str, qwen4_args) -> PleShards:
             f"(missing {missing[:8]}, unexpected {extra[:8]})"
         )
     packed = dtype == _PLE_PACKED_DTYPE
+    if getattr(qwen4_args, "ple_embedding_dtype", None) == "nvfp4" and not packed:
+        raise ValueError(f"PLE table in {folder}: config says ple_embedding_dtype nvfp4, shards are {dtype}, expected U8")
     rows, cols = shape
     if packed:
         if sorted(blocks) != list(range(n_parts)) or block_shape != [rows, cols // 8]:
@@ -615,17 +732,29 @@ def load_ple_table(model_path: str, qwen4_args, *, pin: bool = True,
 
 
 def nvfp4_expert_spec(model_path: str, config) -> Nvfp4ExpertSourceSpec:
-    """The per-expert NVFP4 layout under the checkpoint's dialect names (ModelOpt or llm-compressor)."""
+    """The per-expert NVFP4 layout under the checkpoint's dialect names (ModelOpt or llm-compressor).
+
+    FP4-Local exports the block scales as CSF slab pairs; scan the weight map and decode them
+    through the shared decoder so the banks still see plain e4m3 matrices.
+    """
     quant = get_quant_config()
     stored = quant.stored_tensors(QuantKind.NVFP4)
     kind_map = {stored[role].name: kind for role, kind in _BANK_KINDS.items()}
+    weight_map = safetensors_weight_map(download_hf_weight(model_path))
+    csf = any(name.endswith(".nvfp4_csf_fixed") for name in weight_map)
+    kinds = list(kind_map)
+    if csf:
+        kinds += list(_CSF_KINDS)
+        kind_map = {**kind_map, **{kind: kind for kind in _CSF_KINDS}}
     return Nvfp4ExpertSourceSpec(
-        key_pattern=re.compile(_EXPERT_KEY_RE.format(kinds="|".join(map(re.escape, kind_map)))),
+        key_pattern=re.compile(_EXPERT_KEY_RE.format(kinds="|".join(map(re.escape, kinds)))),
         proj_to_role={"gate_proj": "gate", "up_proj": "up", "down_proj": "down"},
         layer_to_bank=lambda layer, config: layer,  # every layer is MoE
-        desc=f"Qwen3.8-Flash-Next NVFP4 experts ({quant.dialect})",
+        desc=f"Qwen3.8-Flash-Next NVFP4 experts ({quant.dialect}{' CSF' if csf else ''})",
         kind_map=kind_map,
         global_reciprocal=stored["weight_global"].reciprocal,
+        scale_pair=_CSF_KINDS if csf else None,
+        scale_decoder=decode_csf_scales if csf else None,
     )
 
 

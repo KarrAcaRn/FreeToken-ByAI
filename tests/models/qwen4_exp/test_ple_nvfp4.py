@@ -89,6 +89,9 @@ def test_fp8_table_still_loads(tmp_path):
     assert table.bank.tensor.dtype is torch.float8_e4m3fn
     assert table.scale_bank is None
     assert torch.equal(table.bank.tensor.view(torch.uint8), rows.view(torch.uint8))
+    # the shard dtype decides the encoding; a config that promises nvfp4 over fp8 rows is refused
+    with pytest.raises(ValueError, match="ple_embedding_dtype nvfp4"):
+        load_ple_table(str(tmp_path), SimpleNamespace(**vars(_args()), ple_embedding_dtype="nvfp4"), pin=False)
 
 
 @requires_cuda
@@ -108,7 +111,7 @@ def test_pinned_nvfp4_gather_matches_reference():
     sbank = HostBank((ROWS, GROUPS), torch.float8_e4m3fn)
     sbank.tensor.copy_(scales)
     sbank.pin()
-    table = PinnedUVATable(bank.tensor, scale, scales=sbank.tensor)
+    table = PinnedUVATable(bank.tensor, scale, scale_tensor=sbank.tensor)
 
     lut = torch.tensor(_E2M1, dtype=torch.float32)
     vals = torch.empty(ROWS, HEAD_DIM, dtype=torch.float32)
