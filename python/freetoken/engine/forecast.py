@@ -78,7 +78,7 @@ def tensor_category(name: str) -> str:
     if "mtp" in parts or any("nextn" in p for p in parts):
         return "mtp"
     keys = set(parts)
-    if keys & {"embed_tokens", "lm_head", "wte", "embed"}:
+    if keys & {"embed_tokens", "embed_tokens_per_layer", "lm_head", "wte", "embed"}:
         return "embeddings"
     if "experts" in keys:
         return "experts"
@@ -163,13 +163,13 @@ class WeightReport:
     notes: list[str] = field(default_factory=list)
     # device bytes of the vision tower under --mm-encoder-weights host (None: nothing streams)
     vision_gpu_if_host: int | None = None
-    # input-embedding bytes --embed-device cpu moves to pinned host RAM (0: tied or none)
+    # input-embedding bytes --embed-weights host keeps in pinned host RAM (0: tied or none)
     embed_host_movable: int = 0
     # per decoder layer, the bytes per category --dense-offload-layers would move (empty: MoE or
     # no plain decoder stack)
     dense_layers: list[Counter[str]] = field(default_factory=list)
-    # device bytes at the worst moment of the load: every tensor lands on the GPU before
-    # --embed-device cpu, host-streamed encoders or finalize copies change it (0: not computed)
+    # device bytes at the worst moment of the load: every tensor but the --embed-weights host tables
+    # lands on the GPU before host-streamed encoders or finalize copies change it (0: not computed)
     load_peak: int = 0
     # vision bytes on the GPU right after load_state_dict (what --text-model-only takes off load_peak)
     vision_loaded: int = 0
@@ -208,10 +208,18 @@ def resident_weights(model, config) -> WeightReport:
     report = WeightReport(gpu=dict(gpu))
     from freetoken.layers.embedding import host_movable_embeddings
 
-    report.embed_host_movable = sum(_nbytes(op.weight) for _, op in host_movable_embeddings(model))
-    if report.embed_host_movable and getattr(config, "embed_device", "gpu") == "cpu":
-        report.gpu["embeddings"] -= report.embed_host_movable
-        report.host["embeddings"] = report.embed_host_movable
+    movable = {id(op.weight) for op in host_movable_embeddings(model)}
+    moved: Counter[str] = Counter()
+    for name, t in state.items():
+        if id(t) in movable:
+            moved[tensor_category(name)] += _nbytes(t)
+    report.embed_host_movable = sum(moved.values())
+    # the tables are pinned as they are read, so they never reach the device, not even during the load
+    embed_host = report.embed_host_movable if getattr(config, "embed_weights", "gpu") == "host" else 0
+    if embed_host:
+        for category, n in moved.items():
+            report.gpu[category] -= n
+        report.host.update(moved)
     if df11:
         report.notes.append(f"DF11-compressed weights are estimated at {_DF11_BITS_PER_WEIGHT} bits per weight; "
                             "their real size depends on the data.")
@@ -230,10 +238,9 @@ def resident_weights(model, config) -> WeightReport:
                 report.gpu["vision"] = report.vision_gpu_if_host
                 report.host["vision"] = streamed
                 streamed_out, staging_in = streamed, staging
-    # The engine loads every tensor onto the GPU first; host-streamed encoder blocks leave before
-    # finalize_quant, which then holds one layer's source and its finalized copy at once. The
-    # embedding table --embed-device cpu moves out only after all of that.
-    loaded = sum(gpu.values()) + rope
+    # The engine loads every other tensor onto the GPU first; host-streamed encoder blocks leave before
+    # finalize_quant, which then holds one layer's source and its finalized copy at once.
+    loaded = sum(gpu.values()) + rope - embed_host
     report.load_peak = max(loaded, loaded - streamed_out + staging_in + _largest_finalize_copy(model))
     return report
 
@@ -654,11 +661,11 @@ def _tips_encoders(inp: ForecastInputs) -> Iterable[Change]:
                          note="vision blocks stream from pinned host RAM")
 
 
-def _tips_embed_device(inp: ForecastInputs) -> Iterable[Change]:
+def _tips_embed_weights(inp: ForecastInputs) -> Iterable[Change]:
     movable = inp.weights.embed_host_movable
-    if movable and getattr(inp.config, "embed_device", "gpu") == "gpu":
-        yield Change("--embed-device cpu", "embed_device", 1, _set(embed_device="cpu"), weight_delta=-movable,
-                     note="input-embedding rows read from pinned host RAM; decode speed unchanged")
+    if movable and getattr(inp.config, "embed_weights", "gpu") == "gpu":
+        yield Change("--embed-weights host", "embed_weights", 1, _set(embed_weights="host"), weight_delta=-movable,
+                     peak_delta=-movable, note="input-embedding rows read from pinned host RAM; decode speed unchanged")
 
 
 _PCIE_BYTES_PER_S = 24e9  # PCIe 4.0 x16 host-to-device, measured on an RTX 4090
@@ -766,7 +773,7 @@ def _tips_kv_dtype(inp: ForecastInputs) -> Iterable[Change]:
 # reaches the forecast through the pool family's kv_cost, so nothing else changes.
 TIP_CANDIDATES: list[Callable[[ForecastInputs], Iterable[Change]]] = [
     _tips_concurrency, _tips_memory_ratio, _tips_prefill, _tips_cache_type, _tips_encoders, _tips_moe,
-    _tips_kv_dtype, _tips_embed_device, _tips_dflash_block, _tips_dense_offload,
+    _tips_kv_dtype, _tips_embed_weights, _tips_dflash_block, _tips_dense_offload,
 ]
 
 

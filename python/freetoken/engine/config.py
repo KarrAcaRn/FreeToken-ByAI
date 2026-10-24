@@ -37,9 +37,8 @@ class EngineConfig:
     # The default is "disk" where setup.py builds its row store (Linux), "pinned" elsewhere.
     # NVFP4 (packed e2m1) tables fall back to "pinned"; the disk row store streams native rows only.
     ple_backend: str = "disk" if sys.platform == "linux" else "pinned"
-    # --embed-device: "cpu" keeps the untied input-embedding table in pinned host RAM, read by
-    # the GPU in place over PCIe (a few rows per decode step); its VRAM goes to the KV pool.
-    embed_device: str = "gpu"
+    # old --embed-device flag ("cpu" = embed_weights "host"); __post_init__ folds it in
+    embed_device: str | None = field(default=None, repr=False)
     # --dense-offload-layers: decoder layers (dense models) whose weights live in pinned host RAM
     # and stream in over PCIe every forward; "0" off, "N" a count, "auto" the fewest layers that
     # let the KV pool reach kv_reserve_tokens. Trades decode speed for context.
@@ -173,6 +172,13 @@ class EngineConfig:
             raise ValueError(f"moe_locked_fetch {self.moe_locked_fetch} rounds to 0 in Q16; pass 0 to keep locked layers CPU-only")
         if self.moe_locked_max_fetch < 1:
             raise ValueError(f"moe_locked_max_fetch must be at least 1, got {self.moe_locked_max_fetch}")
+        if self.embed_device is not None:
+            if self.embed_device not in ("gpu", "cpu"):
+                raise ValueError(f"embed_device must be gpu or cpu, got {self.embed_device!r}")
+            if self.embed_device == "cpu":
+                logger.warning("--embed-device cpu is deprecated; use --embed-weights host")
+                object.__setattr__(self, "embed_weights", "host")
+            object.__setattr__(self, "embed_device", None)
         if self.moe_backend is None:
             return
         if self.moe_strategy != "auto":

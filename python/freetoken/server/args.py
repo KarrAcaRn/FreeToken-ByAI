@@ -914,13 +914,9 @@ def parse_args(
 
     parser.add_argument(
         "--embed-device",
-        default=ServerArgs.embed_device,
+        default=None,
         choices=["gpu", "cpu"],
-        help=(
-            "Where the input-embedding table lives. 'cpu' keeps it in pinned host RAM and the "
-            "GPU reads the looked-up rows over PCIe, freeing its VRAM for the KV cache (e.g. "
-            "2.4 GiB on a 248k-vocab, 5120-wide model). Tables tied to the LM head stay on the GPU."
-        ),
+        help="Deprecated: 'cpu' is --embed-weights host, 'gpu' the default.",
     )
 
     parser.add_argument(

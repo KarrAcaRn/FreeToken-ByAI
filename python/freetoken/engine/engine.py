@@ -21,6 +21,7 @@ from freetoken.env import ENV
 from freetoken.gpu_select import gpu_identity
 from freetoken.checkpoint.ftw import ftw_tensor_names, is_ftw_checkpoint
 from freetoken.layers import OffloadMoELayer, VocabParallelEmbedding, iter_moe_layers, iter_ops, set_rope_device
+from freetoken.layers.embedding import host_movable_embeddings
 from freetoken.layers.quantization import LayerKind, QuantBackend, QuantKind, finalize_quant, set_quant_backend
 from freetoken.moe.offload_cache import iter_offload_moe_layers
 from freetoken.mm.config import ENCODER_SECTIONS
@@ -567,21 +568,19 @@ def _host_embedding_keys(model, config: EngineConfig) -> frozenset[str]:
     """State-dict keys of the tables --embed-weights host keeps in pinned host RAM."""
     if config.embed_weights != "host":
         return frozenset()
-    if config.embed_device == "cpu":
-        raise ValueError("--embed-weights host and --embed-device cpu both move the embedding table; pick one")
+    tables = {id(op.weight) for op in host_movable_embeddings(model)}
+    keys = frozenset(key for key, t in model.state_dict().items() if id(t) in tables)
+    if keys:
+        return keys
     if config.model_config.tie_word_embeddings:
         raise ValueError(
             "--embed-weights host: this model's embedding table is tied to its LM head, which reads the whole table "
             "every step; serve it with --embed-weights gpu"
         )
-    tables = {id(op.weight) for op in iter_ops(model) if type(op) is VocabParallelEmbedding}
-    keys = frozenset(key for key, t in model.state_dict().items() if id(t) in tables)
-    if not keys:
-        raise ValueError(
-            f"--embed-weights host: {type(model).__name__} has no plain embedding table to move (a DF11 table stays "
-            "on the GPU); serve it with --embed-weights gpu"
-        )
-    return keys
+    raise ValueError(
+        f"--embed-weights host: {type(model).__name__} has no plain embedding table to move (a DF11 table stays "
+        "on the GPU); serve it with --embed-weights gpu"
+    )
 
 
 def _pinned_copy(key: str, t: torch.Tensor) -> torch.Tensor:
@@ -763,9 +762,6 @@ class Engine:
 
             run_preflight(config, self.model, init_free_memory)
         self._load_weights(config)
-        # before the residency snapshot, so the freed table goes to the KV pool
-        if config.embed_device == "cpu":
-            self._move_embeddings_to_host()
         dense_host_bytes = 0
         # The draft loads with the weights, before the residency snapshot, so the KV budget sees it.
         self.dflash_worker = None
@@ -813,10 +809,10 @@ class Engine:
         # load failure is not masked, before the MoE offload cache so the bank residency
         # planning sees the pin quota the table already spent.
         host_embeds = [op for op in iter_ops(self.model) if type(op) is VocabParallelEmbedding and not op.weight.is_cuda]
-        # covers both --embed-weights host and --embed-device cpu tables
-        self._host_tables_bytes = dense_host_bytes + sum(op.weight.nbytes for op in host_embeds)
-        if host_embeds and config.embed_weights == "host":
-            logger.info_rank0(f"Embedding tables in pinned host RAM (--embed-weights host): {mem_GB(self._host_tables_bytes)}")
+        embed_host_bytes = sum(op.weight.nbytes for op in host_embeds)
+        self._host_tables_bytes = dense_host_bytes + embed_host_bytes
+        if host_embeds:
+            logger.info_rank0(f"Embedding tables in pinned host RAM (--embed-weights host): {mem_GB(embed_host_bytes)}")
         if hasattr(self.model, "load_host_tables"):
             with _weight_load_context():
                 self._host_tables_bytes += int(self.model.load_host_tables(config) or 0)
