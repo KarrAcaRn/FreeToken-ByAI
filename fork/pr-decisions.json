@@ -81,7 +81,8 @@
       "KarrAcaRn <claude2@owayo.com>"
     ],
     "upstream_followup": "our own upstream PR",
-    "summary": "Input embedding table in pinned host RAM: +75k tokens of context on the 27B (our own PR to upstream)"
+    "summary": "Input embedding table in pinned host RAM: +75k tokens of context on the 27B (our own PR to upstream)",
+    "upstream": "closed"
   },
   "589": {
     "number": 589,
@@ -3261,7 +3262,8 @@
     "summary": "Flash-Next FP4-Local checkpoint (CSF scales, packed PLE); partly covered by #759, checkpoint not here",
     "reviewed_at": "2026-10-20",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "closed"
   },
   "688": {
     "number": 688,
@@ -3399,7 +3401,8 @@
     "summary": "ROCm wait-sync for disk PLE/Engram rows (HIP signal memory, pre-replay worker); no AMD GPU here",
     "reviewed_at": "2026-10-21",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "774": {
     "number": 774,
@@ -3520,7 +3523,8 @@
     "summary": "Image input for glm5-next GGUFs via a glm5v mmproj; GLM-5.3-Flash GGUF not available here",
     "reviewed_at": "2026-10-23",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "806": {
     "number": 806,
@@ -3535,7 +3539,8 @@
     "summary": "Competes with our own #596 (--embed-device cpu); kept ours, follow whichever upstream merges",
     "reviewed_at": "2026-10-23",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "805": {
     "number": 805,
@@ -3553,7 +3558,8 @@
       "3f2c262",
       "9d92131"
     ],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "797": {
     "number": 797,
@@ -3587,7 +3593,8 @@
       "ca74b5b",
       "6b72bab"
     ],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "790": {
     "number": 790,
@@ -3666,5 +3673,88 @@
     "reviewed_at": "2026-10-23",
     "commits": [],
     "gpu_untested": false
+  },
+  "821": {
+    "number": 821,
+    "title": "fix(e2e): respect cuda device visibility in aime memory probe",
+    "head_sha": "1d2ae567f72a",
+    "decision": "superseded",
+    "authors": [
+      "Jesús Jódar Piernas <jesusjodarpiernas@gmail.com>"
+    ],
+    "reason": "Extracted from #797 at the reviewer's request; next adopted #797 (711a86ef) with the same tests/e2e/test_aime.py change - `git diff pr/821 next -- tests/e2e/test_aime.py` is empty.",
+    "summary": "AIME memory probe via mem_get_info in a child process; identical change already on next through #797",
+    "reviewed_at": "2026-10-24",
+    "commits": [],
+    "gpu_untested": false,
+    "superseded_by": 797
+  },
+  "820": {
+    "number": 820,
+    "title": "feat(models): add nvidia/Qwen3.8-Flash-Next-FP4-Local checkpoint support",
+    "head_sha": "2d980071bb56",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "chrisqian <chrisqian@example.com>"
+    ],
+    "reason": "CSF slab expert scales, out-of-band expert input_scale reads, FP4 PLE table and MXFP8/W4A16 vision scales for the QAD FP4-Local export. Conflicts with next's own NVFP4 PLE support (0cac9b2f, d8903110): kept next's dtype-driven table loader (the PR's config-driven one would refuse RadixArk's float8 ple_embedding_dtype) and its e2m1 kernel with the PR's argument names; the PR's CSF path combined with next's TP slicing and disk-tier skip pieces; fixed drop_page_cache being ignored. GPU: RadixArk Flash-Next NVFP4 unchanged (decode 30.7 vs 30.0 tok/s on next, same metric). FP4-Local itself does not fit 85 GiB RAM as shipped (61 GiB experts + 26.9 GiB pinned FP4 PLE table; the disk PLE backend reads native rows only) - GPU run pending a packed-row disk PLE backend.",
+    "summary": "Loads nvidia/Qwen3.8-Flash-Next-FP4-Local (CSF expert scales, FP4 PLE); RadixArk unaffected, FP4-Local GPU run pending",
+    "reviewed_at": "2026-10-24",
+    "commits": [
+      "4541da34",
+      "f90d1a8e"
+    ],
+    "gpu_untested": true,
+    "fixup": "Merged onto next's NVFP4 PLE loader/kernel; disk tier refused early for CSF experts (f90d1a8e); drop_page_cache passed through"
+  },
+  "819": {
+    "number": 819,
+    "title": "fix(models): find index-only checkpoints that keep shards in a subdirectory",
+    "head_sha": "ad95ce2d2f4b",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "chrisqian <chrisqian@example.com>"
+    ],
+    "reason": "iter_weight_files falls back to the root index's weight_map when no top-level shard exists (FP4-Local keeps all 375k tensors under tensors/). Its RAM-probe test mocked builtins.open('/proc/meminfo'), but next reads it through the cgroup-aware freetoken.memory; fixup stubs that instead. CPU tests 73 passed; full suite green.",
+    "summary": "Index-only checkpoints with shards in a subdirectory (e.g. FP4-Local tensors/) now load",
+    "reviewed_at": "2026-10-24",
+    "commits": [
+      "f76ded8a",
+      "048b4dfa"
+    ],
+    "gpu_untested": true,
+    "fixup": "Test stubs freetoken.memory.available_host_memory (next's cgroup-aware probe) instead of open()"
+  },
+  "816": {
+    "number": 816,
+    "title": "feat(gguf): serve image input on deepseek4 ggufs from a deepseek4v mmproj",
+    "head_sha": "3304d95b0910",
+    "decision": "deferred",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "DeepSeek-V4 Vision-Exp GGUF + mmproj cannot run here (far beyond 24 GB VRAM / 85 GiB RAM); not judged on its merits yet. Its gemma4/qwen3_vl/glm5_next gguf touches only thread a model_path kwarg through gguf_mm_config.",
+    "summary": "Image input for DeepSeek-V4 GGUFs via a deepseek4v mmproj; model too big to run here",
+    "reviewed_at": "2026-10-24",
+    "commits": [],
+    "gpu_untested": true,
+    "revisit": "after-queue"
+  },
+  "814": {
+    "number": 814,
+    "title": "feat(server): report per-request prefill and decode timings in api responses",
+    "head_sha": "a54a215831e0",
+    "decision": "adopted-with-fixups",
+    "authors": [
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>"
+    ],
+    "reason": "llama.cpp-shaped `timings` on chat, completions and responses (stream finish + include_usage chunks). Conflicted with our adopted #504 (--enable-metrics-report): both now share #504's ack-loop GenTimer (new prompt_ms/predicted_ms fields), timings unconditional with the PR's semantics, metrics unchanged behind the flag. Live on Qwen3-0.6B with and without the flag: cache_n+prompt_n = prompt_tokens, predicted_n = completion_tokens, prefix-cache hit 1308/1, no timings on /v1/messages; tests/server 1079 passed.",
+    "summary": "Adds llama.cpp-style per-request `timings` (prefill/decode rates, cache hits) to chat, completions and responses",
+    "reviewed_at": "2026-10-24",
+    "commits": [
+      "a4a62a55"
+    ],
+    "gpu_untested": false,
+    "fixup": "Spans taken from #504's shared GenTimer instead of a second capture; metrics and timings coexist"
   }
 }
