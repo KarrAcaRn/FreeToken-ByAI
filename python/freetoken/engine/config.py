@@ -43,6 +43,8 @@ class EngineConfig:
     # and stream in over PCIe every forward; "0" off, "N" a count, "auto" the fewest layers that
     # let the KV pool reach kv_reserve_tokens. Trades decode speed for context.
     dense_offload_layers: str = "0"
+    # --embed-weights: "gpu" (default) keeps the input embedding tables in VRAM; "host" keeps the untied ones in pinned host RAM, read zero-copy by the lookup.
+    embed_weights: str = "gpu"
     # DeepSeek-V4.1 Decoder SWA Bounded Replay: "bounded" (default) runs the decoder layers on each
     # prompt's last window; "exact" runs them on every token.
     swa_decoder_replay: str = "bounded"
