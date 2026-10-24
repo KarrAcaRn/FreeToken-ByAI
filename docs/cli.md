@@ -170,6 +170,15 @@ context); a larger value verifies the decoding requests' blocks together in one 
 | `--enable-metrics-report` | off | Serve a per-request `metrics` object next to usage ([below](#per-request-performance-metrics)) |
 | `--anthropic-inline-system` | auto | Placement of late Anthropic system instructions: `auto`, `preserve`, or `fold` |
 
+Every chat completion, completion and Responses response also carries a llama.cpp-shaped
+`timings` object next to `usage` (`prompt_n`, `prompt_ms`, `prompt_per_second`,
+`predicted_n`, `predicted_ms`, `predicted_per_second`, `cache_n`), so frontends like
+llama-swap and Open Web UI show per-request prefill/decode rates and the prefix-cache hit.
+Its spans match the cumulative timing on `GET /v1/stats`: prefill runs from request start
+to the first output token, decode between output tokens. `cache_n` follows llama.cpp
+(always present, `prompt_n` counts only the evaluated tokens) and is not gated by
+`--enable-cache-report`, which controls only `usage.prompt_tokens_details.cached_tokens`.
+
 ### Per-request performance metrics
 
 `--enable-metrics-report` adds a `metrics` object to each response on `/v1/chat/completions`,
@@ -224,6 +233,9 @@ Streaming responses carry `metrics` on the same final message as usage, so the r
 for usage too: `stream_options: {"include_usage": true}` on `/v1/chat/completions`. On
 `/v1/messages` it rides `message_delta`; on `/v1/responses`, `response.completed`.
 `/v1/completions` does not serve `metrics`: it does not go through the shared generation core.
+
+`timings.prompt_ms` above runs to the first output token, so it equals `metrics.ttft_ms` and
+includes queueing; `metrics.prefill_time_ms` is the scheduler's own span without it.
 
 ### Image input
 
