@@ -1,4 +1,4 @@
-"""Disk-backed PLE table (--ple-backend disk): the C++ store hashes n-gram windows and batch-reads rows from the checkpoint's fp8 or bf16 shard tensors into pinned staging; the captured ``lookup`` is a fixed-shape H2D copy + dequant.
+"""Disk-backed PLE table (--ple-backend disk): the C++ store hashes n-gram windows and batch-reads rows from the checkpoint's fp8, bf16 or NVFP4 shard tensors into pinned staging; the captured ``lookup`` is a fixed-shape H2D copy + dequant.
 
 Hash windows are pure functions of ``req.input_ids`` + ``device_len`` (prefix hits, restores and COW forks need no bookkeeping); the decode input token lives device-side under overlap scheduling and is read back here.
 """
@@ -19,7 +19,7 @@ from freetoken.core import Batch
 from freetoken.kernel.pinned import alloc_pinned_tensor
 from freetoken.utils import init_logger
 
-from .weight import ple_folder_is_packed, scan_ple_table
+from .weight import scan_ple_table
 
 _IO_URING_ENV = "FREETOKEN_PLE_IO_URING"
 _SYNC_ENV = "FREETOKEN_PLE_SYNC"  # auto | wait | gate
@@ -48,6 +48,11 @@ class PleRowSource:
     ggml_type: int | None = None
     row_values: int | None = None
     row_dtype: torch.dtype = torch.float8_e4m3fn
+    # NVFP4: e2m1 code rows (two per byte) whose per-16 e4m3 block scales sit in a second, parallel
+    # extent set; ``scale`` is then the global weight_scale_2
+    scale_extent_file: list[int] | None = None
+    scale_extent_base: list[int] | None = None
+    scale_row_bytes: int = 0
 
     @property
     def total_rows(self) -> int:
@@ -55,14 +60,17 @@ class PleRowSource:
 
 
 def source_from_safetensors(folder: str, qwen4_args) -> PleRowSource:
-    """Map the checkpoint's ``ngram_embedding.shard_<i>`` tensors in place: one extent per shard, no copy."""
-    if ple_folder_is_packed(folder):
-        raise NotImplementedError(
-            f"the disk PLE backend reads native rows only; {folder} holds a packed e2m1 "
-            "(NVFP4) table -- use the pinned backend (--ple-backend pinned)"
-        )
+    """Map the checkpoint's ``ngram_embedding.shard_<i>`` tensors in place: one extent per shard (plus one per block-scale shard when NVFP4), no copy."""
     shards = scan_ple_table(folder, qwen4_args)
-    paths = list(dict.fromkeys(path for path, _ in shards.parts))
+    blocks = shards.block_parts or []
+    paths = list(dict.fromkeys(path for path, _ in (*shards.parts, *blocks)))
+    packed = {}
+    if shards.packed:
+        packed = dict(
+            scale_extent_file=[paths.index(path) for path, _ in blocks],
+            scale_extent_base=[offset for _, offset in blocks],
+            scale_row_bytes=shards.cols // 8,
+        )
     return PleRowSource(
         paths,
         [paths.index(path) for path, _ in shards.parts],
@@ -71,8 +79,9 @@ def source_from_safetensors(folder: str, qwen4_args) -> PleRowSource:
         shards.row_bytes,
         shards.row_bytes,
         float(shards.scale),
-        row_values=shards.cols,
+        row_values=shards.cols * 2 if shards.packed else shards.cols,
         row_dtype=shards.dtype,
+        **packed,
     )
 
 
@@ -118,8 +127,12 @@ class DiskRowTable:
         self.head_dim = source.row_values or source.row_bytes
         self._ggml_type = source.ggml_type
         self._row_bytes = source.row_bytes
-        # float rows (fp8, or F32 / F16 / BF16 in a GGUF) are only cast; quantized ggml rows go through ggml
-        self._row_dtype = source.row_dtype if source.ggml_type is None else float_dtype(source.ggml_type)
+        self._nvfp4 = source.scale_row_bytes > 0
+        # float rows (fp8, or F32 / F16 / BF16 in a GGUF) are only cast; quantized ggml and NVFP4 rows are decoded
+        if self._nvfp4:
+            self._row_dtype = None
+        else:
+            self._row_dtype = source.row_dtype if source.ggml_type is None else float_dtype(source.ggml_type)
         self.dtype = dtype
         self.heads = int(hash_constants["num_ngram_heads"])
         self.scale = source.scale
@@ -144,20 +157,32 @@ class DiskRowTable:
             head_offsets=offsets,
             eos_token_id=self.eos_token_id,
             use_io_uring=os.getenv(_IO_URING_ENV, "1") != "0",
+            aux_extent_file=list(source.scale_extent_file or []),
+            aux_extent_base=list(source.scale_extent_base or []),
+            aux_row_bytes=source.scale_row_bytes,
+            aux_row_stride=source.scale_row_bytes,
         )
         self._device = torch.device("cuda", torch.cuda.current_device())
         self._token_bytes = self.heads * self._row_bytes
+        # NVFP4 block scales: a second region behind each buffer's code rows, at ``capacity * _token_bytes``
+        self._scale_token_bytes = self.heads * source.scale_row_bytes
+        self._graph_cap = max_graph_rows
+        self._eager_cap = max_extend_tokens
+        graph_bytes = max_graph_rows * (self._token_bytes + self._scale_token_bytes)
         # allocated up front: pinned alloc inside stream capture is illegal; one replay consumes it at a time
-        self._graph_pinned = alloc_pinned_tensor(max_graph_rows * self._token_bytes, dtype=torch.uint8)
+        self._graph_pinned = alloc_pinned_tensor(graph_bytes, dtype=torch.uint8)
         self._graph_pinned.zero_()  # padded decode lanes read whatever sits here
         # outlives any one graph: a cache rebuild recaptures against the same pointer
-        self._graph_dev = torch.empty(
-            max_graph_rows * self._token_bytes, dtype=torch.uint8, device=self._device
+        self._graph_dev = torch.empty(graph_bytes, dtype=torch.uint8, device=self._device)
+        # the decode kernel addresses staged rows by slot: row i of the batch is slot i
+        self._slots = (
+            torch.arange(max(max_graph_rows, max_extend_tokens) * self.heads, dtype=torch.int64, device=self._device)
+            if self._nvfp4 else None
         )
         # completes once the last graph launch that read ``_graph_pinned`` has run (recorded by the
         # dispatch context after the step's fill: a record inside the capture would not be observable)
         self._graph_consumed = torch.cuda.Event()
-        eager_bytes = max_extend_tokens * self._token_bytes
+        eager_bytes = max_extend_tokens * (self._token_bytes + self._scale_token_bytes)
         # the overlap scheduler fills batch k+1 while batch k's lookup copy may still be queued: the
         # eager staging alternates two pinned buffers, and each is rewritten only once the H2D copy
         # that last read it has run (``_eager_read[i]``, recorded right after that copy)
@@ -231,14 +256,18 @@ class DiskRowTable:
         """Stage per-request token runs (two context ids, then the new tokens) in batch order."""
         if graph:
             self._graph_consumed.synchronize()
-            pinned = self._graph_pinned
+            pinned, cap = self._graph_pinned, self._graph_cap
         else:
             self._eager_slot ^= 1
             self._eager_read[self._eager_slot].synchronize()
-            pinned = self._eager_pinned[self._eager_slot]
+            pinned, cap = self._eager_pinned[self._eager_slot], self._eager_cap
+        scales = pinned.data_ptr() + cap * self._token_bytes if self._nvfp4 else 0
         offset = 0
         for run in runs:
-            self._store.stage(run.data_ptr(), run.numel() - 2, pinned.data_ptr() + offset * self._token_bytes)
+            self._store.stage(
+                run.data_ptr(), run.numel() - 2, pinned.data_ptr() + offset * self._token_bytes,
+                scales + offset * self._scale_token_bytes if scales else 0,
+            )
             offset += run.numel() - 2
         self._store.flush(self._flag.data_ptr() if graph and self._wait_sync else 0)
 
@@ -326,13 +355,31 @@ class DiskRowTable:
             from freetoken.kernel.row_store import wait_reset
 
             wait_reset(stream, self._flag)
-        pinned, dev = (
-            (self._graph_pinned, self._graph_dev) if capturing else (self._eager_pinned[self._eager_slot], self._eager_dev)
+        pinned, dev, cap = (
+            (self._graph_pinned, self._graph_dev, self._graph_cap)
+            if capturing else (self._eager_pinned[self._eager_slot], self._eager_dev, self._eager_cap)
         )
         nbytes = rows * self._token_bytes
         dev[:nbytes].copy_(pinned[:nbytes], non_blocking=True)
+        if self._nvfp4:
+            at = cap * self._token_bytes
+            sbytes = rows * self._scale_token_bytes
+            dev[at : at + sbytes].copy_(pinned[at : at + sbytes], non_blocking=True)
         if not capturing:
             self._eager_read[self._eager_slot].record(stream)
+        if self._nvfp4:
+            from freetoken.kernel.triton.ple import ple_gather_rows
+
+            # the pinned backend's kernel over the staged slots: same decode, bit for bit
+            n = rows * self.heads
+            values = torch.empty((n, self.head_dim), dtype=self.dtype, device=self._device)
+            ple_gather_rows(dev.data_ptr(), n, self.head_dim, self._slots[:n], values, self.scale,
+                            scale_ptr=dev.data_ptr() + at)
+            values = values.view(*row_ids.shape[:-1], -1)
+            if out is None:
+                return values
+            out.copy_(values)
+            return out
         if self._row_dtype is not None:
             # copy=True: rows already in self.dtype must not alias the staging buffer the next fill reuses
             values = dev[:nbytes].view(self._row_dtype).to(self.dtype, copy=True)

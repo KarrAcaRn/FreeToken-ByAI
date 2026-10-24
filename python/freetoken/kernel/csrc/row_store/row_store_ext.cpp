@@ -1,7 +1,8 @@
 // Disk-backed row store: fixed-width rows read straight from checkpoint shard tensors
 // through an extent table (row i of extent e at extent_base[e] + i * row_stride).
 // Engine-thread only, no locks. Duplicate rows in one fill dedup into ONE batched read
-// round; no RAM cache and no per-sequence state.
+// round; no RAM cache and no per-sequence state. An optional second plane (NVFP4 block
+// scales) reads row i of a parallel extent table alongside every row, into its own staging.
 //
 //   RowStore  -- hash-agnostic: stage_rows(row_ids) + flush(); callers supply row ids.
 //   PleStore  -- RowStore plus the Qwen3.8-Flash-Next PLE n-gram hash: stage(tokens).
@@ -652,30 +653,28 @@ class RowStore {
     const TableFile *file;
     int64_t base;
   };
+  struct Plane {
+    int64_t row_bytes, row_stride;
+    std::vector<Extent> extents;
+  };
 
  public:
+  // aux_*: the optional second plane; empty aux_extent_file = none.
   RowStore(std::vector<std::string> paths, std::vector<int64_t> extent_file,
            std::vector<int64_t> extent_base, int64_t rows_per_extent, int64_t row_bytes,
-           int64_t row_stride, bool use_io_uring)
-      : row_bytes_(row_bytes), row_stride_(row_stride), rows_per_extent_(rows_per_extent) {
-    if (row_bytes_ <= 0 || row_stride_ < row_bytes_ || rows_per_extent_ <= 0)
-      throw std::runtime_error("row store geometry: want row_bytes > 0, row_stride >= row_bytes, rows_per_extent > 0");
-    if (row_bytes_ > kPage)
-      throw std::runtime_error("row_bytes " + std::to_string(row_bytes_) +
-                               " exceeds a page; bounce slots assume one-page rows");
-    if (extent_file.size() != extent_base.size() || extent_file.empty())
-      throw std::runtime_error("row store geometry: extent_file and extent_base must be equal-length and non-empty");
+           int64_t row_stride, bool use_io_uring, std::vector<int64_t> aux_extent_file = {},
+           std::vector<int64_t> aux_extent_base = {}, int64_t aux_row_bytes = 0,
+           int64_t aux_row_stride = 0)
+      : rows_per_extent_(rows_per_extent) {
+    if (rows_per_extent_ <= 0)
+      throw std::runtime_error("row store geometry: want rows_per_extent > 0");
     for (const std::string &p : paths)
       files_.push_back(std::make_unique<TableFile>(p));
-    const int64_t extent_bytes = (rows_per_extent_ - 1) * row_stride_ + row_bytes_;
-    for (size_t e = 0; e < extent_file.size(); e++) {
-      const size_t fi = (size_t)extent_file.at(e);
-      const int64_t base = extent_base.at(e);
-      if (base + extent_bytes > files_.at(fi)->size())
-        throw std::runtime_error(paths[fi] + ": extent needs " +
-                                 std::to_string(base + extent_bytes) + " bytes, file has " +
-                                 std::to_string(files_[fi]->size()));
-      extents_.push_back(Extent{files_[fi].get(), base});
+    planes_.push_back(make_plane(paths, extent_file, extent_base, row_bytes, row_stride));
+    if (!aux_extent_file.empty()) {
+      if (aux_extent_file.size() != extent_file.size())
+        throw std::runtime_error("row store geometry: the aux plane needs one extent per row extent");
+      planes_.push_back(make_plane(paths, aux_extent_file, aux_extent_base, aux_row_bytes, aux_row_stride));
     }
     reader_ = make_batch_reader(use_io_uring);
     bounce_ = page_aligned_alloc((size_t)reader_->capacity() * kSpanMax);
@@ -694,17 +693,21 @@ class RowStore {
   RowStore(const RowStore &) = delete;
   RowStore &operator=(const RowStore &) = delete;
 
-  int64_t row_bytes() const { return row_bytes_; }
-  int64_t total_rows() const { return (int64_t)extents_.size() * rows_per_extent_; }
+  int64_t row_bytes() const { return planes_[0].row_bytes; }
+  int64_t aux_row_bytes() const { return planes_.size() > 1 ? planes_[1].row_bytes : 0; }
+  int64_t total_rows() const { return (int64_t)planes_[0].extents.size() * rows_per_extent_; }
 
   // Queue n row ids (int64 at rows_addr); row i lands at staging_addr + i * dst_stride
   // (dst_stride = 0 packs rows back to back). Out-of-range ids throw before any I/O is
-  // issued. No I/O until flush().
-  void stage_rows(uintptr_t rows_addr, int64_t n, uintptr_t staging_addr, int64_t dst_stride) {
+  // issued. No I/O until flush(). With an aux plane, row i's aux bytes land packed at
+  // aux_staging_addr + i * aux_row_bytes.
+  void stage_rows(uintptr_t rows_addr, int64_t n, uintptr_t staging_addr, int64_t dst_stride,
+                  uintptr_t aux_staging_addr) {
     const int64_t *rows = reinterpret_cast<const int64_t *>(rows_addr);
     uint8_t *staging = reinterpret_cast<uint8_t *>(staging_addr);
-    if (dst_stride == 0) dst_stride = row_bytes_;
-    if (dst_stride < row_bytes_)
+    uint8_t *aux = check_aux(aux_staging_addr);
+    if (dst_stride == 0) dst_stride = row_bytes();
+    if (dst_stride < row_bytes())
       throw std::runtime_error("stage_rows: dst_stride below row_bytes would overlap rows");
     const int64_t total = total_rows();
     for (int64_t i = 0; i < n; i++) {
@@ -712,7 +715,9 @@ class RowStore {
         throw std::out_of_range("stage_rows: row id " + std::to_string(rows[i]) + " outside [0, " +
                                 std::to_string(total) + ")");
     }
-    for (int64_t i = 0; i < n; i++) request_row(rows[i], staging + (size_t)i * (size_t)dst_stride);
+    for (int64_t i = 0; i < n; i++)
+      request_row(rows[i], staging + (size_t)i * (size_t)dst_stride,
+                  aux ? aux + (size_t)i * (size_t)aux_row_bytes() : nullptr);
   }
 
   // One batched disk round for everything staged; signals even when nothing was.
@@ -737,24 +742,18 @@ class RowStore {
   }
 
  protected:
-  // Queue dst on this fill's pending batch; duplicate rows fan out from one read.
-  void request_row(int64_t row_id, uint8_t *dst) {
-    auto pit = pending_index_.find(row_id);
-    if (pit != pending_index_.end()) {
-      pending_[pit->second].dsts.push_back(dst);
-      return;
-    }
-    const Extent &ext = extents_[row_id / rows_per_extent_];
-    const int64_t off = ext.base + (row_id % rows_per_extent_) * row_stride_;
-    Pending p{ext.file, off, row_bytes_, 0, {dst}};
-    if (ext.file->direct_io()) {
-      // full aligned span even past EOF; truncating would break direct-I/O alignment
-      p.read_off = off & ~(kPage - 1);
-      p.row_off = off - p.read_off;
-      p.read_len = ((off + row_bytes_ + kPage - 1) & ~(kPage - 1)) - p.read_off;
-    }
-    pending_index_.emplace(row_id, pending_.size());
-    pending_.push_back(std::move(p));
+  // Null when there is no aux plane; a caller staging without one into an aux store would leave it unread.
+  uint8_t *check_aux(uintptr_t aux_staging_addr) const {
+    if ((planes_.size() > 1) != (aux_staging_addr != 0))
+      throw std::runtime_error(planes_.size() > 1 ? "this row store has an aux plane: pass aux_staging_addr"
+                                                  : "aux_staging_addr given but the row store has no aux plane");
+    return reinterpret_cast<uint8_t *>(aux_staging_addr);
+  }
+
+  // Queue dst (and aux_dst on the aux plane) on this fill's pending batch; duplicate rows fan out from one read.
+  void request_row(int64_t row_id, uint8_t *dst, uint8_t *aux_dst) {
+    request_plane_row(0, row_id, dst);
+    if (aux_dst != nullptr) request_plane_row(1, row_id, aux_dst);
   }
 
  private:
@@ -763,8 +762,53 @@ class RowStore {
     int64_t read_off;
     int64_t read_len;
     int64_t row_off;  // row payload start inside the read buffer
+    int64_t row_bytes;
     std::vector<uint8_t *> dsts;
   };
+
+  Plane make_plane(const std::vector<std::string> &paths, const std::vector<int64_t> &extent_file,
+                   const std::vector<int64_t> &extent_base, int64_t row_bytes, int64_t row_stride) {
+    if (row_bytes <= 0 || row_stride < row_bytes)
+      throw std::runtime_error("row store geometry: want row_bytes > 0, row_stride >= row_bytes, rows_per_extent > 0");
+    if (row_bytes > kPage)
+      throw std::runtime_error("row_bytes " + std::to_string(row_bytes) +
+                               " exceeds a page; bounce slots assume one-page rows");
+    if (extent_file.size() != extent_base.size() || extent_file.empty())
+      throw std::runtime_error("row store geometry: extent_file and extent_base must be equal-length and non-empty");
+    Plane plane{row_bytes, row_stride, {}};
+    const int64_t extent_bytes = (rows_per_extent_ - 1) * row_stride + row_bytes;
+    for (size_t e = 0; e < extent_file.size(); e++) {
+      const size_t fi = (size_t)extent_file.at(e);
+      const int64_t base = extent_base.at(e);
+      if (base + extent_bytes > files_.at(fi)->size())
+        throw std::runtime_error(paths[fi] + ": extent needs " +
+                                 std::to_string(base + extent_bytes) + " bytes, file has " +
+                                 std::to_string(files_[fi]->size()));
+      plane.extents.push_back(Extent{files_[fi].get(), base});
+    }
+    return plane;
+  }
+
+  void request_plane_row(size_t plane_idx, int64_t row_id, uint8_t *dst) {
+    const int64_t key = row_id * (int64_t)planes_.size() + (int64_t)plane_idx;
+    auto pit = pending_index_.find(key);
+    if (pit != pending_index_.end()) {
+      pending_[pit->second].dsts.push_back(dst);
+      return;
+    }
+    const Plane &plane = planes_[plane_idx];
+    const Extent &ext = plane.extents[row_id / rows_per_extent_];
+    const int64_t off = ext.base + (row_id % rows_per_extent_) * plane.row_stride;
+    Pending p{ext.file, off, plane.row_bytes, 0, plane.row_bytes, {dst}};
+    if (ext.file->direct_io()) {
+      // full aligned span even past EOF; truncating would break direct-I/O alignment
+      p.read_off = off & ~(kPage - 1);
+      p.row_off = off - p.read_off;
+      p.read_len = ((off + plane.row_bytes + kPage - 1) & ~(kPage - 1)) - p.read_off;
+    }
+    pending_index_.emplace(key, pending_.size());
+    pending_.push_back(std::move(p));
+  }
 
   // Read every pending row in reader-capacity batches and fan out the copies.
   void flush_pending() {
@@ -785,7 +829,7 @@ class RowStore {
       const Pending &p = pending_[next];
       tag_pending[tag] = next++;
       reader_->submit(tag, p.file->native_fd(), bounce_ + (size_t)tag * kSpanMax, p.read_len,
-                      p.row_off + row_bytes_, p.read_off);
+                      p.row_off + p.row_bytes, p.read_off);
     };
     try {
       for (unsigned tag = 0; tag < std::min((size_t)cap, total); tag++) submit_slot(tag);
@@ -793,7 +837,7 @@ class RowStore {
         const unsigned tag = reader_->wait_one();
         const Pending &p = pending_[tag_pending[tag]];
         const uint8_t *row = bounce_ + (size_t)tag * kSpanMax + p.row_off;
-        for (uint8_t *dst : p.dsts) std::memcpy(dst, row, row_bytes_);
+        for (uint8_t *dst : p.dsts) std::memcpy(dst, row, p.row_bytes);
         p.file->discard_cache(p.read_off, p.read_len);
         if (next < total) submit_slot(tag);
       }
@@ -803,9 +847,9 @@ class RowStore {
     }
   }
 
-  int64_t row_bytes_, row_stride_, rows_per_extent_;
+  int64_t rows_per_extent_;
   std::vector<std::unique_ptr<TableFile>> files_;
-  std::vector<Extent> extents_;
+  std::vector<Plane> planes_;
   std::unique_ptr<BatchReader> reader_;
   uint8_t *bounce_ = nullptr;
 
@@ -820,9 +864,12 @@ class PleStore final : public RowStore {
   PleStore(std::vector<std::string> paths, std::vector<int64_t> extent_file,
            std::vector<int64_t> extent_base, int64_t rows_per_extent, int64_t row_bytes,
            int64_t row_stride, std::vector<int64_t> multipliers, std::vector<int64_t> head_vocab_sizes,
-           std::vector<int64_t> head_offsets, int64_t eos_token_id, bool use_io_uring)
+           std::vector<int64_t> head_offsets, int64_t eos_token_id, bool use_io_uring,
+           std::vector<int64_t> aux_extent_file, std::vector<int64_t> aux_extent_base,
+           int64_t aux_row_bytes, int64_t aux_row_stride)
       : RowStore(std::move(paths), std::move(extent_file), std::move(extent_base), rows_per_extent,
-                 row_bytes, row_stride, use_io_uring),
+                 row_bytes, row_stride, use_io_uring, std::move(aux_extent_file),
+                 std::move(aux_extent_base), aux_row_bytes, aux_row_stride),
         mult_(std::move(multipliers)),
         sizes_(std::move(head_vocab_sizes)),
         offsets_(std::move(head_offsets)),
@@ -843,15 +890,20 @@ class PleStore final : public RowStore {
   }
 
   // Hash and queue one run: tokens_addr holds n+2 ids, the leading two are context. No I/O until flush().
-  void stage(uintptr_t tokens_addr, int64_t n, uintptr_t staging_addr) {
+  // Aux rows land in the same (token, head) order at aux_staging_addr.
+  void stage(uintptr_t tokens_addr, int64_t n, uintptr_t staging_addr, uintptr_t aux_staging_addr) {
     const int64_t *tokens = reinterpret_cast<const int64_t *>(tokens_addr);
     uint8_t *staging = reinterpret_cast<uint8_t *>(staging_addr);
+    uint8_t *aux = check_aux(aux_staging_addr);
     const size_t heads = sizes_.size();
     std::vector<int64_t> rows(heads);
     for (int64_t i = 0; i < n; i++) {
       hash_rows(tokens + i, rows.data());
-      for (size_t h = 0; h < heads; h++)
-        request_row(rows[h], staging + ((size_t)i * heads + h) * (size_t)row_bytes());
+      for (size_t h = 0; h < heads; h++) {
+        const size_t slot = (size_t)i * heads + h;
+        request_row(rows[h], staging + slot * (size_t)row_bytes(),
+                    aux ? aux + slot * (size_t)aux_row_bytes() : nullptr);
+      }
     }
   }
 
@@ -865,29 +917,37 @@ class PleStore final : public RowStore {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<RowStore>(m, "RowStore")
       .def(py::init<std::vector<std::string>, std::vector<int64_t>, std::vector<int64_t>,
-                    int64_t, int64_t, int64_t, bool>(),
+                    int64_t, int64_t, int64_t, bool, std::vector<int64_t>, std::vector<int64_t>,
+                    int64_t, int64_t>(),
            py::arg("paths"), py::arg("extent_file"), py::arg("extent_base"),
            py::arg("rows_per_extent"), py::arg("row_bytes"), py::arg("row_stride"),
-           py::arg("use_io_uring") = true)
+           py::arg("use_io_uring") = true, py::arg("aux_extent_file") = std::vector<int64_t>{},
+           py::arg("aux_extent_base") = std::vector<int64_t>{}, py::arg("aux_row_bytes") = 0,
+           py::arg("aux_row_stride") = 0)
       .def("stage_rows", &RowStore::stage_rows, py::arg("rows_addr"), py::arg("n"),
-           py::arg("staging_addr"), py::arg("dst_stride") = 0,
+           py::arg("staging_addr"), py::arg("dst_stride") = 0, py::arg("aux_staging_addr") = 0,
            py::call_guard<py::gil_scoped_release>())
       .def("flush", &RowStore::flush, py::arg("signal_addr") = 0,
            py::call_guard<py::gil_scoped_release>())
       .def("io_backend", &RowStore::io_backend)
       .def_property_readonly("row_bytes", &RowStore::row_bytes)
+      .def_property_readonly("aux_row_bytes", &RowStore::aux_row_bytes)
       .def_property_readonly("total_rows", &RowStore::total_rows);
   py::class_<PleStore, RowStore>(m, "PleStore")
       .def(py::init<std::vector<std::string>, std::vector<int64_t>, std::vector<int64_t>,
                     int64_t, int64_t, int64_t, std::vector<int64_t>,
-                    std::vector<int64_t>, std::vector<int64_t>, int64_t, bool>(),
+                    std::vector<int64_t>, std::vector<int64_t>, int64_t, bool, std::vector<int64_t>,
+                    std::vector<int64_t>, int64_t, int64_t>(),
            py::arg("paths"), py::arg("extent_file"), py::arg("extent_base"),
            py::arg("rows_per_extent"), py::arg("row_bytes"), py::arg("row_stride"),
            py::arg("multipliers"),
            py::arg("head_vocab_sizes"), py::arg("head_offsets"), py::arg("eos_token_id"),
-           py::arg("use_io_uring") = true)
+           py::arg("use_io_uring") = true, py::arg("aux_extent_file") = std::vector<int64_t>{},
+           py::arg("aux_extent_base") = std::vector<int64_t>{}, py::arg("aux_row_bytes") = 0,
+           py::arg("aux_row_stride") = 0)
       .def("stage", &PleStore::stage, py::arg("tokens_addr"), py::arg("n"),
-           py::arg("staging_addr"), py::call_guard<py::gil_scoped_release>());
+           py::arg("staging_addr"), py::arg("aux_staging_addr") = 0,
+           py::call_guard<py::gil_scoped_release>());
   m.def("memop_write", &memop_write, py::arg("stream"), py::arg("addr"), py::arg("value"));
   m.def("memop_wait_geq", &memop_wait_geq, py::arg("stream"), py::arg("addr"), py::arg("value"));
   m.def("memop_wait_reset", &memop_wait_reset, py::arg("stream"), py::arg("flag_addr"));

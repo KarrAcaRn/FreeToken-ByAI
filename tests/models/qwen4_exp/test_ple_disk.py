@@ -1,4 +1,4 @@
-"""Disk PLE backend, module level: store byte fidelity, on-disk layouts and errors, table vs GPU oracle, and the CUDA-graph sync protocol."""
+"""Disk PLE backend, module level: store byte fidelity, on-disk layouts and errors, table vs GPU oracle (pinned gather for NVFP4), and the CUDA-graph sync protocol."""
 
 from __future__ import annotations
 
@@ -72,11 +72,11 @@ def _fill(store, args, window, tokens):
     return staging
 
 
-def _write_checkpoint(tmp_path, table, n_shards):
-    """uint8 ``table`` bytes are stored as a scaled fp8 table, any other dtype as an unscaled table of that dtype."""
+def _write_checkpoint(tmp_path, table, n_shards, block_scales=None):
+    """uint8 ``table`` bytes are stored as a scaled fp8 table, or with ``block_scales`` as packed NVFP4 codes; any other dtype as an unscaled table of that dtype."""
     from safetensors.torch import save_file
 
-    fp8 = table.dtype is torch.uint8
+    fp8 = table.dtype is torch.uint8 and block_scales is None
     per = table.shape[0] // n_shards
     tensors = {
         f"{_KEY_PREFIX}.shard_{i}.weight": table[i * per : (i + 1) * per].view(torch.float8_e4m3fn) if fp8 else table[i * per : (i + 1) * per].clone()
@@ -84,28 +84,15 @@ def _write_checkpoint(tmp_path, table, n_shards):
     }
     if fp8:
         tensors[f"{_KEY_PREFIX}.weight_scale"] = torch.tensor(0.03125, dtype=torch.bfloat16)
+    if block_scales is not None:
+        for i in range(n_shards):
+            tensors[f"{_KEY_PREFIX}.shard_{i}.weight_scale"] = block_scales[i * per : (i + 1) * per].clone()
+        tensors[f"{_KEY_PREFIX}.weight_scale_2"] = torch.tensor(0.03125, dtype=torch.bfloat16)
     save_file(tensors, str(tmp_path / "model.safetensors"))
 
 
-def test_source_rejects_a_packed_nvfp4_table(tmp_path):
-    """The disk store reads native FP8 rows; the packed e2m1 table needs the pinned backend."""
-    from safetensors.torch import save_file
-
-    save_file(
-        {
-            f"{_KEY_PREFIX}.shard_0.weight": torch.zeros(4, 8, dtype=torch.uint8),
-            f"{_KEY_PREFIX}.shard_0.weight_scale": torch.zeros(4, 1, dtype=torch.float8_e4m3fn),
-            f"{_KEY_PREFIX}.weight_scale_2": torch.tensor([1.0]),
-        },
-        str(tmp_path / "model-plefp4-00000.safetensors"),
-    )
-    from freetoken.models.qwen4_exp.ple_disk import source_from_safetensors
-
-    with pytest.raises(NotImplementedError, match="packed e2m1"):
-        source_from_safetensors(str(tmp_path), None)
-
-
 def _make_table(tmp_path, dtype=torch.float8_e4m3fn):
+    """``dtype`` "nvfp4" writes a packed table; its oracle is the pinned backend's gather."""
     from freetoken.models.qwen4_exp.ple_disk import DiskRowTable, source_from_safetensors
     from freetoken.models.qwen4_exp.weight import ple_table_rows
 
@@ -113,11 +100,15 @@ def _make_table(tmp_path, dtype=torch.float8_e4m3fn):
     multipliers, sizes, offsets = hash_constants(args)
     gen = torch.Generator().manual_seed(9)
     rows = ple_table_rows(args)
-    if dtype is torch.float8_e4m3fn:
+    block_scales = None
+    if dtype == "nvfp4":
+        table = torch.randint(0, 256, (rows, args.ngram_head_dim // 2), dtype=torch.uint8, generator=gen)
+        block_scales = (torch.randn(rows, args.ngram_head_dim // 16, generator=gen) * 0.3).to(torch.float8_e4m3fn)
+    elif dtype is torch.float8_e4m3fn:
         table = torch.randint(0, 256, (rows, args.ngram_head_dim), dtype=torch.uint8, generator=gen)
     else:
         table = torch.randn((rows, args.ngram_head_dim), generator=gen).to(dtype)
-    _write_checkpoint(tmp_path, table, args.split_ngram_parts)
+    _write_checkpoint(tmp_path, table, args.split_ngram_parts, block_scales)
     constants = {
         "num_ngram_heads": args.num_ngram_heads,
         "layer_multipliers": multipliers.tolist(),
@@ -126,6 +117,14 @@ def _make_table(tmp_path, dtype=torch.float8_e4m3fn):
         "eos_token_id": EOS,
     }
     disk = DiskRowTable(source_from_safetensors(str(tmp_path), args), constants)
+    if dtype == "nvfp4":
+        from freetoken.kernel.pinned import alloc_pinned_tensor
+        from freetoken.models.qwen4_exp.ple import PinnedUVATable
+
+        bank = alloc_pinned_tensor(table.numel(), dtype=torch.uint8).view(table.shape).copy_(table)
+        sbank = alloc_pinned_tensor(block_scales.numel(), dtype=torch.uint8).view(block_scales.shape)
+        sbank.copy_(block_scales.view(torch.uint8))
+        return disk, PinnedUVATable(bank, 0.03125, scale_tensor=sbank.view(torch.float8_e4m3fn)), args
     oracle = GpuResidentTable(table.cuda().view(torch.float8_e4m3fn), scale=0.03125) if dtype is torch.float8_e4m3fn else GpuResidentTable(table.cuda())
     return disk, oracle, args
 
@@ -254,7 +253,7 @@ def test_layouts_readers_and_errors(tmp_path):
 
 
 @requires_cuda
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16], ids=["fp8", "bf16"])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16, "nvfp4"], ids=["fp8", "bf16", "nvfp4"])
 def test_disk_table_matches_oracle(tmp_path, dtype):
     disk, oracle, args = _make_table(tmp_path, dtype)
     emb = _embedding()
@@ -306,8 +305,9 @@ def test_eager_fill_does_not_overwrite_an_in_flight_lookup(tmp_path):
 
 
 @requires_cuda
-def test_graph_sync_protocol(tmp_path, monkeypatch):
-    disk, oracle, args = _make_table(tmp_path)
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, "nvfp4"], ids=["fp8", "nvfp4"])
+def test_graph_sync_protocol(tmp_path, monkeypatch, dtype):
+    disk, oracle, args = _make_table(tmp_path, dtype)
     emb = _embedding()
     rows = 1
     row_ids = torch.zeros((rows, args.num_ngram_heads), dtype=torch.int64, device="cuda")
