@@ -3699,15 +3699,16 @@
     "authors": [
       "chrisqian <chrisqian@example.com>"
     ],
-    "reason": "CSF slab expert scales, out-of-band expert input_scale reads, FP4 PLE table and MXFP8/W4A16 vision scales for the QAD FP4-Local export. Conflicts with next's own NVFP4 PLE support (0cac9b2f, d8903110): kept next's dtype-driven table loader (the PR's config-driven one would refuse RadixArk's float8 ple_embedding_dtype) and its e2m1 kernel with the PR's argument names; the PR's CSF path combined with next's TP slicing and disk-tier skip pieces; fixed drop_page_cache being ignored. GPU: RadixArk Flash-Next NVFP4 unchanged (decode 30.7 vs 30.0 tok/s on next, same metric). FP4-Local itself does not fit 85 GiB RAM as shipped (61 GiB experts + 26.9 GiB pinned FP4 PLE table; the disk PLE backend reads native rows only) - GPU run pending a packed-row disk PLE backend.",
-    "summary": "Loads nvidia/Qwen3.8-Flash-Next-FP4-Local (CSF expert scales, FP4 PLE); RadixArk unaffected, FP4-Local GPU run pending",
+    "reason": "CSF slab expert scales, out-of-band expert input_scale reads, FP4 PLE table and MXFP8/W4A16 vision scales for the QAD FP4-Local export. Conflicts with next's own NVFP4 PLE support (0cac9b2f, d8903110): kept next's dtype-driven table loader (the PR's config-driven one would refuse RadixArk's float8 ple_embedding_dtype) and its e2m1 kernel with the PR's argument names; the PR's CSF path combined with next's TP slicing and disk-tier skip pieces; fixed drop_page_cache being ignored. GPU: RadixArk Flash-Next NVFP4 unchanged (decode 30.7 vs 30.0 tok/s on next, same metric). FP4-Local did not fit 85 GiB RAM as shipped (61 GiB experts + 26.9 GiB pinned FP4 PLE); next's disk PLE backend now reads packed nvfp4 rows (83645bc9). FP4-Local on the 4090 (disk PLE, all experts in RAM, fp8 KV): 99.7k KV tokens, decode 36.3 tok/s (RadixArk 30.7 / 77.9k), 6k-token prefill 1295 tok/s (RadixArk 1355), RAM peak ~72 GB, merge_intervals correct.",
+    "summary": "Loads nvidia/Qwen3.8-Flash-Next-FP4-Local (CSF scales, FP4 PLE); runs here at 36 tok/s with our disk PLE for packed rows",
     "reviewed_at": "2026-10-24",
     "commits": [
       "4541da34",
-      "f90d1a8e"
+      "f90d1a8e",
+      "83645bc9"
     ],
-    "gpu_untested": true,
-    "fixup": "Merged onto next's NVFP4 PLE loader/kernel; disk tier refused early for CSF experts (f90d1a8e); drop_page_cache passed through"
+    "gpu_untested": false,
+    "fixup": "Merged onto next's NVFP4 PLE loader/kernel; disk tier refused early for CSF experts (f90d1a8e); drop_page_cache passed through; packed nvfp4 rows in the disk PLE backend (83645bc9)"
   },
   "819": {
     "number": 819,
