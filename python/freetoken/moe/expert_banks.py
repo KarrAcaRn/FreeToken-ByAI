@@ -296,6 +296,11 @@ def _method_expert_banks(model_path, model_config, method, device, dummy, parall
                 f"--moe-disk-tier on: {model_config.architectures[0]} exposes no "
                 "nvfp4_expert_spec, so the tier cannot locate expert rows in the "
                 "checkpoint (the loader would release them and never refetch)")
+        if getattr(source_spec, "scale_pair", None) is not None:
+            # the fetch copies raw byte ranges; CSF slab scales need a decode first
+            raise NotImplementedError(
+                f"--moe-disk-tier on: {source_spec.desc} stores its block scales as CSF slab pairs, "
+                "which the disk tier cannot fetch")
         # Build the index HERE, next to the release below: a family that reaches
         # the release without an index would serve zeroed experts. Resolving the
         # spec through the family hook keeps the index and the loader reading

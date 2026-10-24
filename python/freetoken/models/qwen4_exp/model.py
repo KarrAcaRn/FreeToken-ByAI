@@ -26,7 +26,7 @@ from freetoken.core import get_global_ctx
 from freetoken.kernel.triton.moe_shared_gate import shared_gate_mul_add
 from freetoken.layers import BaseOP, OPList, ParallelLMHead, VocabParallelEmbedding
 from freetoken.models.blocks import BaseLLMModel
-from freetoken.utils import nvtx_annotate
+from freetoken.utils import init_logger, nvtx_annotate
 
 from .attention import Qwen4ExpAttention
 from .hc import GatedResidual, GroupedPlusOneRMSNorm
@@ -38,6 +38,16 @@ from freetoken.models.qwen3_vl.vision import Qwen3VLVisionModel, QwenVLVisionMix
 if TYPE_CHECKING:
     from freetoken.core import Batch
     from freetoken.models.config import ModelConfig
+
+logger = init_logger(__name__)
+
+
+def _resolve_ple_backend(requested: str, ple_embedding_dtype: str) -> str:
+    """"disk" streams raw F8 rows through the C++ row store, which cannot unpack packed e2m1 rows; the NVFP4 PLE tables are always pinned."""
+    if requested == "disk" and ple_embedding_dtype == "nvfp4":
+        logger.warning_rank0("PLE table is packed e2m1 (nvfp4); the disk backend streams native rows only -- falling back to the pinned backend")
+        return "pinned"
+    return requested
 
 
 def build_linear_mixer(config: ModelConfig, layer_id: int, prefix: str) -> BaseOP:
@@ -194,12 +204,17 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
                 emb.attach_table(ZeroTable(offsets[-1] + sizes[-1], args.ngram_head_dim))
             return 0
 
-        if engine_config.ple_backend == "disk":
-            from .ple_disk import DiskRowTable, resolve_row_source
+        backend = engine_config.ple_backend
+        if backend == "disk":
             from .weight import ple_table_is_packed
 
+            # the shard dtype decides: NVFP4 exports without ple_embedding_dtype in their config pack the table too
+            encoding = getattr(self._config.qwen4_args, "ple_embedding_dtype", "fp8")
             if ple_table_is_packed(engine_config.model_path):
-                raise NotImplementedError("NVFP4 PLE rows are only served by the pinned backend")
+                encoding = "nvfp4"
+            backend = _resolve_ple_backend(backend, encoding)
+        if backend == "disk":
+            from .ple_disk import DiskRowTable, resolve_row_source
 
             # one WAIT node per captured graph: the flag protocol supports a single consume
             assert len(ple_layers) == 1, "disk PLE backend expects exactly one PLE layer"
@@ -229,15 +244,12 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         from .weight import load_ple_table
 
         table = load_ple_table(engine_config.model_path, self._config.qwen4_args)
-        self._ple_table = table  # owns the pinned HostBank; keep it alive
-        packed = table.bank.tensor.dtype is torch.uint8
-        uva = PinnedUVATable(
-            table.bank.tensor,
-            float(table.weight_scale),
-            scales=table.scale_bank.tensor if packed else None,
-        )
+        self._ple_table = table  # owns the pinned HostBank(s); keep it alive
+        kwargs = {"scale_tensor": table.scale_bank.tensor} if table.scale_bank is not None else {}
         for ple in ple_layers:
-            ple.ple_embedding.attach_table(uva)
+            ple.ple_embedding.attach_table(
+                PinnedUVATable(table.bank.tensor, float(table.weight_scale), **kwargs)
+            )
         return table.bank.nbytes + (table.scale_bank.nbytes if table.scale_bank is not None else 0)
 
     def forward(self) -> torch.Tensor:
