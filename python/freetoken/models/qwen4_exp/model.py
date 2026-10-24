@@ -228,10 +228,6 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
 
         if engine_config.ple_backend == "disk":
             from .ple_disk import DiskRowTable, resolve_row_source
-            from .weight import ple_table_is_packed
-
-            if ple_table_is_packed(engine_config.model_path):
-                raise NotImplementedError("NVFP4 PLE rows are only served by the pinned backend")
 
             # one WAIT node per captured graph: the flag protocol supports a single consume
             assert len(ple_layers) == 1, "disk PLE backend expects exactly one PLE layer"
@@ -261,15 +257,12 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         from .weight import load_ple_table
 
         table = load_ple_table(engine_config.model_path, self._config.qwen4_args)
-        self._ple_table = table  # owns the pinned HostBank; keep it alive
-        packed = table.bank.tensor.dtype is torch.uint8
-        uva = PinnedUVATable(
-            table.bank.tensor,
-            float(table.weight_scale),
-            scales=table.scale_bank.tensor if packed else None,
-        )
+        self._ple_table = table  # owns the pinned HostBank(s); keep it alive
+        kwargs = {"scale_tensor": table.scale_bank.tensor} if table.scale_bank is not None else {}
         for ple in ple_layers:
-            ple.ple_embedding.attach_table(uva)
+            ple.ple_embedding.attach_table(
+                PinnedUVATable(table.bank.tensor, float(table.weight_scale), **kwargs)
+            )
         return table.bank.nbytes + (table.scale_bank.nbytes if table.scale_bank is not None else 0)
 
     def forward(

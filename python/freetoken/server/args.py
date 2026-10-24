@@ -927,13 +927,9 @@ def parse_args(
 
     parser.add_argument(
         "--embed-device",
-        default=ServerArgs.embed_device,
+        default=None,
         choices=["gpu", "cpu"],
-        help=(
-            "Where the input-embedding table lives. 'cpu' keeps it in pinned host RAM and the "
-            "GPU reads the looked-up rows over PCIe, freeing its VRAM for the KV cache (e.g. "
-            "2.4 GiB on a 248k-vocab, 5120-wide model). Tables tied to the LM head stay on the GPU."
-        ),
+        help="Deprecated: 'cpu' is --embed-weights host, 'gpu' the default.",
     )
 
     parser.add_argument(
@@ -945,6 +941,17 @@ def parse_args(
             "over PCIe on every forward, freeing their VRAM for the KV cache. 'auto' offloads the "
             "fewest layers that give the KV pool --kv-reserve-tokens. Costs decode speed (one "
             "layer's weights over PCIe per token each); long prefills hide most of the copies."
+        ),
+    )
+
+    parser.add_argument(
+        "--embed-weights",
+        default=ServerArgs.embed_weights,
+        choices=["gpu", "host"],
+        help=(
+            "Where the input token embedding table lives. 'gpu' (default) keeps it in VRAM; 'host' keeps it in "
+            "pinned host RAM and each lookup reads its rows over PCIe, so its VRAM goes to the expert cache and KV. "
+            "Not for a table tied to the LM head."
         ),
     )
 

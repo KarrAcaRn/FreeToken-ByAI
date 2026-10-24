@@ -163,31 +163,27 @@ def test_tight_headroom_suggests_a_lower_memory_ratio(tiny_qwen3):
 
 
 
-def test_embed_device_cpu_moves_the_table_to_host(tiny_qwen3):
+@pytest.mark.parametrize("flag", [["--embed-weights", "host"], ["--embed-device", "cpu"]])
+def test_embed_weights_host_keeps_the_table_off_the_gpu(tiny_qwen3, flag):
     table = 256 * 128 * 2  # untied bf16 embed_tokens; lm_head stays
     base = _analyze(tiny_qwen3, "--memory-ratio", "0.8", free_gib=32)
     assert base.forecast.verdict == "fits"
     assert base.inputs.weights.embed_host_movable == table
-    tip = next(t for t in base.tips if t.flags == ["--embed-device cpu"])
+    tip = next(t for t in base.tips if t.flags == ["--embed-weights host"])
     assert tip.forecast.weights_bytes == base.forecast.weights_bytes - table
     assert tip.forecast.kv_tokens > base.forecast.kv_tokens
-    r = _analyze(tiny_qwen3, "--memory-ratio", "0.8", "--embed-device", "cpu", free_gib=32)
-    assert r.inputs.weights.host["embeddings"] == table
-    assert r.forecast.weights_bytes == tip.forecast.weights_bytes
-    assert not any(t.flags == ["--embed-device cpu"] for t in r.tips)
-
-
-def test_load_peak_holds_tables_that_move_to_host_only_after_the_load(tiny_qwen3):
-    table = 256 * 128 * 2
-    r = _analyze(tiny_qwen3, "--memory-ratio", "0.8", "--embed-device", "cpu", free_gib=32)
+    r = _analyze(tiny_qwen3, "--memory-ratio", "0.8", *flag, free_gib=32)
     w = r.inputs.weights
-    # every tensor is on the device right after load_state_dict; --embed-device cpu moves its table later
-    assert w.load_peak == w.gpu_total + table
-    # a card that holds the settled weights but not the load peak is refused before loading
-    fc = fc_mod.forecast_memory(r.config, w.gpu_total, w.load_peak - 1, load_peak=w.load_peak)
-    assert fc.verdict == "does not fit"
-    assert "loading peaks" in fc.reasons[0]
-    assert fc_mod.forecast_memory(r.config, w.gpu_total, w.load_peak + GiB, load_peak=w.load_peak).verdict != "does not fit"
+    assert w.host["embeddings"] == table
+    assert r.forecast.weights_bytes == tip.forecast.weights_bytes
+    # pinned as it is read: the table never reaches the device, not even at the load peak
+    peak = base.inputs.weights.load_peak
+    assert w.load_peak == peak - table
+    refused = fc_mod.forecast_memory(base.config, base.inputs.weights.gpu_total, peak - 1, load_peak=peak)
+    assert refused.verdict == "does not fit" and "loading peaks" in refused.reasons[0]
+    host = fc_mod.forecast_memory(r.config, w.gpu_total, peak - 1, load_peak=w.load_peak)
+    assert not any("loading peaks" in reason for reason in host.reasons)
+    assert not any(t.flags == ["--embed-weights host"] for t in r.tips)
 
 
 def test_tied_embedding_is_not_offered(tmp_path):
@@ -195,7 +191,7 @@ def test_tied_embedding_is_not_offered(tmp_path):
                             {k: v for k, v in tiny_qwen3_tensors().items() if k != "lm_head.weight"})
     r = _analyze(tied, "--memory-ratio", "0.8", free_gib=32)
     assert r.inputs.weights.embed_host_movable == 0
-    assert not any(t.flags == ["--embed-device cpu"] for t in r.tips)
+    assert not any(t.flags == ["--embed-weights host"] for t in r.tips)
 
 
 # ---------------------------------------------------------------------------------------------

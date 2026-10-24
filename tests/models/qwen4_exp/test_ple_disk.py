@@ -1,7 +1,12 @@
-"""Disk PLE backend, module level: store byte fidelity, on-disk layouts and errors, table vs GPU oracle, and the CUDA-graph sync protocol."""
+"""Disk PLE backend, module level: store byte fidelity, on-disk layouts and errors, table vs GPU oracle (pinned gather for NVFP4), and the CUDA-graph sync protocol."""
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -67,11 +72,11 @@ def _fill(store, args, window, tokens):
     return staging
 
 
-def _write_checkpoint(tmp_path, table, n_shards):
-    """uint8 ``table`` bytes are stored as a scaled fp8 table, any other dtype as an unscaled table of that dtype."""
+def _write_checkpoint(tmp_path, table, n_shards, block_scales=None):
+    """uint8 ``table`` bytes are stored as a scaled fp8 table, or with ``block_scales`` as packed NVFP4 codes; any other dtype as an unscaled table of that dtype."""
     from safetensors.torch import save_file
 
-    fp8 = table.dtype is torch.uint8
+    fp8 = table.dtype is torch.uint8 and block_scales is None
     per = table.shape[0] // n_shards
     tensors = {
         f"{_KEY_PREFIX}.shard_{i}.weight": table[i * per : (i + 1) * per].view(torch.float8_e4m3fn) if fp8 else table[i * per : (i + 1) * per].clone()
@@ -79,10 +84,15 @@ def _write_checkpoint(tmp_path, table, n_shards):
     }
     if fp8:
         tensors[f"{_KEY_PREFIX}.weight_scale"] = torch.tensor(0.03125, dtype=torch.bfloat16)
+    if block_scales is not None:
+        for i in range(n_shards):
+            tensors[f"{_KEY_PREFIX}.shard_{i}.weight_scale"] = block_scales[i * per : (i + 1) * per].clone()
+        tensors[f"{_KEY_PREFIX}.weight_scale_2"] = torch.tensor(0.03125, dtype=torch.bfloat16)
     save_file(tensors, str(tmp_path / "model.safetensors"))
 
 
 def _make_table(tmp_path, dtype=torch.float8_e4m3fn):
+    """``dtype`` "nvfp4" writes a packed table; its oracle is the pinned backend's gather."""
     from freetoken.models.qwen4_exp.ple_disk import DiskRowTable, source_from_safetensors
     from freetoken.models.qwen4_exp.weight import ple_table_rows
 
@@ -90,11 +100,15 @@ def _make_table(tmp_path, dtype=torch.float8_e4m3fn):
     multipliers, sizes, offsets = hash_constants(args)
     gen = torch.Generator().manual_seed(9)
     rows = ple_table_rows(args)
-    if dtype is torch.float8_e4m3fn:
+    block_scales = None
+    if dtype == "nvfp4":
+        table = torch.randint(0, 256, (rows, args.ngram_head_dim // 2), dtype=torch.uint8, generator=gen)
+        block_scales = (torch.randn(rows, args.ngram_head_dim // 16, generator=gen) * 0.3).to(torch.float8_e4m3fn)
+    elif dtype is torch.float8_e4m3fn:
         table = torch.randint(0, 256, (rows, args.ngram_head_dim), dtype=torch.uint8, generator=gen)
     else:
         table = torch.randn((rows, args.ngram_head_dim), generator=gen).to(dtype)
-    _write_checkpoint(tmp_path, table, args.split_ngram_parts)
+    _write_checkpoint(tmp_path, table, args.split_ngram_parts, block_scales)
     constants = {
         "num_ngram_heads": args.num_ngram_heads,
         "layer_multipliers": multipliers.tolist(),
@@ -103,6 +117,14 @@ def _make_table(tmp_path, dtype=torch.float8_e4m3fn):
         "eos_token_id": EOS,
     }
     disk = DiskRowTable(source_from_safetensors(str(tmp_path), args), constants)
+    if dtype == "nvfp4":
+        from freetoken.kernel.pinned import alloc_pinned_tensor
+        from freetoken.models.qwen4_exp.ple import PinnedUVATable
+
+        bank = alloc_pinned_tensor(table.numel(), dtype=torch.uint8).view(table.shape).copy_(table)
+        sbank = alloc_pinned_tensor(block_scales.numel(), dtype=torch.uint8).view(block_scales.shape)
+        sbank.copy_(block_scales.view(torch.uint8))
+        return disk, PinnedUVATable(bank, 0.03125, scale_tensor=sbank.view(torch.float8_e4m3fn)), args
     oracle = GpuResidentTable(table.cuda().view(torch.float8_e4m3fn), scale=0.03125) if dtype is torch.float8_e4m3fn else GpuResidentTable(table.cuda())
     return disk, oracle, args
 
@@ -231,7 +253,7 @@ def test_layouts_readers_and_errors(tmp_path):
 
 
 @requires_cuda
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16], ids=["fp8", "bf16"])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16, "nvfp4"], ids=["fp8", "bf16", "nvfp4"])
 def test_disk_table_matches_oracle(tmp_path, dtype):
     disk, oracle, args = _make_table(tmp_path, dtype)
     emb = _embedding()
@@ -283,8 +305,9 @@ def test_eager_fill_does_not_overwrite_an_in_flight_lookup(tmp_path):
 
 
 @requires_cuda
-def test_graph_sync_protocol(tmp_path, monkeypatch):
-    disk, oracle, args = _make_table(tmp_path)
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, "nvfp4"], ids=["fp8", "nvfp4"])
+def test_graph_sync_protocol(tmp_path, monkeypatch, dtype):
+    disk, oracle, args = _make_table(tmp_path, dtype)
     emb = _embedding()
     rows = 1
     row_ids = torch.zeros((rows, args.num_ngram_heads), dtype=torch.int64, device="cuda")
@@ -329,3 +352,85 @@ def test_graph_sync_protocol(tmp_path, monkeypatch):
     gated, _, _ = _make_table(gate_path)
     assert not gated._wait_sync
     assert gated.host_fill_batch(_decode_batch([3, 4], 5), use_graph=True) is None
+
+
+def _wait_sync_large_graph(tmp_path, kernels):
+    from freetoken.core import Batch, Context, Req, set_global_ctx
+    from freetoken.distributed import set_tp_info
+    from freetoken.engine.graph import GraphRunner
+
+    set_tp_info(0, 1)
+    set_global_ctx(Context(page_size=1))
+    disk, oracle, args = _make_table(tmp_path)
+    emb = _embedding()
+    row_ids = torch.zeros((8, args.num_ngram_heads), dtype=torch.int64, device="cuda")
+    pad = torch.zeros(256, device="cuda")
+    release = threading.Event()
+    fill = disk.fill
+
+    def delayed_fill(*args, **kwargs):
+        assert release.wait(timeout=5), "fill was not released"
+        return fill(*args, **kwargs)
+
+    def forward():
+        out = disk.lookup(row_ids)
+        if torch.cuda.is_current_stream_capturing():
+            for _ in range(kernels):
+                pad.add_(1)
+        return out
+
+    disk.fill = delayed_fill
+    req = Req(input_ids=torch.tensor([3, 4, 9], dtype=torch.int32), table_idx=0,
+              cached_len=2, output_len=3, uid=0, sampling_params=None, cache_handle=None)
+    attn = SimpleNamespace(init_capture_graph=lambda **kwargs: None,
+                           prepare_for_capture=lambda batch: None, prepare_for_replay=lambda batch: None)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        # Exercise the capture-time upload from #697 as well as the PLE dispatch hook.
+        runner = GraphRunner(stream=stream, device=torch.device("cuda"), model=SimpleNamespace(forward=forward),
+                             attn_backend=attn, cuda_graph_bs=[8], cuda_graph_max_bs=None,
+                             free_memory=1024**3, max_seq_len=16,
+                             vocab_size=args.num_ngram_heads * disk.head_dim, dummy_req=req)
+        batch = Batch(reqs=[req] * 8, phase="decode")
+        runner.pad_batch(batch)
+        batch.positions = torch.full((8,), 2, dtype=torch.int32, device="cuda")
+        batch.out_loc = torch.arange(8, dtype=torch.int32, device="cuda")
+        for step, token in enumerate((9, 13, 5)):
+            release.clear()
+            batch.input_ids = torch.full((8,), token, dtype=torch.int32, device="cuda")
+            with disk.forward_host_ctx(batch, use_graph=True):
+                # Keep the WAIT unsatisfied when the first replay starts.
+                assert int(disk._flag[0]) == 0
+                timer = threading.Timer(0.05, release.set)
+                timer.start()
+                try:
+                    out = runner.replay(batch)
+                finally:
+                    timer.join()
+            stream.synchronize()
+            ids = emb.row_ids(_meta([[token]] * 8, [[3, 4]] * 8, decode=True)).cuda()
+            assert _bitwise_equal(out.to(disk.dtype), oracle.lookup(ids))
+            assert torch.equal(pad, torch.full_like(pad, (step + 1) * kernels))
+            assert int(disk._flag[0]) == 0
+        runner.destroy_cuda_graphs()
+
+
+@requires_cuda
+def test_wait_sync_large_graph(tmp_path):
+    from freetoken.kernel.row_store import probe_wait_sync
+
+    if not probe_wait_sync("auto", torch.device("cuda")):
+        pytest.skip("stream memops unavailable")
+    root = Path(__file__).resolve().parents[3]
+    env = dict(os.environ, FREETOKEN_PLE_SYNC="wait")
+    env["PYTHONPATH"] = os.pathsep.join((str(root / "python"), str(root), env.get("PYTHONPATH", "")))
+    script = (
+        "from pathlib import Path; "
+        "from tests.models.qwen4_exp.test_ple_disk import _wait_sync_large_graph; "
+        f"_wait_sync_large_graph(Path({str(tmp_path)!r}), 16384)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=root, env=env, capture_output=True, text=True, timeout=45,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

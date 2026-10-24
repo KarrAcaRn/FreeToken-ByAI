@@ -20,7 +20,8 @@ from freetoken.distributed import destroy_distributed, enable_pynccl_distributed
 from freetoken.env import ENV
 from freetoken.gpu_select import gpu_identity
 from freetoken.checkpoint.ftw import ftw_tensor_names, is_ftw_checkpoint
-from freetoken.layers import OffloadMoELayer, iter_moe_layers, set_rope_device
+from freetoken.layers import OffloadMoELayer, VocabParallelEmbedding, iter_moe_layers, iter_ops, set_rope_device
+from freetoken.layers.embedding import host_movable_embeddings
 from freetoken.layers.quantization import LayerKind, QuantBackend, QuantKind, finalize_quant, set_quant_backend
 from freetoken.moe.offload_cache import iter_offload_moe_layers
 from freetoken.mm.config import ENCODER_SECTIONS
@@ -563,10 +564,44 @@ def _validate_attention_backend_choice(config, override, required: frozenset[Att
             )
 
 
+def _host_embedding_keys(model, config: EngineConfig) -> frozenset[str]:
+    """State-dict keys of the tables --embed-weights host keeps in pinned host RAM."""
+    if config.embed_weights != "host":
+        return frozenset()
+    tables = {id(op.weight) for op in host_movable_embeddings(model)}
+    keys = frozenset(key for key, t in model.state_dict().items() if id(t) in tables)
+    if keys:
+        return keys
+    if config.model_config.tie_word_embeddings:
+        raise ValueError(
+            "--embed-weights host: this model's embedding table is tied to its LM head, which reads the whole table "
+            "every step; serve it with --embed-weights gpu"
+        )
+    raise ValueError(
+        f"--embed-weights host: {type(model).__name__} has no plain embedding table to move (a DF11 table stays "
+        "on the GPU); serve it with --embed-weights gpu"
+    )
+
+
+def _pinned_copy(key: str, t: torch.Tensor) -> torch.Tensor:
+    from freetoken.kernel.pinned import alloc_pinned_tensor
+
+    try:
+        host = alloc_pinned_tensor(*t.shape, dtype=t.dtype)
+    except RuntimeError as exc:
+        raise PinFailed(
+            f"cudaHostAlloc refused {t.nbytes / 2**20:.0f} MiB for {key} (--embed-weights host); "
+            "free host RAM or serve with --embed-weights gpu"
+        ) from exc
+    host.copy_(t)
+    return host
+
+
 def _make_dummy_weight_state_dict(
     model_state: Dict[str, torch.Tensor],
     *,
     device: torch.device,
+    host_keys: frozenset[str] = frozenset(),
 ) -> Dict[str, torch.Tensor]:
     state_dict: Dict[str, torch.Tensor] = {}
     fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
@@ -589,6 +624,8 @@ def _make_dummy_weight_state_dict(
             state_dict[key] = torch.full(param.shape, 127, dtype=param.dtype, device=device)
         else:
             state_dict[key] = torch.zeros(param.shape, dtype=param.dtype, device=device)
+        if key in host_keys:
+            state_dict[key] = _pinned_copy(key, state_dict[key])
     return state_dict
 
 
@@ -622,6 +659,7 @@ def _materialize_loaded_weight_state_dict(
     weights: Iterable[Tuple[str, torch.Tensor]],
     *,
     device: torch.device,
+    host_keys: frozenset[str] = frozenset(),
 ) -> Dict[str, torch.Tensor]:
     state_dict: Dict[str, torch.Tensor] = {}
     for key, weight in weights:
@@ -631,6 +669,8 @@ def _materialize_loaded_weight_state_dict(
             if key.endswith(".input_scale"):
                 continue
             state_dict[key] = weight.to(device=device)
+        elif key in host_keys:
+            state_dict[key] = _pinned_copy(key, weight.to(dtype=expected.dtype))
         else:
             state_dict[key] = weight.to(device=device, dtype=expected.dtype)
     return state_dict
@@ -722,8 +762,7 @@ class Engine:
 
             run_preflight(config, self.model, init_free_memory)
         self._load_weights(config)
-        # before the residency snapshot, so the freed table goes to the KV pool
-        embed_host_bytes = self._move_embeddings_to_host() if config.embed_device == "cpu" else 0
+        dense_host_bytes = 0
         # The draft loads with the weights, before the residency snapshot, so the KV budget sees it.
         self.dflash_worker = None
         if config.speculative_algorithm == "dflash" and config.speculative_draft_model_path:
@@ -753,7 +792,7 @@ class Engine:
         # after the draft, so --dense-offload-layers auto sizes against what is really left
         self.dense_offloader = None
         if config.dense_offload_layers not in ("0", 0, "", None):
-            embed_host_bytes += self._offload_dense_layers(config, init_free_memory)
+            dense_host_bytes += self._offload_dense_layers(config, init_free_memory)
 
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
@@ -766,10 +805,14 @@ class Engine:
         self.moe_offload_cache = None
         self._moe_stats_step = 0
         self.cpu_moe_executor = None
-        # Host-side auxiliary stores (qwen4_exp's pinned PLE table, the --embed-device cpu table above): after the weights so a
+        # Host-side auxiliary stores (--embed-weights host tables, qwen4_exp's pinned PLE table): after the weights so a
         # load failure is not masked, before the MoE offload cache so the bank residency
         # planning sees the pin quota the table already spent.
-        self._host_tables_bytes = embed_host_bytes
+        host_embeds = [op for op in iter_ops(self.model) if type(op) is VocabParallelEmbedding and not op.weight.is_cuda]
+        embed_host_bytes = sum(op.weight.nbytes for op in host_embeds)
+        self._host_tables_bytes = dense_host_bytes + embed_host_bytes
+        if host_embeds:
+            logger.info_rank0(f"Embedding tables in pinned host RAM (--embed-weights host): {mem_GB(embed_host_bytes)}")
         if hasattr(self.model, "load_host_tables"):
             with _weight_load_context():
                 self._host_tables_bytes += int(self.model.load_host_tables(config) or 0)
@@ -1003,8 +1046,9 @@ class Engine:
         resident = [layer for layer in iter_moe_layers(self.model) if not isinstance(layer, OffloadMoELayer)]
         if resident and not config.use_dummy_weight and is_ftw_checkpoint(config.model_path) and not ftw_tensor_names(config.model_path, "experts_bank"):
             raise ValueError(f"{config.model_path} keeps its routed experts as dense weights (an older `ft checkpoint --moe-backend fused`); reconvert it with `ft checkpoint`")
+        host_keys = _host_embedding_keys(self.model, config)
         with _weight_load_context():
-            self.model.load_state_dict(self._load_weight_state_dict(config))
+            self.model.load_state_dict(self._load_weight_state_dict(config, host_keys))
         if config.active_encoders:
             from freetoken.models.blocks import SupportsMultimodal
 
@@ -1066,25 +1110,10 @@ class Engine:
         )
         return self.dense_offloader.host_bytes
 
-    def _move_embeddings_to_host(self) -> int:
-        from freetoken.layers.embedding import move_input_embeddings_to_host
-
-        moved_bytes, moved = move_input_embeddings_to_host(self.model)
-        if moved:
-            logger.info_rank0(
-                f"--embed-device cpu: {', '.join(moved)} in pinned host RAM ({mem_GB(moved_bytes)})"
-            )
-        else:
-            logger.warning_rank0(
-                "--embed-device cpu: no untied input embedding to move (tied to the LM head or a "
-                "quantized table); it stays on the GPU"
-            )
-        return moved_bytes
-
-    def _load_weight_state_dict(self, config: EngineConfig) -> Dict[str, torch.Tensor]:
+    def _load_weight_state_dict(self, config: EngineConfig, host_keys: frozenset[str]) -> Dict[str, torch.Tensor]:
         model_state = self.model.state_dict()
         if config.use_dummy_weight:
-            return _make_dummy_weight_state_dict(model_state, device=self.device)
+            return _make_dummy_weight_state_dict(model_state, device=self.device, host_keys=host_keys)
         # _materialize casts each loaded tensor to its model-param dtype (model_state), so
         # models declaring per-tensor dtypes (e.g. DSV4's mixed fp8/fp32/bf16) are preserved;
         # MoE models exclude routed experts (they load as expert banks, not dense weights).
@@ -1097,6 +1126,7 @@ class Engine:
                 include_vision=bool(config.active_encoders),
             ),
             device=self.device,
+            host_keys=host_keys,
         )
 
     def _load_resident_experts(self, config: EngineConfig, layers) -> None:

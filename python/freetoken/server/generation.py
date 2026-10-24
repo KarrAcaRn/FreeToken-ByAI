@@ -131,6 +131,10 @@ class GenTimings:
     prefill_ms: float = 0.0
     decode_ms: float = 0.0
     total_ms: float = 0.0
+    # The llama.cpp `timings` spans, matching /v1/stats: prompt runs to the first output
+    # reply (the whole request when none came), predicted from the first output reply to the last.
+    prompt_ms: float = 0.0
+    predicted_ms: float = 0.0
 
 
 @dataclass
@@ -160,6 +164,41 @@ class GenResult:
     # Neutral sampled-token logprob entries, one per sampled token (empty when the
     # request did not ask).
     logprobs: list[dict] = field(default_factory=list)
+
+
+def timings_block(
+    prompt_tokens: int, completion_tokens: int, cached_tokens: int,
+    prompt_ms: float, predicted_ms: float,
+) -> dict[str, Any] | None:
+    """llama.cpp's timings shape (server_slot_stats::to_json), which frontends like
+    llama-swap parse off the response. prompt_n counts only the tokens evaluated after
+    the cached prefix and decode runs n_gen - 1 steps (the first token rides the last
+    prompt batch), matching llama.cpp's own arithmetic."""
+    if prompt_ms <= 0.0:
+        return None
+    prompt_s = prompt_ms / 1000.0
+    predicted_s = predicted_ms / 1000.0
+    processed = prompt_tokens - cached_tokens
+    gen_steps = max(completion_tokens - 1, 0)
+    return {
+        "cache_n": cached_tokens,
+        "prompt_n": processed,
+        "prompt_ms": round(prompt_ms, 2),
+        "prompt_per_token_ms": round(prompt_ms / processed, 2) if processed > 0 else 0.0,
+        "prompt_per_second": round(processed / prompt_s, 2) if prompt_s > 0 else 0.0,
+        "predicted_n": completion_tokens,
+        "predicted_ms": round(predicted_ms, 2),
+        "predicted_per_token_ms": round(predicted_ms / gen_steps, 2) if gen_steps > 0 else 0.0,
+        "predicted_per_second": round(gen_steps / predicted_s, 2) if predicted_s > 0 else 0.0,
+    }
+
+
+def gen_timings_block(
+    prompt_tokens: int, completion_tokens: int, cached_tokens: int, timings: GenTimings
+) -> dict[str, Any] | None:
+    return timings_block(
+        prompt_tokens, completion_tokens, cached_tokens, timings.prompt_ms, timings.predicted_ms
+    )
 
 
 @dataclass
@@ -561,7 +600,7 @@ async def with_keepalive(events: AsyncIterator[GenEvent], interval: float):
             task.cancel()
 
 
-class _Timer:
+class GenTimer:
     """Times one generation off the raw ack stream.
 
     Deliberately fed from acks rather than from emitted GenEvents: a reasoning or tool-call
@@ -573,6 +612,7 @@ class _Timer:
     def __init__(self) -> None:
         self.start = time.monotonic()
         self.first_token_at: float | None = None
+        self.last_token_at: float | None = None
         self.end: float | None = None
         self.prefill_ms = 0.0
 
@@ -581,8 +621,11 @@ class _Timer:
             self.prefill_ms = ack.prefill_ms
         # completion_tokens_delta, not incremental_output: the detokenizer holds back a
         # trailing partial-stop prefix, so a real generated token can arrive with empty text.
-        if self.first_token_at is None and ack.completion_tokens_delta:
-            self.first_token_at = time.monotonic()
+        if ack.completion_tokens_delta:
+            now = time.monotonic()
+            if self.first_token_at is None:
+                self.first_token_at = now
+            self.last_token_at = now
         if ack.finished:
             # Stamped here, not in finish(): the callers run the reasoning split and the
             # tool-call drain between the terminal ack and building their result, and that
@@ -598,6 +641,8 @@ class _Timer:
             prefill_ms=self.prefill_ms,
             decode_ms=0.0 if first is None else (end - first) * 1000.0,
             total_ms=(end - self.start) * 1000.0,
+            prompt_ms=((end if first is None else first) - self.start) * 1000.0,
+            predicted_ms=0.0 if first is None else (self.last_token_at - first) * 1000.0,
         )
 
 
@@ -679,7 +724,7 @@ async def generate_events(
     """Wraps `_generate_events_impl` to log the request with its totals, read off the terminal
     `GenDone`. The `finally` still records the row on a mid-stream disconnect — but with 0 tokens
     if the drop lands before `GenDone`, the only event carrying the totals."""
-    timer = _Timer()
+    timer = GenTimer()
     prompt_tokens = 0
     completion_tokens = 0
     error: str | None = None
@@ -705,7 +750,7 @@ async def generate_full(
 ) -> GenResult:
     """Wraps `_generate_full_impl` to log the request with its totals; the `finally` also records
     a `GenerationError` as a failed row."""
-    timer = _Timer()
+    timer = GenTimer()
     result: GenResult | None = None
     error: str | None = None
     try:
@@ -726,7 +771,7 @@ async def generate_full(
 
 
 async def _generate_events_impl(
-    uid: int, spec: GenSpec, state: Any, timer: _Timer
+    uid: int, spec: GenSpec, state: Any, timer: GenTimer
 ) -> AsyncIterator[GenEvent]:
     """Protocol-neutral streaming generation. Yields semantic events (reasoning /
     content / tool-call deltas) terminated by exactly one GenDone. Produces no wire
@@ -942,7 +987,7 @@ async def _generate_events_impl(
     )
 
 
-async def _generate_full_impl(uid: int, spec: GenSpec, state: Any, timer: _Timer) -> GenResult:
+async def _generate_full_impl(uid: int, spec: GenSpec, state: Any, timer: GenTimer) -> GenResult:
     """Protocol-neutral non-streaming generation: accumulate, split reasoning, parse
     tool calls, strip special tokens. The adapters format the GenResult into their wire."""
     full_content = ""

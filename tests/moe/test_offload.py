@@ -1402,3 +1402,30 @@ def test_host_bank_maps_without_mmap_flags(monkeypatch):
     bank = HostBank((8, 512), torch.uint8, backing="mmap")
     bank.tensor.fill_(3)
     assert int(bank.tensor.sum()) == 3 * 8 * 512
+
+
+def test_host_ram_fits_parallel_sizes_subdirectory_shards(tmp_path, monkeypatch):
+    """The RAM probe must size the shards the reader will actually open, indexed subdirectory layouts included."""
+    import json
+
+    from freetoken.moe.expert_banks import _host_ram_fits_parallel
+
+    sub = tmp_path / "tensors"
+    sub.mkdir()
+    for i in (1, 2):
+        (sub / f"model-{i:05d}-of-00002.safetensors").write_bytes(b"x" * (1 << 20))
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.layers.0.mlp.experts.0.gate_proj.weight": "tensors/model-00001-of-00002.safetensors",
+                    "model.layers.0.mlp.experts.0.down_proj.weight": "tensors/model-00002-of-00002.safetensors",
+                }
+            }
+        )
+    )
+    # next reads MemAvailable via freetoken.memory (cgroup-aware), not builtins.open
+    monkeypatch.setattr("freetoken.memory.available_host_memory", lambda: 512 * 1024)
+    assert not _host_ram_fits_parallel(str(tmp_path))
+    monkeypatch.setattr("freetoken.memory.available_host_memory", lambda: 1 << 40)
+    assert _host_ram_fits_parallel(str(tmp_path))

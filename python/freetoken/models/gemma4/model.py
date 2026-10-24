@@ -105,7 +105,7 @@ class Gemma4Model(BaseOP):
         self._pad_token_id = config.pad_token_id or 0
         if self._ple_size:
             L, P, H = config.num_layers, config.per_layer_input_size, config.hidden_size
-            # --embed-device cpu moves this (untied) table to pinned host RAM like any input embedding
+            # --embed-weights host keeps this (never tied) table in pinned host RAM, also when embed_tokens is tied
             self.embed_tokens_per_layer = VocabParallelEmbedding(
                 num_embeddings=config.per_layer_vocab_size,
                 embedding_dim=L * P,

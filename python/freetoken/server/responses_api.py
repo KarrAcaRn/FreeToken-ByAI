@@ -70,6 +70,7 @@ from .generation import (
     ToolCallsDelta,
     ToolCallStart,
     build_metrics,
+    gen_timings_block,
     generate_events,
     generate_full,
     metrics_enabled,
@@ -470,6 +471,9 @@ def build_responses_response(
             cached_tokens=result.cached_tokens,
             timings=result.timings,
         ) if metrics else None,
+        timings=gen_timings_block(
+            result.prompt_tokens, result.completion_tokens, result.cached_tokens, result.timings
+        ),
     )
 
 
@@ -477,6 +481,7 @@ def _response_obj(
     response_id: str, created: int, model: str, output: list[Any],
     *, status: str, usage: ResponseUsage | None, error: ResponseError | None = None,
     incomplete_reason: str | None = None, metrics: dict[str, Any] | None = None,
+    timings: dict[str, Any] | None = None,
 ) -> Response:
     response = Response(
         id=response_id,
@@ -492,10 +497,12 @@ def _response_obj(
         tool_choice="auto",
         tools=[],
     )
+    # The SDK model allows extras, so the FreeToken-only `metrics` and llama.cpp `timings`
+    # objects ride the real Response type rather than forcing a parallel dict-shaped path.
     if metrics is not None:
-        # The SDK model allows extras, so the FreeToken-only `metrics` object rides the real
-        # Response type rather than forcing a parallel dict-shaped response path.
         response.metrics = metrics
+    if timings is not None:
+        response.timings = timings
     return response
 
 
@@ -524,11 +531,12 @@ async def responses_stream_generator(
 ) -> AsyncIterator[str]:
     seq = _Seq()
 
-    def snapshot(status, output, usage=None, incomplete_reason=None, request_metrics=None):
+    def snapshot(status, output, usage=None, incomplete_reason=None, request_metrics=None,
+                 timings=None):
         return _response_obj(
             response_id, created, req.model, output,
             status=status, usage=usage, incomplete_reason=incomplete_reason,
-            metrics=request_metrics,
+            metrics=request_metrics, timings=timings,
         )
 
     yield _sse(ResponseCreatedEvent(
@@ -736,6 +744,9 @@ async def responses_stream_generator(
                     cached_tokens=ev.cached_tokens,
                     timings=ev.timings,
                 ) if metrics else None
+                final_timings = gen_timings_block(
+                    ev.prompt_tokens, ev.completion_tokens, ev.cached_tokens, ev.timings
+                )
                 for f in close_current():
                     yield f
                 if finish_reason == "length":
@@ -746,6 +757,7 @@ async def responses_stream_generator(
                             usage=_usage(usage_pt, usage_ct, usage_cached),
                             incomplete_reason="max_output_tokens",
                             request_metrics=request_metrics,
+                            timings=final_timings,
                         ),
                     ))
                 else:
@@ -755,6 +767,7 @@ async def responses_stream_generator(
                             "completed", output_items,
                             usage=_usage(usage_pt, usage_ct, usage_cached),
                             request_metrics=request_metrics,
+                            timings=final_timings,
                         ),
                     ))
     except GenerationError as exc:

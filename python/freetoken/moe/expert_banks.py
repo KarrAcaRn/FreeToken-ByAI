@@ -8,7 +8,6 @@ banks from them (``build_expert_banks``). GGUF experts keep their packed ggml ro
 
 from __future__ import annotations
 
-import glob
 import math
 import os
 from dataclasses import dataclass, field
@@ -299,6 +298,11 @@ def _method_expert_banks(model_path, model_config, method, device, dummy, parall
                 f"--moe-disk-tier on: {model_config.architectures[0]} exposes no "
                 "nvfp4_expert_spec, so the tier cannot locate expert rows in the "
                 "checkpoint (the loader would release them and never refetch)")
+        if getattr(source_spec, "scale_pair", None) is not None:
+            # the fetch copies raw byte ranges; CSF slab scales need a decode first
+            raise NotImplementedError(
+                f"--moe-disk-tier on: {source_spec.desc} stores its block scales as CSF slab pairs, "
+                "which the disk tier cannot fetch")
         # Build the index HERE, next to the release below: a family that reaches
         # the release without an index would serve zeroed experts. Resolving the
         # spec through the family hook keeps the index and the loader reading
@@ -335,13 +339,12 @@ def _host_ram_fits_parallel(model_path: str) -> bool:
     avail = available_host_memory()
     if avail is None:
         return True
-    try:  # resolve a hub id to its local cache dir (no-op for a local path) so glob sees the shards
-        from freetoken.utils.hf import download_hf_weight
+    try:  # the loader's index-first shard list also covers subdirectory layouts (a root glob does not)
+        from freetoken.models.loader import iter_weight_files
 
-        model_path = download_hf_weight(model_path)
+        sizes = [os.path.getsize(p) for p in iter_weight_files(model_path)]
     except Exception:
         return True
-    sizes = [os.path.getsize(p) for p in glob.glob(os.path.join(model_path, "*.safetensors"))]
     if not sizes:
         return True
     return avail > sum(sizes) + max(sizes)

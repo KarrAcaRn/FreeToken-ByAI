@@ -95,7 +95,7 @@ def ple_gather_rows(
     out: torch.Tensor,
     scale: float = 1.0,
     is_fp8: bool = True,
-    scales_ptr: int | None = None,
+    scale_ptr: int | None = None,
 ) -> torch.Tensor:
     """Gather ``row_ids`` from the host-resident table at ``table_ptr`` into ``out``.
 
@@ -103,9 +103,9 @@ def ple_gather_rows(
     bf16 on the same device. ``table_ptr`` is the address the GPU must dereference
     (``kernel/pinned.device_ptr``), not necessarily the host ``data_ptr``.
 
-    With ``scales_ptr`` (device-addressable fp8 block-scale bank, ``[num_rows,
-    embed_dim // 16]``), the packed table at
-    ``table_ptr`` is read as NVFP4 and ``scale`` is its per-tensor global scale.
+    With ``scale_ptr`` (device-addressable per-16 e4m3 block-scale bank, ``[num_rows,
+    embed_dim // 16]``), the packed e2m1 table at ``table_ptr`` is read as NVFP4 and ``scale``
+    is its per-tensor global scale.
     """
     n = row_ids.numel()
     assert out.shape == (n, embed_dim) and out.is_contiguous(), out.shape
@@ -117,11 +117,11 @@ def ple_gather_rows(
             float(scale),
             num_rows,
             # constexpr-false arguments still need a plausibly typed operand; unused there
-            scales_ptr if scales_ptr is not None else 0,
+            scale_ptr if scale_ptr is not None else 0,
             embed_dim // 16,
             EMB_DIM=embed_dim,
-            IS_FP8=is_fp8 and scales_ptr is None,  # the NVFP4 branch supersedes fp8
-            IS_NVFP4=scales_ptr is not None,
+            IS_FP8=is_fp8 and scale_ptr is None,  # the NVFP4 branch supersedes fp8
+            IS_NVFP4=scale_ptr is not None,
             BLOCK_D=triton.next_power_of_2(embed_dim),
             num_warps=_NUM_WARPS,
         )

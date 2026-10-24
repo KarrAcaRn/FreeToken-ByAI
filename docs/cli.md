@@ -87,9 +87,10 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--vram-reserve-mb` | 0 | VRAM (MiB) left free for the rest of the machine at the largest prefill: startup runs one max-length chunk and shrinks the MoE expert cache until the reserve stays free; 0 skips the check |
 | `--skip-preflight` | off | Load the weights even when the pre-load memory forecast says the configuration cannot fit; see [ft info](#ft-info) |
 | `--num-pages` / `--num-tokens` | auto | KV capacity override in pages / tokens (mutually exclusive; auto sizes from VRAM left after weights and MoE cache) |
+| `--embed-weights` | gpu | Where the input token embedding tables live. `host` pins them in host RAM as they load (they never occupy VRAM) and each lookup reads its rows over PCIe, so their VRAM goes to the expert cache and KV (2.37 GiB on Qwen3.8-27B). Decode reads one row per token, so speed is unchanged. A table tied to the LM head stays on the GPU; a model whose only table is tied is refused. `ft info` suggests it |
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
 | `--dense-offload-layers` | 0 | `N` or `auto`: dense models keep N decoder layers in pinned host RAM and stream them over PCIe every forward; the freed VRAM goes to the KV cache. `auto` offloads the fewest layers that reach `--kv-reserve-tokens`. Costs decode speed (each offloaded layer crosses PCIe once per token); long prefills hide most of the copies. Single GPU, dense models only |
-| `--embed-device` | gpu | `cpu` keeps the input-embedding table in pinned host RAM; the GPU reads the looked-up rows over PCIe, and the freed VRAM goes to the KV cache (2.37 GiB on Qwen3.8-27B). Decode reads one row per token, so speed is unchanged. A table tied to the LM head stays on the GPU |
+| `--embed-device` | gpu | Deprecated alias: `cpu` is `--embed-weights host` (logs a warning), `gpu` the default |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
 | `--kv-cache-dtype` | bf16 | `bf16`, `fp8`, or `nvfp4` (see [NVFP4 KV cache](#nvfp4-kv-cache)): FP8 stores the KV cache as e4m3 codes plus one fp32 scale per (token, kv head), roughly doubling the tokens that fit in the same VRAM; see [FP8 KV cache](#fp8-kv-cache) |
 | `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU |
@@ -170,6 +171,15 @@ context); a larger value verifies the decoding requests' blocks together in one 
 | `--enable-metrics-report` | off | Serve a per-request `metrics` object next to usage ([below](#per-request-performance-metrics)) |
 | `--anthropic-inline-system` | auto | Placement of late Anthropic system instructions: `auto`, `preserve`, or `fold` |
 
+Every chat completion, completion and Responses response also carries a llama.cpp-shaped
+`timings` object next to `usage` (`prompt_n`, `prompt_ms`, `prompt_per_second`,
+`predicted_n`, `predicted_ms`, `predicted_per_second`, `cache_n`), so frontends like
+llama-swap and Open Web UI show per-request prefill/decode rates and the prefix-cache hit.
+Its spans match the cumulative timing on `GET /v1/stats`: prefill runs from request start
+to the first output token, decode between output tokens. `cache_n` follows llama.cpp
+(always present, `prompt_n` counts only the evaluated tokens) and is not gated by
+`--enable-cache-report`, which controls only `usage.prompt_tokens_details.cached_tokens`.
+
 ### Per-request performance metrics
 
 `--enable-metrics-report` adds a `metrics` object to each response on `/v1/chat/completions`,
@@ -224,6 +234,9 @@ Streaming responses carry `metrics` on the same final message as usage, so the r
 for usage too: `stream_options: {"include_usage": true}` on `/v1/chat/completions`. On
 `/v1/messages` it rides `message_delta`; on `/v1/responses`, `response.completed`.
 `/v1/completions` does not serve `metrics`: it does not go through the shared generation core.
+
+`timings.prompt_ms` above runs to the first output token, so it equals `metrics.ttft_ms` and
+includes queueing; `metrics.prefill_time_ms` is the scheduler's own span without it.
 
 ### Image input
 
