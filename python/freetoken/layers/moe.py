@@ -140,6 +140,15 @@ class MoELayer(BaseOP):
         return self._maybe_all_reduce(self._resident_gemm(hidden_states, topk_weights, topk_ids))
 
 
+def _layer_major_chunk() -> bool:
+    """A layer-major prefill chunk, whose prefill the engine already began. The layer also runs
+    without an engine context (unit tests drive it directly), so a missing one means no."""
+    from freetoken import core
+
+    ctx = core._GLOBAL_CTX
+    return ctx is not None and getattr(ctx._batch, "skip_begin_prefill", False)
+
+
 class OffloadMoELayer(MoELayer):
     def __init__(
         self,
@@ -397,7 +406,7 @@ class OffloadMoELayer(MoELayer):
         bank registration order; buffer position == expert id, so routing ids pass
         through unmapped). The caller runs ``release_prefill_layer`` after its GEMMs.
         """
-        if self.layer_id == 0 and not getattr(get_global_ctx().batch, "skip_begin_prefill", False):
+        if self.layer_id == 0 and not _layer_major_chunk():
             cache.begin_prefill()
         cache.prefetch_prefill_layer(self.layer_id)
         cache.prefetch_prefill_layer(self.layer_id + 1)

@@ -181,11 +181,18 @@ class Qwen4ExpModel(BaseOP):
             for child in chunk_batches:
                 ctx._batch = child
                 hidden.append(embed_input_ids(self.embed_tokens, child.input_ids, child).repeat(1, self.hc_count))
+            # the disk PLE table stages the whole request once; each chunk reads its slice of it
+            offsets = [0]
+            for child in chunk_batches[:-1]:
+                offsets.append(offsets[-1] + child.input_ids.shape[0])
             for layer in self.layers.op_list:
+                read_from = getattr(layer.ple.ple_embedding.table, "read_from", None) if layer.ple is not None else None
                 for index, child in enumerate(chunk_batches):
                     ctx._batch = child
                     if layer.ple is not None:
                         child.ple_meta = build_ple_metadata(child, layer.ple.args, child.input_ids.device)
+                        if read_from is not None:
+                            read_from(offsets[index])
                     _copy_layer_major_track_state(ctx.linear_state_pool, layer, child)
                     hidden[index] = layer.forward(hidden[index], child)
                     if layer.ple is not None:
@@ -193,6 +200,9 @@ class Qwen4ExpModel(BaseOP):
             return self.hyper_connection_mixer.mix(hidden[-1])[0]
         finally:
             ctx._batch = full_batch
+            for ple in self._ple:
+                if (read_from := getattr(ple.ple_embedding.table, "read_from", None)) is not None:
+                    read_from(0)
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
@@ -208,6 +218,15 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             prefix="lm_head",
         )
         super().__init__()
+
+    @staticmethod
+    def _disk_ple_staging_tokens(engine_config) -> int:
+        """A layer-major prefill dispatches the whole request at once, so the disk table stages all of it."""
+        if not getattr(engine_config, "prefill_layer_major", False):
+            return engine_config.max_extend_tokens
+        from freetoken.scheduler.prefill import _LAYER_MAJOR_MAX_EXTEND_TOKENS
+
+        return max(engine_config.max_extend_tokens, _LAYER_MAJOR_MAX_EXTEND_TOKENS)
 
     def load_host_tables(self, engine_config) -> int:
         """Attach the PLE n-gram table (pinned checkpoint bank, or zeros for dummy weights); returns the pinned host bytes the engine reserves from its pin budget."""
@@ -254,7 +273,7 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
                 resolve_row_source(engine_config.model_path, self._config.qwen4_args),
                 constants,
                 max_graph_rows=max(256, engine_config.cuda_graph_max_bs or 0),
-                max_extend_tokens=engine_config.max_extend_tokens,
+                max_extend_tokens=self._disk_ple_staging_tokens(engine_config),
             )
             self._ple_table = disk_table
             for ple in ple_layers:

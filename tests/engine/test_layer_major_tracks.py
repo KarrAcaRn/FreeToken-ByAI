@@ -78,21 +78,22 @@ def test_layer_major_flag_defaults_off():
 
 
 @pytest.mark.parametrize(
-    ("enabled", "model_type", "tp_size", "strategy", "expert_quant", "ple_backend", "expected"),
+    ("enabled", "model_type", "tp_size", "strategy", "expert_quant", "ple_backend", "draft", "expected"),
     [
-        (True, "qwen4_exp", 1, "offload", "nvfp4", "pinned", True),
-        (False, "qwen4_exp", 1, "offload", "nvfp4", "pinned", False),
-        (True, "qwen3_5", 1, "offload", "nvfp4", "pinned", False),
-        (True, "qwen4_exp", 2, "offload", "nvfp4", "pinned", False),
-        (True, "qwen4_exp", 1, "none", "nvfp4", "pinned", False),
-        (True, "qwen4_exp", 1, "offload", "fp8", "pinned", False),
-        (True, "qwen4_exp", 1, "offload", "nvfp4", "disk", False),
-        (True, "qwen4_exp", 1, "offload", "nvfp4", "auto", False),
+        (True, "qwen4_exp", 1, "offload", "nvfp4", "pinned", None, True),
+        (True, "qwen4_exp", 1, "offload", "nvfp4", "disk", None, True),
+        (False, "qwen4_exp", 1, "offload", "nvfp4", "pinned", None, False),
+        (True, "qwen3_5", 1, "offload", "nvfp4", "pinned", None, False),
+        (True, "qwen4_exp", 2, "offload", "nvfp4", "pinned", None, False),
+        (True, "qwen4_exp", 1, "none", "nvfp4", "pinned", None, False),
+        (True, "qwen4_exp", 1, "offload", "fp8", "pinned", None, False),
+        (True, "qwen4_exp", 1, "offload", "nvfp4", "auto", None, False),
+        (True, "qwen4_exp", 1, "offload", "nvfp4", "disk", "draft", False),
     ],
-    ids=["eligible", "flag-off", "other-model", "tp", "other-strategy", "other-format", "disk-ple", "auto-ple"],
+    ids=["eligible", "disk-ple", "flag-off", "other-model", "tp", "other-strategy", "other-format", "auto-ple", "dflash"],
 )
 def test_layer_major_runtime_gate_rejects_every_unsupported_mode(
-    enabled, model_type, tp_size, strategy, expert_quant, ple_backend, expected,
+    enabled, model_type, tp_size, strategy, expert_quant, ple_backend, draft, expected,
 ):
     from freetoken.scheduler.scheduler import _supports_layer_major_prefill
 
@@ -102,6 +103,7 @@ def test_layer_major_runtime_gate_rejects_every_unsupported_mode(
         tp_info=SimpleNamespace(size=tp_size),
         moe_strategy=strategy,
         ple_backend=ple_backend,
+        speculative_draft_model_path=draft,
     )
 
     assert _supports_layer_major_prefill(config) is expected
@@ -176,7 +178,7 @@ def test_layer_major_prefill_falls_back_for_multimodal_request():
     from freetoken.scheduler.utils import PendingReq
 
     table = SimpleNamespace(token_pool=torch.zeros((1, 25), dtype=torch.int32))
-    cache = SimpleNamespace(swa_paged=False, prefill_chunk_align=1, page_size=1)
+    cache = SimpleNamespace(swa_paged=False, prefill_chunk_align=1, page_size=1, mamba_host_enabled=False)
     adder = PrefillAdder(
         token_budget=8, reserved_size=0, cache_manager=cache, table_manager=table,
         layer_major=True,
@@ -199,7 +201,7 @@ def test_layer_major_prefill_falls_back_for_empty_multimodal_marker():
     from freetoken.scheduler.utils import PendingReq
 
     table = SimpleNamespace(token_pool=torch.zeros((1, 25), dtype=torch.int32))
-    cache = SimpleNamespace(swa_paged=False, prefill_chunk_align=1, page_size=1)
+    cache = SimpleNamespace(swa_paged=False, prefill_chunk_align=1, page_size=1, mamba_host_enabled=False)
     adder = PrefillAdder(
         token_budget=8, reserved_size=0, cache_manager=cache, table_manager=table,
         layer_major=True,
@@ -225,7 +227,7 @@ def test_layer_major_prefill_has_a_hard_request_size_bound(prompt_len, expected_
     from freetoken.scheduler.utils import PendingReq
 
     table = SimpleNamespace(token_pool=torch.zeros((1, prompt_len + 1), dtype=torch.int32))
-    cache = SimpleNamespace(swa_paged=False, prefill_chunk_align=1, page_size=1)
+    cache = SimpleNamespace(swa_paged=False, prefill_chunk_align=1, page_size=1, mamba_host_enabled=False)
     adder = PrefillAdder(
         token_budget=4096, reserved_size=0, cache_manager=cache, table_manager=table,
         layer_major=True,

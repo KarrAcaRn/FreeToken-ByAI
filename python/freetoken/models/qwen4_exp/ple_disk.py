@@ -210,6 +210,7 @@ class DiskRowTable:
         )
         self._pending: Future | None = None
         self._failed = False
+        self._row_offset = 0
 
     def _fill_decode(self, histories: Sequence[Sequence[int]], bs: int) -> None:
         try:
@@ -262,6 +263,9 @@ class DiskRowTable:
             self._eager_read[self._eager_slot].synchronize()
             pinned, cap = self._eager_pinned[self._eager_slot], self._eager_cap
         scales = pinned.data_ptr() + cap * self._token_bytes if self._nvfp4 else 0
+        total = sum(run.numel() - 2 for run in runs)
+        if total > cap:
+            raise ValueError(f"PLE disk staging holds {cap} tokens, the batch has {total}")
         offset = 0
         for run in runs:
             self._store.stage(
@@ -345,6 +349,10 @@ class DiskRowTable:
             # only after this step's fill: the next fill waits on this launch, not the fill on it
             self._graph_consumed.record(torch.cuda.current_stream(self._device))
 
+    def read_from(self, token_offset: int) -> None:
+        """Make eager lookups start at this token of the staged batch (layer-major prefill chunks)."""
+        self._row_offset = token_offset
+
     # ---------------- device side (PLETableBackend protocol) ----------------
 
     def lookup(self, row_ids: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
@@ -359,12 +367,15 @@ class DiskRowTable:
             (self._graph_pinned, self._graph_dev, self._graph_cap)
             if capturing else (self._eager_pinned[self._eager_slot], self._eager_dev, self._eager_cap)
         )
+        first = 0 if capturing else self._row_offset
         nbytes = rows * self._token_bytes
-        dev[:nbytes].copy_(pinned[:nbytes], non_blocking=True)
+        src = first * self._token_bytes
+        dev[:nbytes].copy_(pinned[src : src + nbytes], non_blocking=True)
         if self._nvfp4:
             at = cap * self._token_bytes
             sbytes = rows * self._scale_token_bytes
-            dev[at : at + sbytes].copy_(pinned[at : at + sbytes], non_blocking=True)
+            ssrc = at + first * self._scale_token_bytes
+            dev[at : at + sbytes].copy_(pinned[ssrc : ssrc + sbytes], non_blocking=True)
         if not capturing:
             self._eager_read[self._eager_slot].record(stream)
         if self._nvfp4:

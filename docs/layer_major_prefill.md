@@ -8,7 +8,7 @@ The flag is disabled by default.
 ## Supported configuration
 
 The initial implementation requires Qwen3.8/Qwen4Exp, TP=1, NVFP4 experts,
-`--moe-strategy offload`, and **`--ple-backend pinned`**. A single pending text
+`--moe-strategy offload`, either PLE backend, and no speculative draft model. A single pending text
 request is eligible when its new-token length exceeds `--max-prefill-length`
 and is at most 32,768. The existing prefill length remains the internal chunk
 size. This limit bounds the activations retained between layers; it is not a
@@ -18,15 +18,16 @@ For an existing local checkpoint, add these options to the otherwise identical
 serve command used for a comparison:
 
 ```sh
---moe-strategy offload --ple-backend pinned \
+--moe-strategy offload \
 --quant-backend moe.nvfp4=triton --max-prefill-length 4096 \
 --prefill-layer-major
 ```
 
-The default disk PLE backend is not supported by this execution path: its host
-staging is sized for a token chunk. Disk or other PLE modes, multimodal inputs,
-multiple pending requests, TP>1, other models or expert formats, short prefills,
-and prefills above the limit retain ordinary chunked execution.
+With `--ple-backend disk` the row staging is sized for the 32,768-token limit
+instead of one chunk (about 1.4 KiB per token for an NVFP4 table, two pinned
+buffers and one on the GPU). Multimodal inputs, multiple pending requests, TP>1,
+other models or expert formats, a speculative draft model, short prefills, and
+prefills above the limit retain ordinary chunked execution.
 
 ## State and numerical behavior
 
@@ -43,7 +44,7 @@ interleave other requests' decoding between its internal chunks.
 
 ## Measuring the change
 
-Compare `main` and the candidate with the same pinned-PLE configuration,
+Compare `main` and the candidate with the same PLE configuration,
 checkpoint, prompt bytes, 4K chunk size and output length. Record first-token
 latency with its exact streaming definition, expert H2D traffic, peak VRAM,
 generated token IDs and finish reason. Keep any NVFP4 kernel patch identical

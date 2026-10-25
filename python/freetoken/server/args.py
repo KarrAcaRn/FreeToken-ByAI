@@ -582,7 +582,7 @@ def parse_args(
         action="store_true",
         dest="prefill_layer_major",
         default=ServerArgs.prefill_layer_major,
-        help="Opt in to layer-major long prefill for eligible Qwen3.8 NVFP4 offload requests with --ple-backend pinned.",
+        help="Opt in to layer-major long prefill for eligible Qwen3.8 NVFP4 offload requests.",
     )
 
     parser.add_argument(

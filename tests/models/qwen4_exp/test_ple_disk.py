@@ -263,6 +263,11 @@ def test_disk_table_matches_oracle(tmp_path, dtype):
     disk.fill([torch.tensor([EOS, EOS, *seqs[0]]), torch.tensor([21, 22, *seqs[1]])], graph=False)
     row_ids = emb.row_ids(_meta(seqs, [[EOS, EOS], [21, 22]])).cuda()
     assert _bitwise_equal(disk.lookup(row_ids), oracle.lookup(row_ids)), "prefill"
+    # a layer-major prefill chunk reads only its slice of the staged batch
+    disk.read_from(len(seqs[0]))
+    tail = emb.row_ids(_meta([seqs[1]], [[21, 22]])).cuda()
+    assert _bitwise_equal(disk.lookup(tail), oracle.lookup(tail)), "offset slice"
+    disk.read_from(0)
 
     # decode steps with a rolling window, plus the out= contract
     older, newer = 41, EOS
