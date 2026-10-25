@@ -82,6 +82,7 @@ class ServerArgs(SchedulerConfig):
     # prefix-cache hit) alongside usage. Off by default: it is a non-standard field on
     # every protocol we speak.
     enable_metrics_report: bool = False
+    prefill_layer_major: bool = False
     anthropic_inline_system: str = "auto"
     # Comma-separated hostname allowlist for client-supplied image URLs; empty admits any domain.
     allowed_media_domains: str = ""
@@ -574,6 +575,14 @@ def parse_args(
             f"{ServerArgs.max_extend_tokens}). An explicit value is honored even by models "
             "that default to single-pass prefill (DSV4)."
         ),
+    )
+
+    parser.add_argument(
+        "--prefill-layer-major",
+        action="store_true",
+        dest="prefill_layer_major",
+        default=ServerArgs.prefill_layer_major,
+        help="Opt in to layer-major long prefill for eligible Qwen3.8 NVFP4 offload requests with --ple-backend pinned.",
     )
 
     parser.add_argument(
