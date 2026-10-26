@@ -181,6 +181,7 @@ class Qwen4ExpModel(BaseOP):
             for child in chunk_batches:
                 ctx._batch = child
                 hidden.append(embed_input_ids(self.embed_tokens, child.input_ids, child).repeat(1, self.hc_count))
+            normed = [None] * len(chunk_batches)
             # the disk PLE table stages the whole request once; each chunk reads its slice of it
             offsets = [0]
             for child in chunk_batches[:-1]:
@@ -194,10 +195,10 @@ class Qwen4ExpModel(BaseOP):
                         if read_from is not None:
                             read_from(offsets[index])
                     _copy_layer_major_track_state(ctx.linear_state_pool, layer, child)
-                    hidden[index] = layer.forward(hidden[index], child)
+                    hidden[index], normed[index] = layer.forward(hidden[index], child, normed[index])
                     if layer.ple is not None:
                         commit_ngram_context(child.ple_meta, child.fla_metadata)
-            return self.hyper_connection_mixer.mix(hidden[-1])[0]
+            return self.hyper_connection_mixer.mix(hidden[-1], normed[-1])[0]
         finally:
             ctx._batch = full_batch
             for ple in self._ple:

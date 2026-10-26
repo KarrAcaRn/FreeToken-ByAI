@@ -11,8 +11,9 @@ The initial implementation requires Qwen3.8/Qwen4Exp, TP=1, NVFP4 experts,
 `--moe-strategy offload`, either PLE backend, and no speculative draft model. A single pending text
 request is eligible when its new-token length exceeds `--max-prefill-length`
 and is at most 32,768. The existing prefill length remains the internal chunk
-size. This limit bounds the activations retained between layers; it is not a
-promise that every supported configuration fits every GPU.
+size. This limit bounds the activations retained between layers. Startup keeps
+those rows (residual streams and their next-layer norm for the chunks beyond
+the first) free by shrinking the expert cache, as `--vram-reserve-mb` does.
 
 For an existing local checkpoint, add these options to the otherwise identical
 serve command used for a comparison:

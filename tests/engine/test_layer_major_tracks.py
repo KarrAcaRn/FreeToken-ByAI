@@ -351,9 +351,9 @@ def test_layer_major_model_restores_outer_batch_after_failure(monkeypatch):
     model.embed_tokens = object()
     model.hc_count = 1
     model._ple = ()
-    model.hyper_connection_mixer = SimpleNamespace(mix=lambda hidden: (hidden,))
+    model.hyper_connection_mixer = SimpleNamespace(mix=lambda hidden, normed: (hidden,))
     model.layers = SimpleNamespace(op_list=[SimpleNamespace(ple=None, _is_linear=False,
-        forward=lambda hidden, batch: (_ for _ in ()).throw(RuntimeError("layer failed")))])
+        forward=lambda hidden, batch, normed: (_ for _ in ()).throw(RuntimeError("layer failed")))])
     monkeypatch.setattr("freetoken.models.qwen4_exp.model.embed_input_ids", lambda *_: torch.ones(1, 2))
 
     with pytest.raises(RuntimeError, match="layer failed"):

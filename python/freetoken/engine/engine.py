@@ -964,9 +964,23 @@ class Engine:
         )
         if config.prefill_warmup:
             self._warmup_prefill()
-        if config.vram_reserve_mb:
-            self._fit_prefill_peak(config.vram_reserve_mb << 20)
+        reserve = (config.vram_reserve_mb << 20) + self._layer_major_retained_bytes()
+        if reserve:
+            self._fit_prefill_peak(reserve)
         self._fill_moe_slot_cache()
+
+    def _layer_major_retained_bytes(self) -> int:
+        """A layer-major prefill keeps every chunk's residual streams and their next-layer norm
+        between layers. The peak fit runs one chunk, so the other chunks' rows are reserved."""
+        from freetoken.scheduler.prefill import _LAYER_MAJOR_MAX_EXTEND_TOKENS
+        from freetoken.scheduler.scheduler import _supports_layer_major_prefill
+
+        if not _supports_layer_major_prefill(self.config):
+            return 0
+        tokens = _LAYER_MAJOR_MAX_EXTEND_TOKENS - self.config.max_extend_tokens
+        args = self.config.model_config.qwen4_args
+        row = args.hc_count * args.hidden_size * self.config.dtype.itemsize
+        return max(tokens, 0) * row * 2
 
     def _fill_moe_slot_cache(self) -> None:
         """Start the expert slot cache full instead of empty (graph capture and the
