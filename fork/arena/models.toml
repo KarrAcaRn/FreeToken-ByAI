@@ -144,6 +144,14 @@ flags = "--kv-cache-dtype nvfp4 --moe-strategy hybrid --max-running-requests 1 -
 label = "Qwen3.8 Flash-Next (NVFP4, Denken medium)"
 group = "MoE (Offload)"
 path = "models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/*"
+removed = "ersetzt durch nvidia FP4-Local (2026-10-24: Prüfstand 0,63 vs 0,66, echt 0,65 vs 0,74; 30,7 vs 36,3 tok/s), Checkpoint gelöscht"
 flags = "--kv-cache-dtype fp8 --text-model-only --ple-backend disk --cuda-graph-max-bs 1"
 # alle Experten im RAM: Peak ~65 GiB RSS (2026-10-07 bei 79 GiB RAM), ~101k Kontext dank --kv-reserve-share
 reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphasen); low / medium / xhigh
+[qwen3_8-flash-next-fp4local]
+label = "Qwen3.8 Flash-Next (nvidia FP4-Local QAD, Denken medium)"
+group = "MoE (Offload)"
+path = "models--nvidia--Qwen3.8-Flash-Next-FP4-Local/snapshots/*"
+flags = "--kv-cache-dtype fp8 --text-model-only --ple-backend disk --cuda-graph-max-bs 1"
+# PLE als gepackte NVFP4-Zeilen von Platte (26,9 GiB), Experten 61 GiB im RAM; ~100k Kontext
+reasoning_effort = "medium"

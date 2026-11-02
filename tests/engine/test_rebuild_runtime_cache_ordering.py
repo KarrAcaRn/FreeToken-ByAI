@@ -130,7 +130,7 @@ def _build_engine(monkeypatch, ledger: _Ledger, *, moe: int, kv: int, budget: in
     monkeypatch.setattr("freetoken.engine.engine.GraphRunner", _FakeGraphRunner)
     config = types.SimpleNamespace(
         page_size=16, max_seq_len=4096, max_running_req=4, memory_ratio=1.0,
-        cuda_graph_max_bs=4, swa_num_pages_override=None,
+        cuda_graph_max_bs=4, swa_num_pages_override=None, decode_rows_per_req=1,
         model_config=types.SimpleNamespace(vocab_size=128, model_is_mrope=False, hidden_size=64,
                                            num_experts=8, num_experts_per_tok=2),
     )
@@ -145,6 +145,10 @@ def _build_engine(monkeypatch, ledger: _Ledger, *, moe: int, kv: int, budget: in
         graph_runner=_FakeGraphRunner(),
         _sync_get_memory=lambda: (0, 0),
         dflash_worker=None,
+        linear_backend=None,
+        spec=None,
+        _spec_budget=lambda config: (0, 0),
+        _make_graph_runner=lambda *a: _FakeGraphRunner(),
         dtype=torch.bfloat16,
         _fill_moe_slot_cache=lambda: None,
         # one pool of one-byte slots

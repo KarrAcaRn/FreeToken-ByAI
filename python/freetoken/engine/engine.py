@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, NamedTuple, Tuple
 
 import torch
 from freetoken.attention import AttnType, attention_backend_info, create_attention_backend
+from freetoken.attention.linear import LinearAttnBackend, gdn_slot
 from freetoken.core import Batch, Context, Req, set_global_ctx
 from freetoken.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from freetoken.env import ENV
@@ -53,8 +54,9 @@ from freetoken.speculative.utils import (
 from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
 
 from .config import EngineConfig
-from .graph import GraphRunner, get_free_memory
+from .graph import GraphRunner, _determine_cuda_graph_bs, get_free_memory
 from .sample import BatchSamplingArgs, Sampler
+from .spec_protocol import SpecRuntime
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
@@ -210,7 +212,8 @@ def _clamp_decode_batch_to_pools(config: EngineConfig, pool_sizes: list[int]) ->
     small = [s for s in pool_sizes if s < num_experts]
     if not small:
         return
-    limit = min(small) // config.model_config.num_experts_per_tok
+    # a decode step routes every row of every request, decode_rows_per_req rows each
+    limit = min(small) // (config.model_config.num_experts_per_tok * config.decode_rows_per_req)
     if config.max_running_req > limit:
         logger.warning_rank0(
             f"the smallest MoE slot pool has {min(small)} slots; lowering max_running_req "
@@ -268,15 +271,18 @@ def _startup_kv_budget(memory_ratio: float, init_free_memory: int, new_free_memo
 
 def plan_moe_cache_auto(
     config, pool_cls, *, baseline_free: int, weights_bytes: int, per_expert_bytes: int,
-    max_slots: int | None,
+    max_slots: int | None, spec_budget: tuple[int, int] = (0, 0),
 ) -> tuple[int, int, bool]:
     """--moe-cache-auto's (moe_cache_size, num_pages, prefill_overlap) from the measured (or, for
-    the pre-load forecast, predicted) baseline and resident weights."""
+    the pre-load forecast, predicted) baseline and resident weights. ``spec_budget`` is the
+    (fixed bytes, draft KV bytes per page) of speculative decoding (Engine._spec_budget)."""
     from freetoken.attention import fixed_workspace_bytes
     from freetoken.engine.cache_budget import resolve_moe_cache_auto
 
     cache_per_page, fixed_cache_size, page_tokens, min_reserve = pool_cls.kv_cost(config)
     fixed_cache_size += state_pool_bytes(config)  # sibling GDN state pool, engine-summed
+    fixed_cache_size += spec_budget[0]
+    cache_per_page += spec_budget[1]
     num_experts = config.model_config.num_experts
     total_experts = config.model_config.num_moe_layers * num_experts
     return resolve_moe_cache_auto(
@@ -307,6 +313,12 @@ def _page_table_width(max_seq_len: int, page_size: int) -> int:
     alone does not cover once page_size > 32 (an unaligned --max-seq-len-override on DSV4's P=128
     or trtllm's forced 64 would index past the row)."""
     return align_ceil(align_ceil(max_seq_len, page_size), 32)
+
+
+def _seq_limits(config, num_tokens: int) -> tuple[int, int]:
+    """(longest request, page-table width). A decode step may widen a request by decode_rows_per_req - 1 provisional rows past its length, so requests get that much less and the table still covers the widened tail."""
+    limit = min(config.max_seq_len, num_tokens)
+    return limit - (config.decode_rows_per_req - 1), _page_table_width(limit, config.page_size)
 
 
 def _required_attn_types(model_config) -> frozenset[AttnType]:
@@ -446,6 +458,34 @@ def _resolve_auto_attention_backend(
         )
         + "."
     )
+
+
+def _spec_runner():
+    from freetoken.engine.spec_protocol import SPEC_RUNNER
+    from freetoken.models.register import _load_attr
+
+    return _load_attr(*SPEC_RUNNER.split(":"))
+
+
+def _adjust_spec_config(config, override, windowed_kv: bool) -> None:
+    """Resolve k and the method's own limits, then check what every speculative method needs of the target."""
+    _spec_runner().adjust_config(config, override)
+    if windowed_kv:
+        raise ValueError(
+            "speculative decoding does not support targets with sliding-window or DSV4 window-tier KV yet: "
+            "their window frees would release slots a verify step still reads"
+        )
+    parts = [p.strip() for p in config.attention_backend.split(",")]
+    graph = attention_backend_info(parts[-1]).uniform_extend_graph
+    if graph == "host_plan" and len(parts) == 2 and attention_backend_info(parts[0]).uniform_extend_graph == "device":
+        # verify steps run on the decode part; a prefill part that captures on device serves them better
+        logger.info_rank0(f"speculative decoding: attention backend {config.attention_backend} -> {parts[0]}")
+        override("attention_backend", parts[0])
+    elif graph == "none":
+        raise ValueError(
+            f"speculative decoding needs a decode attention backend that captures multi-row graphs "
+            f"(fa, triton or fi), got {config.attention_backend!r}"
+        )
 
 
 def _validate_attention_backend_choice(config, override, required: frozenset[AttnType]) -> None:
@@ -794,6 +834,8 @@ class Engine:
         if config.dense_offload_layers not in ("0", 0, "", None):
             dense_host_bytes += self._offload_dense_layers(config, init_free_memory)
 
+        # draft weights load before any pool is sized, so every free-memory read below counts them
+        self.spec: SpecRuntime | None = _spec_runner()(config, self) if config.spec_verify else None
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
         # Pool-budget baseline for the desktop cache sliders: free VRAM after the weights are
@@ -848,6 +890,11 @@ class Engine:
         # off it; the KV pool family owns every geometry-specific formula behind the rest.
         available_memory = _startup_kv_budget(config.memory_ratio, init_free_memory, new_free)
         available_memory -= state_pool_bytes(config)
+        if self.spec is not None:
+            # the pool solves pages from its own cost; hand it the share its pages get next to the draft's
+            spec_fixed, draft_page = self._spec_budget(config)
+            page_bytes, fixed_bytes = self._pool_cls.kv_cost(config)[:2]
+            available_memory = fixed_bytes + (available_memory - spec_fixed - fixed_bytes) * page_bytes // (page_bytes + draft_page)
         self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
@@ -882,8 +929,7 @@ class Engine:
 
         # ======================= Page table initialization ========================
         # NOTE: 1. aligned to 128 bytes; 2. store raw locations instead of pages
-        self.max_seq_len = min(config.max_seq_len, num_tokens)
-        aligned_max_seq_len = _page_table_width(self.max_seq_len, config.page_size)
+        self.max_seq_len, aligned_max_seq_len = _seq_limits(config, num_tokens)
         self.ctx.page_table = self.page_table = torch.zeros(  # + 1 for dummy request
             (config.max_running_req + 1, aligned_max_seq_len),
             dtype=torch.int32,
@@ -898,6 +944,7 @@ class Engine:
         self.ctx.attn_backend = self.attn_backend = create_attention_backend(
             config.attention_backend, config.model_config
         )
+        self.linear_backend = LinearAttnBackend(self.device, self.linear_state_pool) if self.linear_state_pool is not None else None
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
@@ -920,12 +967,10 @@ class Engine:
         self._dflash_commit_graphs: dict = {}
         self._dflash_commit_seen: set = set()
         self._dflash_cu_seqlens_cache: dict[int, torch.Tensor] = {}
-        post_free_memory = self._sync_get_memory()[0]
-        logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
 
-        # ======================= Graph capture initialization ========================
+        # padded rows replay this request, so it carries one token per decode row
         self.dummy_req = Req(
-            input_ids=torch.tensor([0], dtype=torch.int32, device="cpu"),
+            input_ids=torch.zeros(config.decode_rows_per_req, dtype=torch.int32, device="cpu"),
             table_idx=config.max_running_req,
             cached_len=0,
             output_len=1,
@@ -934,41 +979,44 @@ class Engine:
             cache_handle=None,  # type: ignore
         )
         # padded/dummy rows index the GDN padding slot (0) so gather/scatter hits scratch.
-        if self.linear_state_pool is not None:
+        # Naive GDN keys state by table_idx, where slot 0 is a live request and the dummy's own row is the scratch.
+        if self.linear_state_pool is not None and config.cache_type == "hybrid_radix":
             self.dummy_req.linear_slot_idx = self.linear_state_pool.padding_slot
         self.page_table[self.dummy_req.table_idx].fill_(num_tokens)  # point to dummy page
+
+        # ======================= Verify state initialization ========================
+        if config.decode_rows_per_req > 1 and self.linear_state_pool is not None:
+            self.linear_state_pool.attach_verify_scratch(config.max_running_req, config.decode_rows_per_req)
+        if self.spec is not None:
+            self.spec.attach(self)
+
+        post_free_memory = self._sync_get_memory()[0]
+        logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
+
+        # ======================= Graph capture initialization ========================
         if self.dflash_worker is not None:
             self.dflash_worker.release_verify_reserve()
             torch.cuda.empty_cache()
-        self.graph_runner = GraphRunner(
-            stream=self.stream,
-            device=self.device,
-            model=self.model,
-            attn_backend=self.attn_backend,
-            cuda_graph_bs=config.cuda_graph_bs,
-            cuda_graph_max_bs=config.cuda_graph_max_bs,
-            free_memory=init_free_memory,
-            max_seq_len=aligned_max_seq_len,
-            vocab_size=config.model_config.vocab_size,
-            dummy_req=self.dummy_req,
-            moe_offload_cache=self.moe_offload_cache,
-            mrope=config.model_config.model_is_mrope,
-            hidden_layer_ids=(
-                self.dflash_worker.target_layer_ids if self.dflash_worker is not None else None
-            ),
-            hidden_size=config.model_config.hidden_size,
-            hidden_dtype=self.dtype,
-            **_dflash_graph_runner_dflash_kwargs(
-                self.dflash_worker,
-                target_verify_graph_enabled=_dflash_target_verify_graph_enabled_for_config(config),
-                max_running_req=_dflash_verify_batch_limit(config),
-            ),
-        )
+        self.graph_runner = self._make_graph_runner(config.cuda_graph_bs, init_free_memory, aligned_max_seq_len)
         if config.prefill_warmup:
             self._warmup_prefill()
-        if config.vram_reserve_mb:
-            self._fit_prefill_peak(config.vram_reserve_mb << 20)
+        reserve = (config.vram_reserve_mb << 20) + self._layer_major_retained_bytes()
+        if reserve:
+            self._fit_prefill_peak(reserve)
         self._fill_moe_slot_cache()
+
+    def _layer_major_retained_bytes(self) -> int:
+        """A layer-major prefill keeps every chunk's residual streams and their next-layer norm
+        between layers. The peak fit runs one chunk, so the other chunks' rows are reserved."""
+        from freetoken.scheduler.prefill import _LAYER_MAJOR_MAX_EXTEND_TOKENS
+        from freetoken.scheduler.scheduler import _supports_layer_major_prefill
+
+        if not _supports_layer_major_prefill(self.config):
+            return 0
+        tokens = _LAYER_MAJOR_MAX_EXTEND_TOKENS - self.config.max_extend_tokens
+        args = self.config.model_config.qwen4_args
+        row = args.hc_count * args.hidden_size * self.config.dtype.itemsize
+        return max(tokens, 0) * row * 2
 
     def _fill_moe_slot_cache(self) -> None:
         """Start the expert slot cache full instead of empty (graph capture and the
@@ -1187,6 +1235,7 @@ class Engine:
         return plan_moe_cache_auto(
             config,
             self._pool_cls,
+            spec_budget=self._spec_budget(config),
             baseline_free=self._baseline_free,
             weights_bytes=self._weights_bytes,
             per_expert_bytes=expert_bytes_per_slot(banks.sources),
@@ -1313,8 +1362,8 @@ class Engine:
                 f"(--moe-cache-scope per-layer gives each layer its own)"
             )
         self._moe_slot_limit = _slot_limit(layer_methods) if layer_methods is not None else (method.slot_limit() if method is not None else None)
-        # with GPU decode, a pool below num_experts slots bounds the batch; the startup split keeps room for one token per step
-        pools = self._moe_pools(1)
+        # with GPU decode, a pool below num_experts slots bounds the batch; the startup split keeps room for one request's decode step
+        pools = self._moe_pools(config.decode_rows_per_req if decode_target == "gpu" else 1)
         size_cap = sum(p.max_num_slots for p in pools)
         if config.moe_cache_auto:
             size, pages, overlap = self._resolve_auto_moe_cache_size(config, banks, method, max_slots=size_cap)
@@ -1441,7 +1490,6 @@ class Engine:
             self._resolve_hybrid_fetch(config, cache, startup_split)
         if locked_fetch:
             attach_locked_fetch(cache, config, staging, self._profile_layer_rows)
-        self.ctx.moe_offload_cache = cache
         self.moe_offload_cache = cache
         return cache
 
@@ -1644,6 +1692,7 @@ class Engine:
         max_tokens = max(config.max_running_req, config.cuda_graph_max_bs or 0, *(config.cuda_graph_bs or []), 1)
         if self.dflash_worker is not None:
             max_tokens *= self.dflash_worker.block_size
+        max_tokens *= config.decode_rows_per_req
         by_id = sorted(layers, key=lambda layer: layer.layer_id)
         layer_formats = [layer.quant_method.cpu_spec() for layer in by_id]
         executor = CpuMoeExecutor(
@@ -1712,8 +1761,7 @@ class Engine:
 
     def _refresh_seq_state(self, config) -> None:
         num_tokens = self.num_pages * config.page_size
-        self.max_seq_len = min(config.max_seq_len, num_tokens)
-        aligned_max_seq_len = _page_table_width(self.max_seq_len, config.page_size)
+        self.max_seq_len, aligned_max_seq_len = _seq_limits(config, num_tokens)
         if aligned_max_seq_len != self.page_table.shape[1]:
             # max_seq_len changed (e.g. KV grew past the startup token budget); the page table
             # columns must track it or new requests would index out of bounds. The scheduler
@@ -1757,7 +1805,7 @@ class Engine:
                 )
             try:
                 # a rebuild does not lower max_running_req again, so with GPU decode every pool must hold a full batch; hybrid caps its fetches instead
-                batch = config.max_running_req if self.moe_offload_cache.decode_target == "gpu" else 1
+                batch = config.max_running_req * config.decode_rows_per_req if self.moe_offload_cache.decode_target == "gpu" else 1
                 moe_pool_sizes = split_slots(moe_cache_size, self._moe_pools(batch), self._moe_expert_counts)
                 self.moe_offload_cache.validate_rebuild(moe_cache_size, moe_pool_sizes)
             except ValueError as e:
@@ -1806,14 +1854,14 @@ class Engine:
             if num_mamba_slots is not None
             else (self.linear_state_pool.num_slots if self.linear_state_pool is not None else None)
         )
+        spec_fixed, draft_page = self._spec_budget(config)
         self.kv_cache.validate_rebuild(
             config, num_pages=num_pages,
             num_swa_pages=num_swa_pages, target_moe=target_moe,
             per_expert_bytes=per_expert_bytes, baseline_free=self._baseline_free,
             weights_bytes=self._weights_bytes, current_num_pages=self.num_pages,
-            extra_fixed_bytes=(
-                state_pool_bytes(config, target_mamba) if target_mamba is not None else 0
-            ),
+            extra_fixed_bytes=(state_pool_bytes(config, target_mamba) if target_mamba is not None else 0) + spec_fixed,
+            extra_page_bytes=draft_page,
             extra_note=(
                 f", mamba={target_mamba - 1} slots" if target_mamba is not None else ""
             ),
@@ -1832,7 +1880,12 @@ class Engine:
         self.rebuild_teardown_started = True
         # 1. Tear down CUDA graphs + backend capture scratch (free-before-alloc).
         self.attn_backend.reset_capture()
+        if self.linear_backend is not None:
+            self.linear_backend.reset_capture()
         self.graph_runner.destroy_cuda_graphs()
+        if self.spec is not None:
+            # the draft KV is keyed by the target's slots, so it can stay only when the target KV pool does
+            self.spec.detach(keep_kv=num_pages is None and num_swa_pages is None)
         # 2. Resize caches in place (each frees its old GPU tensors before allocating),
         # shrinking resizes before growing ones: a pool's grow must not run while a
         # still-large sibling is resident, or a target that passed the fit check above can
@@ -1883,27 +1936,48 @@ class Engine:
                     op()
         # 3. Refresh max_seq_len (+ generic page table) for the new token budget.
         self._refresh_seq_state(config)
-        aligned_max_seq_len = _page_table_width(self.max_seq_len, config.page_size)
+        aligned_max_seq_len = self.page_table.shape[1]
         # 4. Re-capture CUDA graphs against the new tensors (reset_capture above re-armed
         #    the backend; _sync_get_memory empties the cache so freed memory is reclaimed).
         gc.collect()
         free_min = self._sync_get_memory()[0]
+        if self.spec is not None:
+            self.spec.attach(self)
         if self.dflash_worker is not None:
             self.dflash_worker.release_verify_reserve()
             torch.cuda.empty_cache()
-        self.graph_runner = GraphRunner(
+        # reuse the startup-resolved bs set (see above)
+        self.graph_runner = self._make_graph_runner(prior_graph_bs, free_min, aligned_max_seq_len)
+        self._fill_moe_slot_cache()
+
+    def _make_graph_runner(self, cuda_graph_bs, free_memory: int, max_seq_len: int) -> GraphRunner:
+        """The target's graphs: the decode family, or with speculative decoding the verify family in its place."""
+        config = self.config
+        rows = config.decode_rows_per_req
+        verify = {}
+        if rows > 1:
+            # every decode step is a verify; the verify scratch has max_running_req rows
+            cuda_graph_bs = [
+                bs for bs in _determine_cuda_graph_bs(cuda_graph_bs, config.cuda_graph_max_bs, free_memory)
+                if bs <= config.max_running_req
+            ]
+            verify = dict(rows_per_req=rows, phase="verify", batch_hook=self._prepare_verify_batch)
+        runner = GraphRunner(
             stream=self.stream,
             device=self.device,
-            model=self.model,
+            forward=self.model.forward,
             attn_backend=self.attn_backend,
-            cuda_graph_bs=prior_graph_bs,  # reuse the startup-resolved set (see above)
+            cuda_graph_bs=cuda_graph_bs,
             cuda_graph_max_bs=config.cuda_graph_max_bs,
-            free_memory=free_min,
-            max_seq_len=aligned_max_seq_len,
-            vocab_size=config.model_config.vocab_size,
+            free_memory=free_memory,
+            max_seq_len=max_seq_len,
             dummy_req=self.dummy_req,
             moe_offload_cache=self.moe_offload_cache,
             mrope=config.model_config.model_is_mrope,
+            out_dtype=torch.float32,
+            linear_backend=self.linear_backend,
+            **verify,
+            model=self.model,
             hidden_layer_ids=(
                 self.dflash_worker.target_layer_ids if self.dflash_worker is not None else None
             ),
@@ -1915,7 +1989,60 @@ class Engine:
                 max_running_req=_dflash_verify_batch_limit(config),
             ),
         )
-        self._fill_moe_slot_cache()
+        if self.spec is not None:
+            self.spec.capture_graphs(runner.graph_bs_list, runner.graph_pool)
+        return runner
+
+    def _prepare_verify_batch(self, batch: Batch) -> None:
+        batch.features = self.spec.feature_sink(batch)
+
+    def commit_verify(self, reqs, counts, out: torch.Tensor) -> None:
+        """Commit each verified request's first ``counts`` tokens (row i of ``out`` is reqs[i]) to the target's per-request state."""
+        if self.linear_state_pool is not None and self.linear_state_pool.verify_scratch is not None:
+            self.linear_state_pool.commit_verify([gdn_slot(r) for r in reqs], counts)
+        # penalties need no update: they count the committed tokens in token_pool (sample.PenaltyArgs)
+
+    def _spec_budget(self, config) -> tuple[int, int]:
+        """(fixed bytes, draft KV bytes per page) speculative decoding adds next to the KV pool."""
+        if getattr(self, "spec", None) is None:
+            return 0, 0
+        fixed, per_token = self.spec.budget(config)
+        return fixed, per_token * config.page_size
+
+    def forward_logits(self, batch: Batch) -> torch.Tensor:
+        """The batch's logits from its captured graph, or eagerly when none fits."""
+        use_graph = self.graph_runner.can_use_cuda_graph(batch)
+        if getattr(batch, "layer_major", False) and batch.is_prefill:
+            with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, False):
+                logits = self._forward_layer_major(batch)
+        else:
+            # every target forward (prefill chunks, plain decode steps) feeds the draft contexts
+            worker = self.dflash_worker
+            with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
+                if worker is not None:
+                    if batch.is_prefill:
+                        for req in batch.reqs:
+                            worker.begin_request(req.uid, req.input_ids, req.cached_len)
+                    if use_graph:
+                        logits, hidden_states = self.graph_runner.replay(
+                            batch, return_hidden_layers=worker.target_layer_ids
+                        )
+                    else:
+                        logits, hidden_states = self.model.forward(
+                            return_hidden_layers=worker.target_layer_ids
+                        )
+                    spans, row = [], 0
+                    for req in batch.reqs:
+                        spans.append((worker.slot_of(req.uid), row, req.extend_len, req.cached_len))
+                        row += req.extend_len
+                    worker.store_hidden_states_batch(spans, hidden_states)
+                elif use_graph:
+                    logits = self.graph_runner.replay(batch)
+                else:
+                    logits = self.model.forward()
+        if self.cpu_moe_executor is not None:
+            self.cpu_moe_executor.raise_if_unhealthy()
+        return logits
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
@@ -1942,33 +2069,10 @@ class Engine:
         if probe:
             probe_start = torch.cuda.Event(enable_timing=True)
             probe_start.record(self.stream)
-        use_graph = self.graph_runner.can_use_cuda_graph(batch)
-        # every target forward (prefill chunks, plain decode steps) feeds the draft contexts
-        worker = self.dflash_worker
-        with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
-            if worker is not None:
-                if batch.is_prefill:
-                    for req in batch.reqs:
-                        worker.begin_request(req.uid, req.input_ids, req.cached_len)
-                if use_graph:
-                    logits, hidden_states = self.graph_runner.replay(
-                        batch, return_hidden_layers=worker.target_layer_ids
-                    )
-                else:
-                    logits, hidden_states = self.model.forward(
-                        return_hidden_layers=worker.target_layer_ids
-                    )
-                spans, row = [], 0
-                for req in batch.reqs:
-                    spans.append((worker.slot_of(req.uid), row, req.extend_len, req.cached_len))
-                    row += req.extend_len
-                worker.store_hidden_states_batch(spans, hidden_states)
-            elif use_graph:
-                logits = self.graph_runner.replay(batch)
-            else:
-                logits = self.model.forward()
-        if self.cpu_moe_executor is not None:
-            self.cpu_moe_executor.raise_if_unhealthy()
+        spec_prefill = self.spec is not None and batch.is_prefill
+        if spec_prefill:
+            batch.features = self.spec.feature_sink(batch)
+        logits = self.forward_logits(batch)
 
         for req in batch.reqs:
             req.complete_one()
@@ -1984,6 +2088,9 @@ class Engine:
         logprobs_out = self.sampler.compute_logprobs(batch_logits, next_tokens_gpu, args)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)
+        if spec_prefill:
+            # after the D2H is queued: the drain waits for the copy only, while the draft's work overlaps it
+            self.spec.on_prefill(batch, next_tokens_gpu)
         if self.moe_offload_cache is not None and self.moe_offload_cache.collect_stats and batch.is_decode:
             self._moe_stats_step += 1
             if self._moe_stats_step >= MOE_STATS_INTERVAL:
@@ -2317,6 +2424,9 @@ class Engine:
             batch.out_loc = self.page_table[req.table_idx, position_i : position_i + 1]
             batch.fla_metadata = None
             self.attn_backend.prepare_metadata(batch)
+            if self.linear_backend is not None:
+                # a graph replay copies the GDN slots from this metadata (LinearAttnBackend)
+                self.linear_backend.prepare_metadata(batch)
             use_graph = self.graph_runner.can_use_cuda_graph(batch) and self.graph_runner.can_return_hidden_layers(
                 worker.target_layer_ids
             )
@@ -2372,6 +2482,100 @@ class Engine:
         hidden = [torch.cat(parts, dim=0) for parts in hidden_parts]
         return output_tokens, accepted, hidden, torch.cat(step_logits, dim=0)
 
+    def _build_layer_major_chunks(self, batch: Batch) -> list:
+        """Split one admitted long prefill into ordinary eager-forward shaped chunks."""
+        import types
+
+        from freetoken.attention.linear import build_fla_metadata
+        from freetoken.kernel.fla.chunk import CHUNK_SIZE
+
+        req = batch.reqs[0]
+        origin = req.cached_len
+        outer_fla = getattr(batch, "fla_metadata", None)
+        if outer_fla is None:
+            outer_fla = build_fla_metadata(batch, self.device, self.linear_state_pool)
+            batch.fla_metadata = outer_fla
+        track = None
+        if outer_fla.track_dst is not None:
+            assert outer_fla.track_dst.numel() == 1
+            boundary = origin + int(outer_fla.track_boundary_row[0])
+            assert origin < boundary < origin + req.extend_len
+            assert req.mamba_last_track_seqlen == boundary
+            assert req.linear_slot_idx == int(outer_fla.cache_indices[0])
+            track = {
+                "boundary": boundary,
+                "src": int(outer_fla.cache_indices[0]),
+                "dst": int(outer_fla.track_dst[0]),
+                "h_row": int(outer_fla.track_h_row[0]),
+                "conv_src": outer_fla.track_conv_src[0:1],
+                "boundary_row": int(outer_fla.track_boundary_row[0]),
+            }
+        carry = (
+            "table_idx", "uid", "linear_slot_idx", "max_device_len", "mamba_ping_pong",
+            "mamba_next_track_idx", "mamba_restore_src", "swa_evicted_seqlen",
+            "sampling_params", "mrope_delta",
+        )
+        chunks, lo, projections = [], 0, 0
+        while lo < req.extend_len:
+            hi = min(lo + self.config.max_extend_tokens, req.extend_len)
+            if track is not None:
+                boundary = track["boundary"]
+                if origin + lo < boundary < origin + hi and (boundary - origin - lo) % CHUNK_SIZE:
+                    hi = boundary - origin
+            child_req = types.SimpleNamespace(**{key: getattr(req, key, None) for key in carry})
+            child_req.cached_len = origin + lo
+            child_req.device_len = origin + hi
+            child_req.extend_len = hi - lo
+            child_req.mm_items = None
+            child_req.mrope_positions_full = None
+            child = types.SimpleNamespace(
+                phase="prefill",
+                input_ids=batch.input_ids[lo:hi],
+                positions=batch.positions[lo:hi],
+                out_loc=batch.out_loc[lo:hi],
+                mrope_positions=(batch.mrope_positions[:, lo:hi] if getattr(batch, "mrope_positions", None) is not None else None),
+                mm_embeds=None,
+                mm_rows=None,
+                mm_block_ends=None,
+                reqs=[child_req],
+                padded_reqs=[child_req],
+            )
+            child.is_decode = False
+            child.is_prefill = True
+            child.size = 1
+            child.get_attn_positions = lambda child=child: (
+                child.mrope_positions if child.mrope_positions is not None else child.positions
+            )
+            child.fla_metadata = build_fla_metadata(child, self.device, self.linear_state_pool, include_track=False)
+            child.track_initial_src = child.track_initial_dst = None
+            if track is not None:
+                boundary = track["boundary"]
+                if boundary == origin + lo:
+                    child.track_initial_src, child.track_initial_dst = track["src"], track["dst"]
+                    projections += 1
+                elif origin + lo < boundary < origin + hi:
+                    local_boundary = boundary - origin - lo
+                    assert local_boundary % CHUNK_SIZE == 0
+                    child.fla_metadata.track_dst = torch.tensor([track["dst"]], dtype=torch.int64, device=self.device)
+                    child.fla_metadata.track_h_row = torch.tensor([track["h_row"] - lo // CHUNK_SIZE], dtype=torch.int64, device=self.device)
+                    child.fla_metadata.track_conv_src = (track["conv_src"] - lo).to(self.device)
+                    child.fla_metadata.track_boundary_row = torch.tensor([track["boundary_row"] - lo], dtype=torch.int64, device=self.device)
+                    projections += 1
+            self.attn_backend.prepare_metadata(child)
+            child.skip_begin_prefill = True
+            chunks.append(child)
+            lo = hi
+        if track is not None:
+            assert projections == 1, f"layer-major track projected {projections} times"
+        return chunks
+
+    def _forward_layer_major(self, batch: Batch) -> torch.Tensor:
+        chunks = self._build_layer_major_chunks(batch)
+        if self.moe_offload_cache is not None:
+            self.moe_offload_cache.begin_prefill()
+        return self.model.forward_layer_major(chunks)
+
+    @torch.inference_mode()
     def _warmup_prefill(self) -> None:
         """Compile the Triton prefill path before the first real request.
 
@@ -3116,6 +3320,8 @@ def _adjust_config(config: EngineConfig):
         )
         logger.info_rank0(f"Auto-selected attention backend: {config.attention_backend}")
     _validate_attention_backend_choice(config, override, required_attn_types)
+    if getattr(config, "spec_verify", False):
+        _adjust_spec_config(config, override, is_dsv4 or is_dsv41 or has_swa_attention)
 
     if config.moe_cache_rate is not None:
         total_experts = config.model_config.num_moe_layers * config.model_config.num_experts

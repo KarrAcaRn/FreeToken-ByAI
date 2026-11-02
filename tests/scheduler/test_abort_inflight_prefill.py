@@ -60,6 +60,7 @@ def _setup():
         finished_reqs=set(),
         eos_token_ids=set(),
         toolcall_anchor_id=None,
+        spec=None,
         config=SimpleNamespace(page_size=1),
         engine=SimpleNamespace(dflash_worker=None),
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
@@ -76,6 +77,7 @@ def _setup():
     stub._free_req_resources = lambda req: Scheduler._free_req_resources(stub, req)
     stub._drain_single_token = lambda *a: Scheduler._drain_single_token(stub, *a)
     stub._drain_multi_token = lambda *a: Scheduler._drain_multi_token(stub, *a)
+    stub._commit_tokens = lambda req, tokens: Scheduler._commit_tokens(stub, req, tokens)
     return pool, cm, tm, dm, pm, sent, stub
 
 

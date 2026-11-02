@@ -263,6 +263,11 @@ def test_disk_table_matches_oracle(tmp_path, dtype):
     disk.fill([torch.tensor([EOS, EOS, *seqs[0]]), torch.tensor([21, 22, *seqs[1]])], graph=False)
     row_ids = emb.row_ids(_meta(seqs, [[EOS, EOS], [21, 22]])).cuda()
     assert _bitwise_equal(disk.lookup(row_ids), oracle.lookup(row_ids)), "prefill"
+    # a layer-major prefill chunk reads only its slice of the staged batch
+    disk.read_from(len(seqs[0]))
+    tail = emb.row_ids(_meta([seqs[1]], [[21, 22]])).cuda()
+    assert _bitwise_equal(disk.lookup(tail), oracle.lookup(tail)), "offset slice"
+    disk.read_from(0)
 
     # decode steps with a rolling window, plus the out= contract
     older, newer = 41, EOS
@@ -388,10 +393,9 @@ def _wait_sync_large_graph(tmp_path, kernels):
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         # Exercise the capture-time upload from #697 as well as the PLE dispatch hook.
-        runner = GraphRunner(stream=stream, device=torch.device("cuda"), model=SimpleNamespace(forward=forward),
+        runner = GraphRunner(stream=stream, device=torch.device("cuda"), forward=forward,
                              attn_backend=attn, cuda_graph_bs=[8], cuda_graph_max_bs=None,
-                             free_memory=1024**3, max_seq_len=16,
-                             vocab_size=args.num_ngram_heads * disk.head_dim, dummy_req=req)
+                             free_memory=1024**3, max_seq_len=16, dummy_req=req, out_dtype=torch.float32)
         batch = Batch(reqs=[req] * 8, phase="decode")
         runner.pad_batch(batch)
         batch.positions = torch.full((8,), 2, dtype=torch.int32, device="cuda")

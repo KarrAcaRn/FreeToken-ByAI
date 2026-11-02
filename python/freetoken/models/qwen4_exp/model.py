@@ -40,12 +40,29 @@ if TYPE_CHECKING:
     from freetoken.models.config import ModelConfig
 
 
+def _copy_layer_major_track_state(pool, layer, batch) -> None:
+    """Seed a child at the one outer prefix-checkpoint boundary."""
+    src = getattr(batch, "track_initial_src", None)
+    if src is None:
+        return
+    dst = batch.track_initial_dst
+    if layer._is_linear:
+        index = pool.local_index(layer.linear_attn.layer_id)
+        pool.recurrent_states[index, dst].copy_(pool.recurrent_states[index, src])
+        pool.conv_states[index, dst].copy_(pool.conv_states[index, src])
+    if layer.ple is not None:
+        from .config import PLE_CONV_STATE, PLE_NGRAM_STATE
+
+        pool.slot_state(PLE_CONV_STATE, layer.ple.layer_id)[dst].copy_(pool.slot_state(PLE_CONV_STATE, layer.ple.layer_id)[src])
+        pool.slot_state(PLE_NGRAM_STATE)[dst].copy_(batch.ple_meta.ngram_context[0])
+
+
 def build_linear_mixer(config: ModelConfig, layer_id: int, prefix: str) -> BaseOP:
     """GDN mixer of a linear_attention layer (Qwen3.5's GDN with a configurable output gate)."""
-    from .gdn import Qwen4ExpGatedDeltaNet
+    from freetoken.layers.linear_attn import GatedDeltaNet
 
     g = config.linear_attention_group()
-    return Qwen4ExpGatedDeltaNet(
+    return GatedDeltaNet(
         hidden_size=config.hidden_size,
         num_k_heads=g.num_key_heads,
         num_v_heads=g.num_value_heads,
@@ -172,6 +189,41 @@ class Qwen4ExpModel(BaseOP):
             taps.append(out)
         return out, taps
 
+    def forward_layer_major(self, chunk_batches: List[Batch]) -> torch.Tensor:
+        """Run decoder layers outermost, retaining the normal chunk order within each layer."""
+        from .ple import build_ple_metadata, commit_ngram_context
+
+        ctx = get_global_ctx()
+        full_batch = ctx.batch
+        hidden = []
+        try:
+            for child in chunk_batches:
+                ctx._batch = child
+                hidden.append(embed_input_ids(self.embed_tokens, child.input_ids, child).repeat(1, self.hc_count))
+            normed = [None] * len(chunk_batches)
+            # the disk PLE table stages the whole request once; each chunk reads its slice of it
+            offsets = [0]
+            for child in chunk_batches[:-1]:
+                offsets.append(offsets[-1] + child.input_ids.shape[0])
+            for layer in self.layers.op_list:
+                read_from = getattr(layer.ple.ple_embedding.table, "read_from", None) if layer.ple is not None else None
+                for index, child in enumerate(chunk_batches):
+                    ctx._batch = child
+                    if layer.ple is not None:
+                        child.ple_meta = build_ple_metadata(child, layer.ple.args, child.input_ids.device)
+                        if read_from is not None:
+                            read_from(offsets[index])
+                    _copy_layer_major_track_state(ctx.linear_state_pool, layer, child)
+                    hidden[index], normed[index] = layer.forward(hidden[index], child, normed[index])
+                    if layer.ple is not None:
+                        commit_ngram_context(child.ple_meta, child.fla_metadata)
+            return self.hyper_connection_mixer.mix(hidden[-1], normed[-1])[0]
+        finally:
+            ctx._batch = full_batch
+            for ple in self._ple:
+                if (read_from := getattr(ple.ple_embedding.table, "read_from", None)) is not None:
+                    read_from(0)
+
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
     def __init__(self, config: ModelConfig) -> None:
@@ -199,6 +251,15 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         (the GDN states are committed by the engine)."""
         for ple in self.model.ple_layers:
             ple.dflash_commit(slot, block_rows, rows, commit_len, tokens)
+
+    @staticmethod
+    def _disk_ple_staging_tokens(engine_config) -> int:
+        """A layer-major prefill dispatches the whole request at once, so the disk table stages all of it."""
+        if not getattr(engine_config, "prefill_layer_major", False):
+            return engine_config.max_extend_tokens
+        from freetoken.scheduler.prefill import _LAYER_MAJOR_MAX_EXTEND_TOKENS
+
+        return max(engine_config.max_extend_tokens, _LAYER_MAJOR_MAX_EXTEND_TOKENS)
 
     def load_host_tables(self, engine_config) -> int:
         """Attach the PLE n-gram table (pinned checkpoint bank, or zeros for dummy weights); returns the pinned host bytes the engine reserves from its pin budget."""
@@ -245,7 +306,7 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
                 resolve_row_source(engine_config.model_path, self._config.qwen4_args),
                 constants,
                 max_graph_rows=max(256, engine_config.cuda_graph_max_bs or 0),
-                max_extend_tokens=engine_config.max_extend_tokens,
+                max_extend_tokens=self._disk_ple_staging_tokens(engine_config),
             )
             self._ple_table = disk_table
             for ple in ple_layers:
@@ -274,6 +335,16 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             hidden, hidden_states = output
             return self.lm_head.forward(hidden), hidden_states
         return self.lm_head.forward(output)
+
+    def forward_layer_major(self, chunk_batches: List[Batch]) -> torch.Tensor:
+        ctx = get_global_ctx()
+        previous_batch = ctx.batch
+        try:
+            hidden = self.model.forward_layer_major(chunk_batches)
+            ctx._batch = chunk_batches[-1]
+            return self.lm_head.forward(hidden)
+        finally:
+            ctx._batch = previous_batch
 
 
 class Qwen4ExpForConditionalGeneration(QwenVLVisionMixin, Qwen4ExpForCausalLM):

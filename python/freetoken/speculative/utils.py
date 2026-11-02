@@ -252,7 +252,6 @@ class VerifyState(NamedTuple):
     batch_out_loc: torch.Tensor | None
     batch_padded_reqs: list
     batch_fla_metadata: Any
-    batch_linear_table_idx: torch.Tensor | None
     reqs: tuple[tuple[int, int, int], ...]  # per request: (input_len, cached_len, device_len)
 
 
@@ -264,7 +263,6 @@ def snapshot_verify_state(batch: Batch) -> VerifyState:
         batch_out_loc=batch.out_loc,
         batch_padded_reqs=batch.padded_reqs,
         batch_fla_metadata=batch.fla_metadata,
-        batch_linear_table_idx=batch.linear_table_idx,
         reqs=tuple((r.input_ids.numel(), r.cached_len, r.device_len) for r in batch.reqs),
     )
 
@@ -280,7 +278,6 @@ def restore_verify_state(batch: Batch, state: VerifyState) -> None:
     batch.out_loc = state.batch_out_loc
     batch.padded_reqs = state.batch_padded_reqs
     batch.fla_metadata = state.batch_fla_metadata
-    batch.linear_table_idx = state.batch_linear_table_idx
 
 
 def clone_hidden_outputs(hidden_states: list[torch.Tensor]) -> list[torch.Tensor]:

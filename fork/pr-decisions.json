@@ -451,7 +451,8 @@
     "authors": [
       "santanu20 <santanu20@users.noreply.github.com>"
     ],
-    "summary": "Already covered by #305 (more complete --api-key)"
+    "summary": "Already covered by #305 (more complete --api-key)",
+    "upstream": "closed"
   },
   "565": {
     "number": 565,
@@ -1008,7 +1009,8 @@
     "authors": [
       "Cyber-Marty <15370813896@163.com>"
     ],
-    "summary": "Masks a likely sender-side race instead of fixing it; partial frames still crash; Windows-only, not reproducible"
+    "summary": "Masks a likely sender-side race instead of fixing it; partial frames still crash; Windows-only, not reproducible",
+    "upstream": "closed"
   },
   "464": {
     "number": 464,
@@ -1527,7 +1529,8 @@
     ],
     "revisit_with": 260,
     "revisit": "after-queue",
-    "summary": "Stacked on #260"
+    "summary": "Stacked on #260",
+    "upstream": "closed"
   },
   "316": {
     "number": 316,
@@ -1545,7 +1548,9 @@
       "Erik Bogado <erikbogado@gmail.com>"
     ],
     "summary": "Under HIP graph capture the fused expert copy lost its host mappings; now falls back to per-bank copies on ROCm",
-    "fixup": "Test stub given next's _disk_tier attribute"
+    "fixup": "Test stub given next's _disk_tier attribute",
+    "upstream": "closed",
+    "after_upstream_close": "kept (2026-11-02): closed upstream on 2026-10-30 without comment, merge or replacement; upstream main still uses the fused copy under HIP graph capture. CUDA-neutral, needed by our ROCm branches. Listed under 'Our own additions' in the README."
   },
   "315": {
     "number": 315,
@@ -2809,7 +2814,8 @@
     "authors": [
       "Yuu <206304251+nekomario28@users.noreply.github.com>"
     ],
-    "summary": "Draft - revisit when ready"
+    "summary": "Draft - revisit when ready",
+    "upstream": "closed"
   },
   "135": {
     "number": 135,
@@ -3300,16 +3306,20 @@
     "number": 686,
     "title": "perf(qwen4): add opt-in layer-major long prefill",
     "head_sha": "63858faa584d",
-    "reviewed_at": "2026-10-20",
-    "decision": "deferred",
-    "commits": [],
+    "reviewed_at": "2026-10-26",
+    "decision": "adopted-with-fixups",
+    "commits": [
+      "b66e5e00",
+      "d0785f5a",
+      "5d68841d"
+    ],
     "gpu_untested": false,
     "authors": [
       "shangfeng-liu <liusf1987@gmail.com>"
     ],
-    "reason": "Opt-in --prefill-layer-major for Qwen3.8-Flash-Next: a long offloaded prefill (<=32k new tokens) runs each decoder layer over all chunks before the next, so streamed experts are reused (32k first text 21.9 -> 11.0 s). Only eligible with pinned PLE, TP=1, one request. Not judged on its merits yet: here Flash-Next needs --ple-backend disk (pinned PLE is 47.7 GiB next to the experts in 78 GiB RAM), which the PR excludes, and the GPU driver is down (2026-10-20).",
-    "summary": "Layer-major long prefill for Flash-Next offload (32k TTFT ~2x); needs pinned PLE, ours runs disk PLE",
-    "revisit": "after-queue"
+    "reason": "Opt-in --prefill-layer-major for Qwen3.8-Flash-Next: a long offloaded prefill (<=32k new tokens) runs each decoder layer over all its chunks before the next layer, so a streamed expert layer is reused across chunks. Upstream it is limited to pinned PLE, which FP4-Local cannot use here (61 GiB experts + 26.9 GiB pinned PLE > 85 GiB RAM), so we extended it to the disk PLE backend. Merge conflicts with next's DFlash forward path (layer-major goes first; DFlash configs are excluded). GPU, Flash-Next FP4-Local on the 4090 (disk PLE, fp8 KV, auto expert cache, 8k chunks), same build flag off vs on, 2 cold prompts x 64 greedy tokens: TTFT 18.2 -> 9.0 s (29.9k tokens) and 15.4 -> 8.3 s (28.0k), identical output text, decode unchanged (64 tokens in 2.1-2.3 s); expert cache 3652 -> 3271 slots for the reserve. Combined CPU/GPU pytest (engine, scheduler, models, server, kvcache, moe) green.",
+    "summary": "Layer-major long prefill for Flash-Next offload; extended to disk PLE, 30k-token TTFT 18.2 -> 9.0 s here, same output",
+    "fixup": "Disk PLE: staging sized for 32k tokens, each chunk reads its slice of the staged run (read_from), overflow raises; test in test_ple_disk. Layer loop carries next's fused (hidden, normed) per chunk (f965dfab), which crashed the PR on next. Startup reserves the retained rows of the chunks beyond the first via the prefill peak fit (30k prompt OOMed without). MoE begin_prefill check no longer needs an engine context (the PR broke 3 offload tests). DFlash excluded from the gate. Test fakes updated (mamba_host_enabled)."
   },
   "668": {
     "number": 668,
@@ -3577,7 +3587,8 @@
     "commits": [
       "2ce557b"
     ],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "795": {
     "number": 795,
@@ -3689,7 +3700,8 @@
     "reviewed_at": "2026-10-24",
     "commits": [],
     "gpu_untested": false,
-    "superseded_by": 797
+    "superseded_by": 797,
+    "upstream": "merged"
   },
   "820": {
     "number": 820,
@@ -3726,7 +3738,8 @@
       "048b4dfa"
     ],
     "gpu_untested": true,
-    "fixup": "Test stubs freetoken.memory.available_host_memory (next's cgroup-aware probe) instead of open()"
+    "fixup": "Test stubs freetoken.memory.available_host_memory (next's cgroup-aware probe) instead of open()",
+    "upstream": "merged"
   },
   "816": {
     "number": 816,
@@ -3741,7 +3754,8 @@
     "reviewed_at": "2026-10-24",
     "commits": [],
     "gpu_untested": true,
-    "revisit": "after-queue"
+    "revisit": "after-queue",
+    "upstream": "merged"
   },
   "814": {
     "number": 814,
@@ -3759,5 +3773,108 @@
     ],
     "gpu_untested": false,
     "fixup": "Spans taken from #504's shared GenTimer instead of a second capture; metrics and timings coexist"
+  },
+  "848": {
+    "number": 848,
+    "title": "fix(sampler): bound top_k to the vocabulary before the int32 cast",
+    "head_sha": "e65fcbe58d62",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "A5bhinav <112536203+A5bhinav@users.noreply.github.com>",
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Saurabh Pathak <saurabhpathak394@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "superseded",
+    "superseded_by": 790,
+    "reason": "Same one-line clamp (min(top_k, vocab_size) before the int32 cast) is already on next via #790 (e920eb4).",
+    "summary": "Already covered by #790, which clamps top_k to the vocabulary the same way",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "849": {
+    "number": 849,
+    "title": "fix(scheduler): clip max_tokens on a copy of the shared SamplingParams",
+    "head_sha": "6a1ddc94ab20",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "A5bhinav <112536203+A5bhinav@users.noreply.github.com>",
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Saurabh Pathak <saurabhpathak394@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "superseded",
+    "superseded_by": 788,
+    "reason": "next already clips max_tokens on a dataclasses.replace copy via #788 (7602430); this PR is the same fix.",
+    "summary": "Already covered by #788, which clips max_tokens on a copy of shared SamplingParams",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "850": {
+    "number": 850,
+    "title": "fix(server): reject empty completions prompt and keep error code",
+    "head_sha": "cf093834ecf8",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "A5bhinav <112536203+A5bhinav@users.noreply.github.com>",
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Saurabh Pathak <saurabhpathak394@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "adopted-with-fixups",
+    "reason": "An empty prompt list on /v1/completions returned an empty 200 response, and ack error codes (e.g. context_length_exceeded) were dropped. Merged; conflict with next's token-id prompt handling resolved by hand. CPU server suite green (pure API path, no GPU needed).",
+    "summary": "Empty /v1/completions prompt lists are refused with 400; engine error codes reach the client",
+    "fixup": "Empty check moved before next's token-id branch; error code forwarded from next's per-prompt drain; tests for both added",
+    "commits": [
+      "c57c547"
+    ],
+    "gpu_untested": false
+  },
+  "845": {
+    "number": 845,
+    "title": "feat(gguf): read nvfp4 weight scales on qwen4exp ggufs",
+    "head_sha": "dcee9e8bfb07",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Lifts the refusal of NVFP4 weight scales on qwen4exp GGUFs (and refuses a scaled PLE table). fused() applies the scales generically, but whether every qwen4exp NVFP4 tensor (embedding, untiled GDN projections, experts) is served correctly needs a run on an NVFP4 qwen4exp GGUF, which we do not have; not judged on its merits yet.",
+    "summary": "Allows NVFP4 weight scales in qwen4exp GGUFs; deferred: no NVFP4 qwen4exp GGUF here to validate",
+    "commits": [],
+    "gpu_untested": true
+  },
+  "844": {
+    "number": 844,
+    "title": "feat(spec): add MTP drafts for the Qwen3.5 family and Qwen3.8-Flash-Next",
+    "head_sha": "e5ac81f32720",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Large feature (35 files, +1563) built on upstream #836's target-side verify, which arrived on next with today's sync next to our DFlash. All three local Qwen checkpoints carry MTP weights (Qwen3.6-35B NVFP4, Qwen3.8-27B NVFP4, Flash-Next FP4-Local), so it is testable here, but the GPU driver is down today; trial-merge and benchmark against DFlash once the GPU is back. Not judged on its merits yet.",
+    "summary": "MTP speculative drafts for Qwen3.5/3.6/3.8 and Flash-Next; deferred until the GPU is back (models here have MTP)",
+    "commits": [],
+    "gpu_untested": true
   }
 }

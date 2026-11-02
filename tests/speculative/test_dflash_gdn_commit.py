@@ -12,7 +12,6 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
 @pytest.mark.parametrize("commit_len", [1, 3, 8])
 def test_replayed_state_matches_the_kernels_intermediate_state(commit_len):
     from freetoken.kernel.fla import fused_sigmoid_gating_delta_rule_update
-    from freetoken.models.qwen3_5_moe.gdn_kernels import gdn_decode_fla
 
     torch.manual_seed(0)
     dev, n, hk, hv, dk, dv, slots, slot = "cuda", 8, 2, 4, 32, 32, 3, 1
@@ -41,9 +40,10 @@ def test_replayed_state_matches_the_kernels_intermediate_state(commit_len):
 
     # the commit: advance the slot over the first commit_len tokens
     c = commit_len
-    gdn_decode_fla(
-        q[:, :c], k[:, :c], v[:, :c], a[:c], b[:c], A_log=A_log, dt_bias=dt_bias,
-        state_source=pool, indices=idx, scale=dk ** -0.5,
+    fused_sigmoid_gating_delta_rule_update(
+        A_log=A_log, a=a[:c], dt_bias=dt_bias, softplus_beta=1.0, softplus_threshold=20.0,
+        q=q[:, :c], k=k[:, :c], v=v[:, :c], b=b[:c], initial_state_source=pool,
+        initial_state_indices=idx, scale=dk ** -0.5, use_qk_l2norm_in_kernel=True,
         cu_seqlens=torch.tensor([0, c], dtype=torch.int32, device=dev),
     )
     # fp32-rounding level, not bitwise: two different Triton kernels, and triton >= 3.8 contracts
@@ -53,7 +53,7 @@ def test_replayed_state_matches_the_kernels_intermediate_state(commit_len):
 
 
 def test_verify_conv_steps_batch_like_single_blocks():
-    from freetoken.models.qwen3_5_moe.gdn import _dflash_conv_mixed_steps, _dflash_conv_state_steps
+    from freetoken.layers.linear_attn.gdn import _dflash_conv_mixed_steps, _dflash_conv_state_steps
 
     torch.manual_seed(0)
     b, t, dim, km1 = 3, 5, 16, 3

@@ -236,7 +236,7 @@ def tokenize_worker(
                         finished=msg.finished,
                         finish_reason=msg.finish_reason,
                         matched_stop=msg.matched_stop,
-                        completion_tokens_delta=1,
+                        completion_tokens_delta=len(msg.next_tokens),
                         kv_used_pages=msg.kv_used_pages,
                         kv_total_pages=msg.kv_total_pages,
                         mamba_used_slots=msg.mamba_used_slots,
@@ -250,7 +250,7 @@ def tokenize_worker(
                         logprobs=(
                             build_logprobs_entry(
                                 detokenize_manager.tokenizer,
-                                msg.next_token,
+                                msg.next_tokens[-1],
                                 msg.chosen_logprob,
                                 msg.top_ids,
                                 msg.top_logprobs,

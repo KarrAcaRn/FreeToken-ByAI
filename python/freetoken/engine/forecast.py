@@ -358,7 +358,7 @@ def activation_bytes_per_token(model, config) -> int:
     per_token = item * (4 * mc.hidden_size + widest)
     group = mc.linear_attention_group() if hasattr(mc, "linear_attention_group") else None
     if group is not None:
-        _, _, v_heads = _linear_local_dims(group, tp)
+        _, _, v_heads, _ = _linear_local_dims(group, tp)
         per_token += item * v_heads * group.key_head_dim * group.value_head_dim // _GDN_CHUNK
     if getattr(mc, "is_moe", False):
         per_token += item * mc.num_experts_per_tok * 3 * mc.moe_intermediate_size // tp

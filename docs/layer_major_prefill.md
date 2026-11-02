@@ -1,0 +1,58 @@
+# Opt-in layer-major prefill
+
+`--prefill-layer-major` changes the loop order of a long Qwen3.8 text prefill:
+each decoder layer processes every internal token chunk before the next layer
+starts. GPU offload can then reuse a streamed expert layer across those chunks.
+The flag is disabled by default.
+
+## Supported configuration
+
+The initial implementation requires Qwen3.8/Qwen4Exp, TP=1, NVFP4 experts,
+`--moe-strategy offload`, either PLE backend, and no speculative draft model. A single pending text
+request is eligible when its new-token length exceeds `--max-prefill-length`
+and is at most 32,768. The existing prefill length remains the internal chunk
+size. This limit bounds the activations retained between layers. Startup keeps
+those rows (residual streams and their next-layer norm for the chunks beyond
+the first) free by shrinking the expert cache, as `--vram-reserve-mb` does.
+
+For an existing local checkpoint, add these options to the otherwise identical
+serve command used for a comparison:
+
+```sh
+--moe-strategy offload \
+--quant-backend moe.nvfp4=triton --max-prefill-length 4096 \
+--prefill-layer-major
+```
+
+With `--ple-backend disk` the row staging is sized for the 32,768-token limit
+instead of one chunk (about 1.4 KiB per token for an NVFP4 table, two pinned
+buffers and one on the GPU). Multimodal inputs, multiple pending requests, TP>1,
+other models or expert formats, a speculative draft model, short prefills, and
+prefills above the limit retain ordinary chunked execution.
+
+## State and numerical behavior
+
+The outer request owns checkpoint planning. Internal chunks keep absolute
+cached positions and project that plan without choosing new checkpoint slots.
+Conv, recurrent and PLE state advance in chunk order within their layer. The
+outer batch context is restored after normal completion and exceptions.
+
+Numerical comparisons must fix the internal chunk structure, model, quantized
+kernel and sampling parameters. This flag does not promise bitwise equivalence
+between different chunk structures, unsupported runtimes, or concurrent runs.
+An eligible long prefill is one scheduling turn; this implementation does not
+interleave other requests' decoding between its internal chunks.
+
+## Measuring the change
+
+Compare `main` and the candidate with the same PLE configuration,
+checkpoint, prompt bytes, 4K chunk size and output length. Record first-token
+latency with its exact streaming definition, expert H2D traffic, peak VRAM,
+generated token IDs and finish reason. Keep any NVFP4 kernel patch identical
+on both sides; kernel speedups are not layer-major speedups.
+
+This implementation is informed by [Layered Prefill](https://arxiv.org/abs/2510.08055).
+The repeated expert-streaming problem is also described in
+[#579](https://github.com/FlashML-org/FreeToken/issues/579).
+[#578](https://github.com/FlashML-org/FreeToken/pull/578) is a separate kernel
+optimization and is not included here.

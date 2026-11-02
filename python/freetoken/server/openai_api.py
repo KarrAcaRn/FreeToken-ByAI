@@ -639,6 +639,8 @@ async def handle_completion(
     unsupported = _completion_unsupported_reason(req)
     if unsupported is not None:
         return create_error_response(unsupported)
+    if req.n != 1:
+        return create_error_response("Only n=1 is supported", param="n")
     try:  # surfaces out-of-range sampling fields as a 400 rather than a 500 from the worker
         default_max_tokens = (
             getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS
@@ -649,6 +651,8 @@ async def handle_completion(
 
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     assert isinstance(prompts, list)
+    if not prompts:
+        return create_error_response("prompt must not be empty", param="prompt")
     if _is_token_prompt(req.prompt):
         # token ids go to the engine as they are; one list of ints is one prompt
         prompts = [req.prompt] if isinstance(req.prompt[0], int) else req.prompt
@@ -688,7 +692,7 @@ async def handle_completion(
             finish_reason = "stop"
             async for ack in state.wait_for_ack(uid):
                 if getattr(ack, "error", None):
-                    return create_error_response(ack.error)
+                    return create_error_response(ack.error, code=getattr(ack, "error_code", None))
                 timer.observe(ack)
                 prompt_tokens += ack.prompt_tokens_delta
                 completion_tokens += ack.completion_tokens_delta
@@ -737,7 +741,7 @@ async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any)
     finish_reason = "stop"
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
-            yield _sse({"error": {"message": ack.error, "type": "invalid_request_error", "code": None}})
+            yield _sse({"error": {"message": ack.error, "type": "invalid_request_error", "code": getattr(ack, "error_code", None)}})
             yield b"data: [DONE]\n\n"
             return
         timer.observe(ack)

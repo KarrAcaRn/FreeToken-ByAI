@@ -82,6 +82,7 @@ class ServerArgs(SchedulerConfig):
     # prefix-cache hit) alongside usage. Off by default: it is a non-standard field on
     # every protocol we speak.
     enable_metrics_report: bool = False
+    prefill_layer_major: bool = False
     anthropic_inline_system: str = "auto"
     # Comma-separated hostname allowlist for client-supplied image URLs; empty admits any domain.
     allowed_media_domains: str = ""
@@ -574,6 +575,14 @@ def parse_args(
             f"{ServerArgs.max_extend_tokens}). An explicit value is honored even by models "
             "that default to single-pass prefill (DSV4)."
         ),
+    )
+
+    parser.add_argument(
+        "--prefill-layer-major",
+        action="store_true",
+        dest="prefill_layer_major",
+        default=ServerArgs.prefill_layer_major,
+        help="Opt in to layer-major long prefill for eligible Qwen3.8 NVFP4 offload requests.",
     )
 
     parser.add_argument(
@@ -1218,14 +1227,19 @@ def parse_args(
     # DFlash speculative decoding
     parser.add_argument(
         "--speculative-algorithm",
-        choices=["dflash"],
+        "--spec-algo",
+        type=str,
         default=ServerArgs.speculative_algorithm,
-        help="Speculative decoding algorithm (dflash).",
+        help="Speculative decoding with this draft method: dflash (needs "
+             "--speculative-draft-model-path), or a freetoken.spec proposer. Off by default.",
     )
     parser.add_argument(
         "--speculative-draft-model-path",
+        "--spec-draft-model",
+        type=str,
         default=ServerArgs.speculative_draft_model_path,
-        help="Path to the draft model for speculative decoding.",
+        help="Draft weights; dflash needs them, other methods take them from the target "
+             "checkpoint by default.",
     )
     parser.add_argument(
         "--speculative-dflash-block-size",
@@ -1296,6 +1310,14 @@ def parse_args(
         action="store_true",
         dest="moe_prefill_hit_d2d",
         help=argparse.SUPPRESS,  # the default now; kept so existing command lines still parse
+    )
+
+    parser.add_argument(
+        "--speculative-num-steps",
+        "--spec-num-steps",
+        type=int,
+        default=ServerArgs.speculative_num_steps,
+        help="Draft tokens per decode step (k); 0 takes the method's default.",
     )
 
     parser.add_argument(

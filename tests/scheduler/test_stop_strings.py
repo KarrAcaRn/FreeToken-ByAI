@@ -90,7 +90,7 @@ def test_the_detokenizer_trims_the_stop_the_scheduler_matched():
             [
                 DetokenizeMsg(
                     uid=1,
-                    next_token=tok,
+                    next_tokens=[tok],
                     finished=done,
                     finish_reason="stop" if done else None,
                     matched_stop=matches[i],
@@ -104,6 +104,6 @@ def test_the_detokenizer_trims_the_stop_the_scheduler_matched():
 def test_detokenize_advances_a_request_seen_twice_in_one_batch():
     detok = DetokenizeManager(ByteTokenizer(), frozenset({EOS}))
     msgs = [
-        DetokenizeMsg(uid=7, next_token=t, finished=False) for t in _ids("ab")
+        DetokenizeMsg(uid=7, next_tokens=[t], finished=False) for t in _ids("ab")
     ]
     assert "".join(detok.detokenize(msgs)) == "ab"
