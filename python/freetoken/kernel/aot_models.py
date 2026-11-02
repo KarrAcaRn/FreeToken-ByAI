@@ -241,6 +241,7 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         top_k=4,
         moe_intermediate_size=2880,
         expert_formats=("mxfp4_triton",),
+        arch_aliases=("GptOssGGUFForCausalLM",),  # the GGUF row builds the same classes
     ),
     AotModel(
         name="openai/gpt-oss-20b",
@@ -250,6 +251,7 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         top_k=4,
         moe_intermediate_size=2880,
         expert_formats=("mxfp4_triton",),
+        arch_aliases=("GptOssGGUFForCausalLM",),
     ),
     AotModel(
         name="zai-org/GLM-4.7",
