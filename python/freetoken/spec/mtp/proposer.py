@@ -105,6 +105,18 @@ class _VerifySink:
         pass
 
 
+class _UnquantizedKV:
+    """``config`` as the draft KV pool sees it: same geometry, no --kv-cache-dtype quantization."""
+
+    kv_quant = "none"
+
+    def __init__(self, config) -> None:
+        self._config = config
+
+    def __getattr__(self, name: str):
+        return getattr(self._config, name)
+
+
 class MTPProposer(Proposer):
     default_k = 3
     max_k = 8
@@ -149,7 +161,9 @@ class MTPProposer(Proposer):
         # relay hidden and carry, and the verify hiddens
         fixed = rows * (config.speculative_num_steps + 3) * relay_bytes
         groups = draft_cls.draft_config(with_resident_moe(config.model_config)).kv_cache_group_specs()
-        return fixed, sum(spec_kv_bytes_per_token(group, config) for group in groups)
+        # the draft pool is built unquantized whatever --kv-cache-dtype the target uses
+        draft_kv = _UnquantizedKV(config)
+        return fixed, sum(spec_kv_bytes_per_token(group, draft_kv) for group in groups)
 
     def __init__(self, config, target_model) -> None:
         super().__init__(config, target_model)
