@@ -12,7 +12,6 @@ from freetoken.server.openai_api import (
     handle_chat_completion,
     handle_completion,
     stream_chat_completion_chunks,
-    stream_completion_chunks,
 )
 
 
@@ -191,18 +190,15 @@ def test_completion_logprobs_non_stream_and_stream() -> None:
 
     events = parse_sse(
         run(
-            _collect(
-                stream_completion_chunks(
-                    42,
-                    CompletionRequest(
-                        model="client-model",
-                        prompt="hello",
-                        logprobs=2,
-                        max_tokens=8,
-                        stream=True,
-                    ),
-                    FakeState([reply("Hi", finished=True, logprobs=first)]),
-                )
+            _collect_stream(
+                CompletionRequest(
+                    model="client-model",
+                    prompt="hello",
+                    logprobs=2,
+                    max_tokens=8,
+                    stream=True,
+                ),
+                FakeState([reply("Hi", finished=True, logprobs=first)]),
             )
         )
     )
@@ -306,3 +302,8 @@ def test_reasoning_logprob_is_not_carried_to_content_delta() -> None:
 
 async def _collect(iterator):
     return [chunk async for chunk in iterator]
+
+
+async def _collect_stream(req: CompletionRequest, state: FakeState):
+    response = await handle_completion(req, None, state, {})
+    return [chunk async for chunk in response.body_iterator]

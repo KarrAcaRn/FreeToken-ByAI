@@ -431,9 +431,13 @@ class FrontendManager:
         yield b"data: [DONE]\n\n"
         logger.debug("Finished streaming response for user %s", uid)
 
-    async def stream_with_cancellation(self, generator, request: Request, uid: int):
+    async def stream_with_cancellation(
+        self, generator, request: Request, uid: int | Callable[[], list[int]]
+    ):
         """Relay ``generator``'s SSE chunks; while it is silent (a long prefill), send a comment every
-        ``STREAM_KEEPALIVE_SECONDS`` and abort the request if the client has gone."""
+        ``STREAM_KEEPALIVE_SECONDS`` and abort the request if the client has gone. ``uid`` may be a
+        callable returning the uids to abort, for a stream (OpenAI ``n``) whose requests are
+        submitted after it starts."""
         chunks = generator.__aiter__()
         pending: asyncio.Future | None = None
         finished = False
@@ -443,7 +447,7 @@ class FrontendManager:
                     pending = asyncio.ensure_future(chunks.__anext__())
                 done, _ = await asyncio.wait({pending}, timeout=STREAM_KEEPALIVE_SECONDS)
                 if await request.is_disconnected():
-                    logger.info("Client disconnected for user %s", uid)
+                    logger.info("Client disconnected for user %s", uid if isinstance(uid, int) else "(n)")
                     raise asyncio.CancelledError
                 if not done:
                     yield _STREAM_KEEPALIVE
@@ -464,10 +468,14 @@ class FrontendManager:
             # delivering GeneratorExit, or an exception out of the generator. Only a
             # stream that ran to completion leaves the engine with nothing to stop.
             if not finished:
-                try:
-                    await asyncio.shield(self.abort_user(uid))
-                except Exception:  # noqa: BLE001
-                    logger.exception("Failed to deliver abort for user %s", uid)
+                uids = uid() if callable(uid) else [uid]
+                # gathered: each abort_user sleeps 0.1 s, n of them in a row would hold this up
+                results = await asyncio.shield(
+                    asyncio.gather(*(self.abort_user(u) for u in uids), return_exceptions=True)
+                )
+                for live_uid, result in zip(uids, results):
+                    if isinstance(result, Exception):
+                        logger.error("Failed to deliver abort for user %s: %r", live_uid, result)
 
     async def abort_user(self, uid: int):
         if uid in self.aborted_uids:

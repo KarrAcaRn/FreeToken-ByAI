@@ -3879,6 +3879,73 @@
     ],
     "gpu_untested": false,
     "fixup": "MTP draft unpacks next's (hidden, normed) layer output; layer-major prefill off for any speculation; draft KV priced unquantized next to fp8/nvfp4 target KV (fixed an OOM on 27B)",
+    "upstream": "merged"
+  },
+  "832": {
+    "number": 832,
+    "title": "[PoC, DO NOT MERGE] feat(spec): add speculative decoding with MTP drafts",
+    "head_sha": "22e356974e50",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ],
+    "decision": "superseded",
+    "superseded_by": 844,
+    "reason": "The author's proof of concept for MTP drafts; the finished version is #844, which upstream merged and next carries (with our fixups).",
+    "summary": "Proof of concept, superseded by #844 (MTP drafts), which upstream merged",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "831": {
+    "number": 831,
+    "title": "feat(windows): expand Qwen and Gemma checkpoint support for OOB Huggingface uncensored models",
+    "head_sha": "c6de522cef5f",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "FreeToken Binary Cleanup <noreply@users.noreply.github.com>",
+      "FreeToken Fork Snapshot <noreply@users.noreply.github.com>",
+      "trcwebdesign <githubtrc@trc-webdesign.de>"
+    ],
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "A Windows-centred collection from a private fork (111 files, +8.5k lines: NVFP4/GGUF loading, MoE offload, Q4_0 CPU MoE, Gemma-4 GGUF, HF compatibility). Too broad to review as one unit and its Windows paths cannot be run here; not judged on its merits. Revisit if upstream splits it or takes parts.",
+    "summary": "Large Windows-focused collection (111 files); deferred, too broad to review as one and Windows-only parts untestable",
+    "commits": [],
+    "gpu_untested": true
+  },
+  "843": {
+    "number": 843,
+    "title": "Feat/completions n",
+    "head_sha": "336c0e006b7b",
+    "reviewed_at": "2026-11-03",
+    "authors": [
+      "A5bhinav <112536203+A5bhinav@users.noreply.github.com>",
+      "A5bhinav <abhinavjinka@gmail.com>"
+    ],
+    "decision": "adopted-with-fixups",
+    "reason": "/v1/completions serves n=1..128 by fanning each prompt out into n engine requests (choices prompt-major, prompt counted once, per-choice streaming). Merged onto next's completion handler (token-id prompts, logprobs, error codes, GenTimer, disconnect aborts). Live check on Qwen3.6 (4090): n=4/8 sampling, multi-prompt indices, token-id prompts, streaming logprobs with one finish per choice + one usage chunk + one [DONE], n=129 refused, client disconnect aborts all 8 fan-out requests (stream and non-stream).",
+    "summary": "/v1/completions supports n > 1 (each prompt fanned out into n requests), streamed or not",
+    "fixup": "Rebuilt on next's handler: token-id prompts, per-choice logprobs, error codes, all fan-out uids aborted on disconnect (concurrently), strong refs to abort tasks, no abort after an error reply; new tests",
+    "commits": [
+      "6dc94d7",
+      "4a3d45e"
+    ],
+    "gpu_untested": false
+  },
+  "851": {
+    "number": 851,
+    "title": "perf(cpu-moe): speed up the nvfp4 W4A8 kernels",
+    "head_sha": "54416c9e8fae",
+    "reviewed_at": "2026-11-03",
+    "authors": [
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>"
+    ],
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Rewrites the CPU MoE nvfp4 W4A8 kernels (AVX-512 VNNI and AVX-VNNI). This machine is a QEMU VM whose CPU model exposes neither AVX-VNNI nor AVX-512, so the new code cannot run and its speedup cannot be measured here. Merged cleanly on a trial branch; an emulated-VPDPBUSD harness found the AVX-VNNI kernel exact, and the fp32 path this VM runs is unchanged. Not judged on its merits yet; revisit once the VM exposes the host CPU (-cpu host).",
+    "summary": "Faster CPU nvfp4 W4A8 MoE kernels (VNNI); deferred: this VM's CPU exposes no AVX-VNNI/AVX-512 to run them",
+    "commits": [],
+    "gpu_untested": true,
     "upstream": "closed"
   }
 }
