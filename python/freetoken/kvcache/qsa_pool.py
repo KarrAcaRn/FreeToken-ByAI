@@ -47,11 +47,12 @@ class QSAKVCache(MHAKVCache):
 
     @staticmethod
     def spec_tokens_for(config) -> int:
-        """Verify-block tokens past the anchor the ring must hold (0 without speculation).
+        """Verify-block tokens past the anchor the ring must hold (0 without speculation; MTP: its verify rows).
         A DFlash block size left to the draft checkpoint is bounded by 16 here: the ring
         rows cost a few KB per request."""
         if getattr(config, "speculative_algorithm", None) != "dflash":
-            return 0
+            # upstream's target verify (MTP): the rows per request past the anchor
+            return getattr(config, "decode_rows_per_req", 1) - 1
         return max(16, getattr(config, "speculative_dflash_block_size", None) or 0)
 
     @classmethod

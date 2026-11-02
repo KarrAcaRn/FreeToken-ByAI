@@ -150,7 +150,7 @@ def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dt
         dtype=dtype,
         num_req_slots=config.max_running_req + 1,  # + 1 for the dummy request row
         kv_quant=kv_quant,
-        spec_tokens=_spec_tokens(config),
+        num_speculative_tokens=_spec_tokens(config),
     )
 
 
@@ -169,7 +169,7 @@ def create_kvcache_pool(
     num_swa_tokens: int | None = None,
     num_req_slots: int | None = None,
     kv_quant: str = "none",
-    spec_tokens: int = 0,
+    num_speculative_tokens: int = 0,
 ) -> BaseKVCachePool:
     if kv_quant == "nvfp4":
         from freetoken.attention import AttnType
@@ -263,7 +263,7 @@ def create_kvcache_pool(
             index_ratio=spec.index_ratio,
             num_req_slots=num_req_slots,
             # a verify block keeps all its rows: the accepted ones are read back next forward
-            ring_capacity=QSAKVCache.ring_capacity_for(spec.index_ratio, spec_tokens),
+            ring_capacity=QSAKVCache.ring_capacity_for(spec.index_ratio, num_speculative_tokens),
             layer_ids=spec.layer_ids,
             mrope=model_config.model_is_mrope,
             # Quantizes the KV tiers only -- the compressed index slab the score kernel

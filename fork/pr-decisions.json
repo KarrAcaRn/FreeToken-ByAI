@@ -3861,7 +3861,7 @@
   "844": {
     "number": 844,
     "title": "feat(spec): add MTP drafts for the Qwen3.5 family and Qwen3.8-Flash-Next",
-    "head_sha": "e5ac81f32720",
+    "head_sha": "1e3f41887fd1",
     "reviewed_at": "2026-11-02",
     "authors": [
       "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
@@ -3870,11 +3870,15 @@
       "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
       "festeraeb <100659456+festeraeb@users.noreply.github.com>"
     ],
-    "decision": "deferred",
-    "revisit": "after-queue",
-    "reason": "Large feature (35 files, +1563) built on upstream #836's target-side verify, which arrived on next with today's sync next to our DFlash. All three local Qwen checkpoints carry MTP weights (Qwen3.6-35B NVFP4, Qwen3.8-27B NVFP4, Flash-Next FP4-Local), so it is testable here, but the GPU driver is down today; trial-merge and benchmark against DFlash once the GPU is back. Not judged on its merits yet.",
-    "summary": "MTP speculative drafts for Qwen3.5/3.6/3.8 and Flash-Next; deferred until the GPU is back (models here have MTP)",
-    "commits": [],
-    "gpu_untested": true
+    "decision": "adopted-with-fixups",
+    "reason": "MTP speculative drafts from the checkpoint's own MTP layer (Qwen3.5/3.6/3.8 dense+MoE, Flash-Next), through upstream #836's target verify; coexists with our DFlash via EngineConfig.spec_verify. 8 conflicts resolved. RTX 4090: Qwen3.6-35B MTP k=3 233/229 tok/s (plain 150, DFlash ~230) at -25% KV; Qwen3.8-27B nvfp4 KV MTP k=5 133/138 tok/s (plain 46, DFlash2 170) but 162k KV vs DFlash's 32k. Greedy output coherent, near-tie divergences like DFlash. Flash-Next FP4-Local MTP not supported (NVFP4 MTP experts). GPU pytest green apart from 2 disk-space failures also on next.",
+    "summary": "MTP speculative decoding from the checkpoint's own MTP head (Qwen3.5/3.6/3.8); 27B 46->133 tok/s with 5x DFlash's context",
+    "commits": [
+      "30e280a",
+      "5a1a8bb"
+    ],
+    "gpu_untested": false,
+    "fixup": "MTP draft unpacks next's (hidden, normed) layer output; layer-major prefill off for any speculation; draft KV priced unquantized next to fp8/nvfp4 target KV (fixed an OOM on 27B)",
+    "upstream": "closed"
   }
 }
