@@ -451,7 +451,8 @@
     "authors": [
       "santanu20 <santanu20@users.noreply.github.com>"
     ],
-    "summary": "Already covered by #305 (more complete --api-key)"
+    "summary": "Already covered by #305 (more complete --api-key)",
+    "upstream": "closed"
   },
   "565": {
     "number": 565,
@@ -1008,7 +1009,8 @@
     "authors": [
       "Cyber-Marty <15370813896@163.com>"
     ],
-    "summary": "Masks a likely sender-side race instead of fixing it; partial frames still crash; Windows-only, not reproducible"
+    "summary": "Masks a likely sender-side race instead of fixing it; partial frames still crash; Windows-only, not reproducible",
+    "upstream": "closed"
   },
   "464": {
     "number": 464,
@@ -1527,7 +1529,8 @@
     ],
     "revisit_with": 260,
     "revisit": "after-queue",
-    "summary": "Stacked on #260"
+    "summary": "Stacked on #260",
+    "upstream": "closed"
   },
   "316": {
     "number": 316,
@@ -1545,7 +1548,9 @@
       "Erik Bogado <erikbogado@gmail.com>"
     ],
     "summary": "Under HIP graph capture the fused expert copy lost its host mappings; now falls back to per-bank copies on ROCm",
-    "fixup": "Test stub given next's _disk_tier attribute"
+    "fixup": "Test stub given next's _disk_tier attribute",
+    "upstream": "closed",
+    "after_upstream_close": "kept (2026-11-02): closed upstream on 2026-10-30 without comment, merge or replacement; upstream main still uses the fused copy under HIP graph capture. CUDA-neutral, needed by our ROCm branches. Listed under 'Our own additions' in the README."
   },
   "315": {
     "number": 315,
@@ -3768,5 +3773,108 @@
     ],
     "gpu_untested": false,
     "fixup": "Spans taken from #504's shared GenTimer instead of a second capture; metrics and timings coexist"
+  },
+  "848": {
+    "number": 848,
+    "title": "fix(sampler): bound top_k to the vocabulary before the int32 cast",
+    "head_sha": "e65fcbe58d62",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "A5bhinav <112536203+A5bhinav@users.noreply.github.com>",
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Saurabh Pathak <saurabhpathak394@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "superseded",
+    "superseded_by": 790,
+    "reason": "Same one-line clamp (min(top_k, vocab_size) before the int32 cast) is already on next via #790 (e920eb4).",
+    "summary": "Already covered by #790, which clamps top_k to the vocabulary the same way",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "849": {
+    "number": 849,
+    "title": "fix(scheduler): clip max_tokens on a copy of the shared SamplingParams",
+    "head_sha": "6a1ddc94ab20",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "A5bhinav <112536203+A5bhinav@users.noreply.github.com>",
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Saurabh Pathak <saurabhpathak394@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "superseded",
+    "superseded_by": 788,
+    "reason": "next already clips max_tokens on a dataclasses.replace copy via #788 (7602430); this PR is the same fix.",
+    "summary": "Already covered by #788, which clips max_tokens on a copy of shared SamplingParams",
+    "commits": [],
+    "gpu_untested": false
+  },
+  "850": {
+    "number": 850,
+    "title": "fix(server): reject empty completions prompt and keep error code",
+    "head_sha": "cf093834ecf8",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "A5bhinav <112536203+A5bhinav@users.noreply.github.com>",
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Saurabh Pathak <saurabhpathak394@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "adopted-with-fixups",
+    "reason": "An empty prompt list on /v1/completions returned an empty 200 response, and ack error codes (e.g. context_length_exceeded) were dropped. Merged; conflict with next's token-id prompt handling resolved by hand. CPU server suite green (pure API path, no GPU needed).",
+    "summary": "Empty /v1/completions prompt lists are refused with 400; engine error codes reach the client",
+    "fixup": "Empty check moved before next's token-id branch; error code forwarded from next's per-prompt drain; tests for both added",
+    "commits": [
+      "c57c547"
+    ],
+    "gpu_untested": false
+  },
+  "845": {
+    "number": 845,
+    "title": "feat(gguf): read nvfp4 weight scales on qwen4exp ggufs",
+    "head_sha": "dcee9e8bfb07",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Lifts the refusal of NVFP4 weight scales on qwen4exp GGUFs (and refuses a scaled PLE table). fused() applies the scales generically, but whether every qwen4exp NVFP4 tensor (embedding, untiled GDN projections, experts) is served correctly needs a run on an NVFP4 qwen4exp GGUF, which we do not have; not judged on its merits yet.",
+    "summary": "Allows NVFP4 weight scales in qwen4exp GGUFs; deferred: no NVFP4 qwen4exp GGUF here to validate",
+    "commits": [],
+    "gpu_untested": true
+  },
+  "844": {
+    "number": 844,
+    "title": "feat(spec): add MTP drafts for the Qwen3.5 family and Qwen3.8-Flash-Next",
+    "head_sha": "e5ac81f32720",
+    "reviewed_at": "2026-11-02",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>",
+      "Julien Pierre <57333073+madbrain76@users.noreply.github.com>",
+      "Mukkesh Ganesh <mukmckenzie@gmail.com>",
+      "Xiaoze Fan <jasonfxz@sjtu.edu.cn>",
+      "festeraeb <100659456+festeraeb@users.noreply.github.com>"
+    ],
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Large feature (35 files, +1563) built on upstream #836's target-side verify, which arrived on next with today's sync next to our DFlash. All three local Qwen checkpoints carry MTP weights (Qwen3.6-35B NVFP4, Qwen3.8-27B NVFP4, Flash-Next FP4-Local), so it is testable here, but the GPU driver is down today; trial-merge and benchmark against DFlash once the GPU is back. Not judged on its merits yet.",
+    "summary": "MTP speculative drafts for Qwen3.5/3.6/3.8 and Flash-Next; deferred until the GPU is back (models here have MTP)",
+    "commits": [],
+    "gpu_untested": true
   }
 }
