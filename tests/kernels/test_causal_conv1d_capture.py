@@ -4,6 +4,8 @@ is illegal inside a capture region."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -158,6 +160,7 @@ def test_prefill_fla_metadata_carries_the_host_known_longest_extend_len():
     batch = Batch(reqs=reqs, phase="prefill")
     batch.padded_reqs = batch.reqs
 
-    fla = build_fla_metadata(batch, torch.device("cpu"))
+    pool = SimpleNamespace(conv_states=torch.zeros(1, 1, 1, 3))
+    fla = build_fla_metadata(batch, torch.device("cpu"), pool)
 
     assert fla.max_seq_len == 9

@@ -121,10 +121,10 @@ class DetokenizeManager:
                     sent_offset=0,
                 )
             s = self.decode_map[msg.uid]
-            if not (
-                msg.finished and not msg.matched_stop and msg.next_token in self.eos_token_ids
-            ):
-                s.decoded_ids.append(msg.next_token)
+            tokens = msg.next_tokens
+            if msg.finished and not msg.matched_stop and tokens and tokens[-1] in self.eos_token_ids:
+                tokens = tokens[:-1]
+            s.decoded_ids.extend(tokens)
             read_ids.append(s.decoded_ids[s.surr_offset :])
             surr_ids.append(s.decoded_ids[s.surr_offset : s.read_offset])
 

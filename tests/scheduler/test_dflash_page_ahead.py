@@ -126,7 +126,7 @@ def test_multi_token_drain_reports_each_tokens_logprobs():
     )
     reply = []
     Scheduler._drain_multi_token(sched, req, outputs, 0, 3, reply, set(), None)
-    assert [m.next_token for m in reply] == [5, 6, 7]
+    assert [t for m in reply for t in m.next_tokens] == [5, 6, 7]
     assert [round(m.chosen_logprob, 3) for m in reply] == [-0.1, -0.2, -0.3]
     assert [m.top_ids for m in reply] == [[5, 1], [6, 1], [7, 1]]
 
@@ -148,5 +148,5 @@ def test_multi_token_drain_reads_each_requests_own_count():
     reply = []
     for i, req in enumerate(reqs):
         Scheduler._drain_multi_token(sched, req, outputs, i, 4, reply, set(), None)
-    assert [m.next_token for m in reply] == [5, 6, 7, 8, 9, 10]
+    assert [t for m in reply for t in m.next_tokens] == [5, 6, 7, 8, 9, 10]
     assert [r.cached_len for r in reqs] == [11, 13]

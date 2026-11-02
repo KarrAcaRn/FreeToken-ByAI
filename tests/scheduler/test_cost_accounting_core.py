@@ -143,6 +143,7 @@ def test_freeing_a_request_that_never_sampled_closes_its_prefill_span():
     scheduler.cache_manager = SimpleNamespace(cache_req=lambda req, finished: None)
     scheduler.table_manager = SimpleNamespace(free=lambda table_idx: None)
     scheduler.engine = SimpleNamespace(dflash_worker=None)
+    scheduler.spec = None
 
     Scheduler._free_req_resources(scheduler, SimpleNamespace(uid=7, table_idx=3))
 
@@ -251,7 +252,7 @@ def test_normal_loop_sends_prior_sample_before_abort_terminal():
     scheduler._schedule_next_batch = lambda: None
     sent = []
     scheduler.send_result = lambda messages: sent.append(messages)
-    late_sample = DetokenizeMsg(uid=5, next_token=99, finished=False)
+    late_sample = DetokenizeMsg(uid=5, next_tokens=[99], finished=False)
     scheduler._process_last_data = lambda _data: scheduler.send_result([late_sample])
 
     Scheduler.normal_loop(scheduler)

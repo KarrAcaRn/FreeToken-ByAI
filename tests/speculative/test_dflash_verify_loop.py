@@ -59,6 +59,7 @@ def _engine(use_graph):
     eng = SimpleNamespace(
         dflash_worker=SimpleNamespace(target_layer_ids={0}),
         linear_state_pool=None,
+        linear_backend=None,
         device=torch.device("cpu"),
         page_table=torch.arange(64).view(1, 64),
         attn_backend=SimpleNamespace(prepare_metadata=lambda batch: None),

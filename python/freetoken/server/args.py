@@ -1195,14 +1195,19 @@ def parse_args(
     # DFlash speculative decoding
     parser.add_argument(
         "--speculative-algorithm",
-        choices=["dflash"],
+        "--spec-algo",
+        type=str,
         default=ServerArgs.speculative_algorithm,
-        help="Speculative decoding algorithm (dflash).",
+        help="Speculative decoding with this draft method: dflash (needs "
+             "--speculative-draft-model-path), or a freetoken.spec proposer. Off by default.",
     )
     parser.add_argument(
         "--speculative-draft-model-path",
+        "--spec-draft-model",
+        type=str,
         default=ServerArgs.speculative_draft_model_path,
-        help="Path to the draft model for speculative decoding.",
+        help="Draft weights; dflash needs them, other methods take them from the target "
+             "checkpoint by default.",
     )
     parser.add_argument(
         "--speculative-dflash-block-size",
@@ -1273,6 +1278,14 @@ def parse_args(
         action="store_true",
         dest="moe_prefill_hit_d2d",
         help=argparse.SUPPRESS,  # the default now; kept so existing command lines still parse
+    )
+
+    parser.add_argument(
+        "--speculative-num-steps",
+        "--spec-num-steps",
+        type=int,
+        default=ServerArgs.speculative_num_steps,
+        help="Draft tokens per decode step (k); 0 takes the method's default.",
     )
 
     parser.add_argument(

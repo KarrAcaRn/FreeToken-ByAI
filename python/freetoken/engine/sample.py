@@ -35,17 +35,24 @@ def make_device_tensor(data: List, dtype: torch.dtype, device: torch.device) -> 
     return torch.tensor(data, dtype=dtype, pin_memory=True).to(device, non_blocking=True)
 
 
-def apply_penalties(logits: torch.Tensor, pen: PenaltyArgs) -> torch.Tensor:
-    """Return an fp32 copy of ``logits`` with OpenAI presence/frequency penalties applied."""
-    rows, table_idx, starts, lens = pen.index
-    frequency, presence = pen.weights
-    vocab = logits.shape[-1]
-    offs = torch.arange(pen.max_len, device=logits.device)
+def penalty_counts(pen: PenaltyArgs, vocab: int) -> torch.Tensor:
+    """fp32 [P, vocab] counts of each penalized row's generated tokens, read from token_pool."""
+    _, table_idx, starts, lens = pen.index
+    device = pen.index.device
+    offs = torch.arange(pen.max_len, device=device)
     valid = offs < lens[:, None]
     pos = torch.where(valid, starts[:, None] + offs, starts[:, None])
     tokens = pen.token_pool[table_idx[:, None], pos].long().clamp_(0, vocab - 1)
-    counts = torch.zeros(rows.numel(), vocab, dtype=torch.float32, device=logits.device)
+    counts = torch.zeros(table_idx.numel(), vocab, dtype=torch.float32, device=device)
     counts.scatter_add_(1, tokens, valid.to(torch.float32))
+    return counts
+
+
+def apply_penalties(logits: torch.Tensor, pen: PenaltyArgs) -> torch.Tensor:
+    """Return an fp32 copy of ``logits`` with OpenAI presence/frequency penalties applied."""
+    rows = pen.index[0]
+    frequency, presence = pen.weights
+    counts = penalty_counts(pen, logits.shape[-1])
     penalty = counts * frequency[:, None] + (counts > 0).to(torch.float32) * presence[:, None]
     out = logits.to(torch.float32, copy=True)
     out.index_add_(0, rows, penalty, alpha=-1.0)
@@ -237,3 +244,45 @@ class Sampler:
             top_ids.to("cpu", non_blocking=True),
             top_logprobs.to("cpu", non_blocking=True),
         )
+
+    def sample_verify(self, logits: torch.Tensor, args: BatchSamplingArgs, drafts: torch.Tensor) -> torch.Tensor:
+        """One token per verify row as decode would sample it, ``drafts`` [bs, k] giving k+1 rows per request.
+
+        Row j of a request is penalized as if its drafts d1..dj were already committed; the penalty counts are not updated.
+        """
+        bs, k = drafts.shape
+        width = k + 1
+        if args.penalties is not None:
+            logits = self._penalize_rows(logits, args.penalties, drafts)
+        if args.temperatures is None:
+            return torch.argmax(logits, dim=-1)
+
+        def rows(t: torch.Tensor | None) -> torch.Tensor | None:
+            return None if t is None else t.repeat_interleave(width)
+
+        tokens = sample_impl(logits.float(), rows(args.temperatures), rows(args.top_k), rows(args.top_p))
+        if args.greedy_mask is not None:
+            greedy_tokens = torch.argmax(logits, dim=-1).to(tokens.dtype)
+            tokens = torch.where(rows(args.greedy_mask), greedy_tokens, tokens)
+        return tokens
+
+    def _penalize_rows(self, logits: torch.Tensor, pen: PenaltyArgs, drafts: torch.Tensor) -> torch.Tensor:
+        k = drafts.shape[1]
+        width = k + 1
+        device = logits.device
+        rows = pen.index[0]
+        # row j of a penalized request counts its committed tokens plus its drafts 0..j-1
+        counts = penalty_counts(pen, logits.shape[-1]).repeat_interleave(width, dim=0)
+        if k:
+            pair_rows, pair_drafts = torch.tril_indices(width, k, offset=-1, device=device)
+            d = drafts.index_select(0, rows).long()
+            target = (torch.arange(rows.numel(), device=device)[:, None] * width + pair_rows).reshape(-1)
+            counts.index_put_(
+                (target, d[:, pair_drafts].reshape(-1)),
+                torch.ones(target.numel(), dtype=counts.dtype, device=device), accumulate=True,
+            )
+        frequency, presence = (w.repeat_interleave(width)[:, None] for w in pen.weights)
+        penalty = counts * frequency + (counts > 0).to(torch.float32) * presence
+        out = logits.to(torch.float32, copy=True)
+        out.index_add_(0, (rows[:, None] * width + torch.arange(width, device=device)).reshape(-1), penalty, alpha=-1.0)
+        return out
