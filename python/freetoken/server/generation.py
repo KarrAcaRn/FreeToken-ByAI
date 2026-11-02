@@ -14,10 +14,11 @@ it depends on none of them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -616,8 +617,10 @@ class GenTimer:
         self.end: float | None = None
         self.prefill_ms = 0.0
 
-    def observe(self, ack: Any) -> None:
-        if ack.prefill_ms:
+    def observe(self, ack: Any, *, prefill: bool = True) -> None:
+        """``prefill=False`` times only the decode: an OpenAI ``n`` sibling re-reports the
+        prompt its first choice already prefilled."""
+        if prefill and ack.prefill_ms:
             self.prefill_ms = ack.prefill_ms
         # completion_tokens_delta, not incremental_output: the detokenizer holds back a
         # trailing partial-stop prefix, so a real generated token can arrive with empty text.
@@ -681,6 +684,120 @@ def build_metrics(
 
 def metrics_enabled(state: Any) -> bool:
     return bool(getattr(state.config, "enable_metrics_report", False))
+
+
+_CHOICE_DONE = object()
+# abort tasks fired from cleanup paths that cannot await them; the loop only holds weak refs
+_ABORT_TASKS: set[asyncio.Task] = set()
+
+
+@dataclass
+class _ChoiceFailed:
+    exc: Exception
+
+
+class ChoiceFanOut:
+    """Runs ``n`` generations of one prompt (OpenAI ``n``) and merges their outputs as
+    ``(choice_index, item)`` pairs. Choice 0 is submitted first and the rest follow its first
+    output for which ``releases_siblings`` holds: by then its prompt is in the prefix cache,
+    so they skip a second prefill.
+
+    ``submit(uid)`` sends one request; ``consume(uid)`` yields its outputs, ends at its
+    terminal one and raises on failure. Closing ``events()`` early (error, disconnect)
+    aborts every choice not yet finished, including ones never submitted."""
+
+    def __init__(
+        self,
+        n: int,
+        state: Any,
+        submit: Callable[[int], Awaitable[None]],
+        consume: Callable[[int], AsyncIterator[Any]],
+        releases_siblings: Callable[[Any], bool],
+    ) -> None:
+        self._n = n
+        self._state = state
+        self._submit = submit
+        self._consume = consume
+        self._releases_siblings = releases_siblings
+        self._uids: list[int] = []
+        self._live: set[int] = set()
+        self._closed = False
+
+    @property
+    def uids(self) -> list[int]:
+        return list(self._uids)
+
+    async def start(self) -> None:
+        """Admit every choice and submit choice 0. Admission is decided once for the whole
+        request, so it fails here, before a stream opens, rather than mid-response."""
+        try:
+            for _ in range(self._n):
+                uid = self._state.new_user()
+                self._uids.append(uid)
+                self._live.add(uid)
+            await self._submit(self._uids[0])
+        except BaseException:
+            self.abort_live()
+            raise
+
+    def take_live_uids(self) -> list[int]:
+        """Stop launching choices and hand over the uids not yet finished, to abort."""
+        self._closed = True
+        uids = list(self._live)
+        self._live.clear()
+        return uids
+
+    def abort_live(self) -> None:
+        """Abort every choice not yet finished; a no-op once ``events()`` has cleaned up."""
+        for uid in self.take_live_uids():
+            task = asyncio.create_task(self._state.abort_user(uid))
+            _ABORT_TASKS.add(task)
+            task.add_done_callback(_ABORT_TASKS.discard)
+
+    async def events(self) -> AsyncIterator[tuple[int, Any]]:
+        if not self._uids:
+            await self.start()
+        queue: asyncio.Queue[tuple[int, Any]] = asyncio.Queue()
+        released = asyncio.Event()
+
+        async def run(index: int) -> None:
+            uid = self._uids[index]
+            try:
+                if index:
+                    await released.wait()
+                    if self._closed:
+                        return
+                    await self._submit(uid)
+                async with contextlib.aclosing(self._consume(uid)) as items:
+                    async for item in items:
+                        if self._releases_siblings(item):
+                            released.set()
+                        queue.put_nowait((index, item))
+                self._live.discard(uid)
+            except Exception as exc:  # noqa: BLE001 -- re-raised by the consumer below
+                # an error reply is the request's terminal one; only its siblings need an abort
+                self._live.discard(uid)
+                self._closed = True
+                queue.put_nowait((index, _ChoiceFailed(exc)))
+            finally:
+                released.set()
+                queue.put_nowait((index, _CHOICE_DONE))
+
+        tasks = [asyncio.create_task(run(index)) for index in range(self._n)]
+        try:
+            pending = self._n
+            while pending:
+                index, item = await queue.get()
+                if item is _CHOICE_DONE:
+                    pending -= 1
+                elif isinstance(item, _ChoiceFailed):
+                    raise item.exc
+                else:
+                    yield index, item
+        finally:
+            for task in tasks:
+                task.cancel()
+            self.abort_live()
 
 
 def _record_generation(

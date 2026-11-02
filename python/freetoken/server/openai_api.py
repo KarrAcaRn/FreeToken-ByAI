@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -11,6 +12,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
+from starlette.background import BackgroundTask
 from freetoken.core import SamplingParams
 from freetoken.message import TokenizeMsg
 from freetoken.tokenizer.effort import EFFORT_SCALE, KNOWN_REASONING_EFFORTS
@@ -35,6 +37,7 @@ from .logprobs import (
 )
 from .generation import (
     DEFAULT_MAX_OUTPUT_TOKENS,
+    ChoiceFanOut,
     ContentDelta,
     GenDone,
     GenerationError,
@@ -265,13 +268,26 @@ def register_openai_routes(
 _DISCONNECT_POLL_SECONDS = 1.0
 
 
-async def _await_watching_disconnect(awaitable, request: Request | None, state: Any, uid: int):
+async def _abort_users(state: Any, uid: int | Callable[[], list[int]]) -> None:
+    uids = uid() if callable(uid) else [uid]
+    # gathered: each abort_user sleeps 0.1 s, so n choices in a row would hold the handler up
+    results = await asyncio.shield(
+        asyncio.gather(*(state.abort_user(u) for u in uids), return_exceptions=True)
+    )
+    for live_uid, result in zip(uids, results):
+        if isinstance(result, Exception):
+            logger.error("Failed to deliver abort for user %s: %r", live_uid, result)
+
+
+async def _await_watching_disconnect(
+    awaitable, request: Request | None, state: Any, uid: int | Callable[[], list[int]]
+):
     """Run an in-flight generation awaitable while watching the transport — the
     non-streaming twin of stream_with_cancellation. Returns the awaitable's result,
     or None when the client disconnected first: the same shielded abort_user is
     delivered so an abandoned request stops burning decode slots instead of running
     to max_tokens (with --max-running-requests 1 that is a full outage for its
-    remaining budget)."""
+    remaining budget). ``uid`` may be a callable returning every uid to abort (OpenAI ``n``)."""
     gen = asyncio.ensure_future(awaitable)
     if request is None:
         return await gen
@@ -286,17 +302,13 @@ async def _await_watching_disconnect(awaitable, request: Request | None, state: 
         # The handler itself was cancelled (server shutdown): deliver the abort,
         # then let the cancellation propagate — mirrors stream_with_cancellation.
         try:
-            await asyncio.shield(state.abort_user(uid))
-        except Exception:  # noqa: BLE001
-            logger.exception("Failed to deliver abort for user %s", uid)
-        gen.cancel()
+            await _abort_users(state, uid)
+        finally:
+            gen.cancel()
         raise
     # Client gone. Deliver the AbortMsg first (the decode stops sooner), then
     # wind down the drain task; its result is undeliverable either way.
-    try:
-        await asyncio.shield(state.abort_user(uid))
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to deliver abort for user %s", uid)
+    await _abort_users(state, uid)
     gen.cancel()
     try:
         await gen
@@ -630,6 +642,10 @@ async def stream_chat_completion_chunks(
     yield b"data: [DONE]\n\n"
 
 
+#: OpenAI's own ceiling for ``n``.
+MAX_N = 128
+
+
 async def handle_completion(
     req: CompletionRequest,
     request: Request | None,
@@ -639,8 +655,8 @@ async def handle_completion(
     unsupported = _completion_unsupported_reason(req)
     if unsupported is not None:
         return create_error_response(unsupported)
-    if req.n != 1:
-        return create_error_response("Only n=1 is supported", param="n")
+    if not 1 <= req.n <= MAX_N:
+        return create_error_response(f"n must be between 1 and {MAX_N}", param="n")
     try:  # surfaces out-of-range sampling fields as a 400 rather than a 500 from the worker
         default_max_tokens = (
             getattr(state.config, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS
@@ -669,53 +685,70 @@ async def handle_completion(
     if req.stream:
         if len(prompts) != 1:
             return create_error_response("Streaming completions only support a single prompt")
-        uid = state.new_user()
-        await state.send_one(_tokenize_msg(uid, prompts[0]))
-        chunks = stream_completion_chunks(uid, req, state)
+        fan_out = _completion_fan_out(req.n, prompts[0], _tokenize_msg, state)
+        await fan_out.start()
+        chunks = stream_completion_chunks(fan_out, req, state)
         if request is not None:
-            chunks = state.stream_with_cancellation(chunks, request, uid)
-        return StreamingResponse(chunks, media_type="text/event-stream")
+            chunks = state.stream_with_cancellation(chunks, request, fan_out.take_live_uids)
+
+        async def abort_if_never_streamed() -> None:
+            # Choice 0 is already submitted; a body that never starts never reaches cleanup.
+            fan_out.abort_live()
+
+        return StreamingResponse(
+            chunks, media_type="text/event-stream", background=BackgroundTask(abort_if_never_streamed)
+        )
 
     choices: list[dict[str, Any]] = []
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
     timer = GenTimer()
-    for index, prompt in enumerate(prompts):
-        uid = state.new_user()
-        await state.send_one(_tokenize_msg(uid, prompt))
+    for prompt_index, prompt in enumerate(prompts):
+        fan_out = _completion_fan_out(req.n, prompt, _tokenize_msg, state)
+        await fan_out.start()
 
-        async def _drain_one(uid: int = uid, index: int = index):
+        async def _drain_one(fan_out: ChoiceFanOut = fan_out, prompt_index: int = prompt_index):
             nonlocal prompt_tokens, completion_tokens, cached_tokens
-            text = ""
-            entries: list[dict] = []
-            finish_reason = "stop"
-            async for ack in state.wait_for_ack(uid):
-                if getattr(ack, "error", None):
-                    return create_error_response(ack.error, code=getattr(ack, "error_code", None))
-                timer.observe(ack)
-                prompt_tokens += ack.prompt_tokens_delta
-                completion_tokens += ack.completion_tokens_delta
-                cached_tokens += ack.cached_tokens
-                text += ack.incremental_output
-                if req.logprobs is not None and ack.logprobs is not None:
-                    entries.append(ack.logprobs)
-                if ack.finished:
-                    finish_reason = getattr(ack, "finish_reason", None) or "stop"
-                    break
-            return {
-                "index": index,
-                "text": text,
-                "finish_reason": finish_reason,
-                "logprobs": completions_logprobs(entries) if req.logprobs is not None else None,
-            }
+            texts = [""] * req.n
+            entries: list[list[dict]] = [[] for _ in range(req.n)]
+            finish_reasons = ["stop"] * req.n
+            try:
+                async with contextlib.aclosing(fan_out.events()) as events:
+                    async for index, ack in events:
+                        timer.observe(ack, prefill=index == 0)
+                        # Every choice re-reports the shared prompt; OpenAI counts it once per prompt.
+                        if index == 0:
+                            prompt_tokens += ack.prompt_tokens_delta
+                            cached_tokens += ack.cached_tokens
+                        completion_tokens += ack.completion_tokens_delta
+                        texts[index] += ack.incremental_output
+                        if req.logprobs is not None and ack.logprobs is not None:
+                            entries[index].append(ack.logprobs)
+                        if ack.finished:
+                            finish_reasons[index] = getattr(ack, "finish_reason", None) or "stop"
+            except GenerationError as exc:
+                return create_error_response(str(exc), code=exc.code)
+            return [
+                {
+                    "index": prompt_index * req.n + index,
+                    "text": texts[index],
+                    "finish_reason": finish_reasons[index],
+                    "logprobs": (
+                        completions_logprobs(entries[index]) if req.logprobs is not None else None
+                    ),
+                }
+                for index in range(req.n)
+            ]
 
-        choice = await _await_watching_disconnect(_drain_one(), request, state, uid)
-        if choice is None:
+        result = await _await_watching_disconnect(
+            _drain_one(), request, state, fan_out.take_live_uids
+        )
+        if result is None:
             return _client_disconnected_response()
-        if isinstance(choice, JSONResponse):
-            return choice
-        choices.append(choice)
+        if isinstance(result, JSONResponse):
+            return result
+        choices.extend(result)
 
     response: dict[str, Any] = {
         "id": f"cmpl-{uuid.uuid4().hex}",
@@ -732,70 +765,92 @@ async def handle_completion(
     return response
 
 
-async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any) -> AsyncIterator[bytes]:
-    prompt_tokens = 0
-    text_offset = 0
-    completion_tokens = 0
-    cached_tokens = 0
-    timer = GenTimer()
-    finish_reason = "stop"
-    async for ack in state.wait_for_ack(uid):
-        if getattr(ack, "error", None):
-            yield _sse({"error": {"message": ack.error, "type": "invalid_request_error", "code": getattr(ack, "error_code", None)}})
-            yield b"data: [DONE]\n\n"
-            return
-        timer.observe(ack)
-        prompt_tokens += ack.prompt_tokens_delta
-        completion_tokens += ack.completion_tokens_delta
-        cached_tokens += ack.cached_tokens
-        if ack.incremental_output:
-            yield _sse(
-                {
-                    "id": f"cmpl-{uid}",
-                    "object": "text_completion.chunk",
-                    "created": int(time.time()),
-                    "model": req.model,
-                    "choices": [
-                        {
-                            "text": ack.incremental_output,
-                            "index": 0,
-                            "finish_reason": None,
-                            "logprobs": (
-                                completions_logprobs([ack.logprobs], text_offset)
-                                if req.logprobs is not None and ack.logprobs is not None
-                                else None
-                            ),
-                        }
-                    ],
-                }
-            )
-            text_offset += len(ack.incremental_output)
-        if ack.finished:
-            finish_reason = getattr(ack, "finish_reason", None) or "stop"
-            break
+def _completion_fan_out(
+    n: int, prompt: Any, tokenize_msg: Callable[[int, Any], TokenizeMsg], state: Any
+) -> ChoiceFanOut:
+    async def submit(uid: int) -> None:
+        await state.send_one(tokenize_msg(uid, prompt))
 
-    timings = gen_timings_block(prompt_tokens, completion_tokens, cached_tokens, timer.finish())
-    done_chunk: dict[str, Any] = {
-        "id": f"cmpl-{uid}",
-        "object": "text_completion.chunk",
-        "created": int(time.time()),
-        "model": req.model,
-        "choices": [{"text": "", "index": 0, "finish_reason": finish_reason, "logprobs": None}],
-    }
-    if timings is not None:
-        done_chunk["timings"] = timings
-    yield _sse(done_chunk)
-    if req.stream_options and req.stream_options.include_usage:
-        final: dict[str, Any] = {
-            "id": f"cmpl-{uid}",
+    async def consume(uid: int) -> AsyncIterator[Any]:
+        async for ack in state.wait_for_ack(uid):
+            if getattr(ack, "error", None):
+                raise GenerationError(ack.error, code=getattr(ack, "error_code", None))
+            yield ack
+            if ack.finished:
+                return
+
+    def releases_siblings(ack: Any) -> bool:
+        # The first reply only reports admission; the prompt is cached by the first sampled token.
+        return ack.finished or ack.completion_tokens_delta > 0
+
+    return ChoiceFanOut(n, state, submit, consume, releases_siblings)
+
+
+async def stream_completion_chunks(
+    fan_out: ChoiceFanOut, req: CompletionRequest, state: Any
+) -> AsyncIterator[bytes]:
+    completion_id = f"cmpl-{fan_out.uids[0]}" if fan_out.uids else f"cmpl-{uuid.uuid4().hex}"
+
+    def chunk(choices: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+        return {
+            "id": completion_id,
             "object": "text_completion.chunk",
             "created": int(time.time()),
             "model": req.model,
-            "choices": [],
-            "usage": _usage(
-                prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)
-            ),
+            "choices": choices,
+            **extra,
         }
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    cached_tokens = 0
+    text_offsets = [0] * req.n
+    unfinished = req.n
+    timer = GenTimer()
+    timings = None
+    try:
+        async with contextlib.aclosing(fan_out.events()) as events:
+            async for index, ack in events:
+                timer.observe(ack, prefill=index == 0)
+                if index == 0:
+                    prompt_tokens += ack.prompt_tokens_delta
+                    cached_tokens += ack.cached_tokens
+                completion_tokens += ack.completion_tokens_delta
+                if ack.incremental_output:
+                    yield _sse(chunk([{
+                        "text": ack.incremental_output,
+                        "index": index,
+                        "finish_reason": None,
+                        "logprobs": (
+                            completions_logprobs([ack.logprobs], text_offsets[index])
+                            if req.logprobs is not None and ack.logprobs is not None
+                            else None
+                        ),
+                    }]))
+                    text_offsets[index] += len(ack.incremental_output)
+                if ack.finished:
+                    finish_reason = getattr(ack, "finish_reason", None) or "stop"
+                    done_chunk = chunk(
+                        [{"text": "", "index": index, "finish_reason": finish_reason, "logprobs": None}]
+                    )
+                    unfinished -= 1
+                    if not unfinished:  # the request's timings ride on its last finish chunk
+                        timings = gen_timings_block(
+                            prompt_tokens, completion_tokens, cached_tokens, timer.finish()
+                        )
+                        if timings is not None:
+                            done_chunk["timings"] = timings
+                    yield _sse(done_chunk)
+    except GenerationError as exc:
+        yield _sse({"error": {"message": str(exc), "type": "invalid_request_error", "code": exc.code}})
+        yield b"data: [DONE]\n\n"
+        return
+
+    if req.stream_options and req.stream_options.include_usage:
+        final = chunk(
+            [],
+            usage=_usage(prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)),
+        )
         if timings is not None:
             final["timings"] = timings
         yield _sse(final)
