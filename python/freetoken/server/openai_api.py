@@ -651,6 +651,8 @@ async def handle_completion(
 
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     assert isinstance(prompts, list)
+    if not prompts:
+        return create_error_response("prompt must not be empty", param="prompt")
     if _is_token_prompt(req.prompt):
         # token ids go to the engine as they are; one list of ints is one prompt
         prompts = [req.prompt] if isinstance(req.prompt[0], int) else req.prompt
@@ -690,7 +692,7 @@ async def handle_completion(
             finish_reason = "stop"
             async for ack in state.wait_for_ack(uid):
                 if getattr(ack, "error", None):
-                    return create_error_response(ack.error)
+                    return create_error_response(ack.error, code=getattr(ack, "error_code", None))
                 timer.observe(ack)
                 prompt_tokens += ack.prompt_tokens_delta
                 completion_tokens += ack.completion_tokens_delta
@@ -739,7 +741,7 @@ async def stream_completion_chunks(uid: int, req: CompletionRequest, state: Any)
     finish_reason = "stop"
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
-            yield _sse({"error": {"message": ack.error, "type": "invalid_request_error", "code": None}})
+            yield _sse({"error": {"message": ack.error, "type": "invalid_request_error", "code": getattr(ack, "error_code", None)}})
             yield b"data: [DONE]\n\n"
             return
         timer.observe(ack)
