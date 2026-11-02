@@ -144,20 +144,22 @@ See [models.md](models.md#moe-strategies) for what each strategy does, and [perf
 | `--disable-moe-prefill-hit-d2d` | hit-D2D on | Stream all of a prefill's experts over PCIe instead of copying the cache-resident ones device-side (the split needs CUDA >= 13 or HIP batch copies). `--moe-prefill-hit-d2d` (upstream's opt-in) is still accepted as a no-op |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
 
-### Speculative decoding (DFlash)
+### Speculative decoding
 
-A draft model proposes a block of tokens per request and the target verifies them, so greedy
-output matches plain decoding up to bf16 ties. Prefix reuse (`--cache-type radix`) stays on. With
-a draft, `--max-running-requests` defaults to 1 (the fastest single request and the most
-context); a larger value verifies the decoding requests' blocks together in one batched forward.
+A draft proposes tokens per request and the target verifies them, so greedy output matches plain
+decoding up to bf16 ties. With a speculative algorithm, `--max-running-requests` defaults to 1
+(the fastest single request and the most context).
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--speculative-algorithm` | off | `dflash` |
-| `--speculative-draft-model-path` | — | DFlash draft checkpoint (e.g. a `z-lab/*-DFlash*` repo) |
-| `--speculative-dflash-block-size` | draft's | Anchor + drafted tokens per verify; smaller blocks keep less verify memory and draft fewer tokens |
-| `--speculative-draft-quant` | none | `fp8` stores the draft's projections as e4m3 (half the VRAM); only the acceptance rate can move |
-| `--disable-speculative-adaptive` | adaptive on | Speculate on every step, even for a request that measures slower than plain decode |
+| `--speculative-algorithm`, `--spec-algo` | off | Draft method. `dflash` drafts a block with a separate DFlash checkpoint. `mtp` drafts with the checkpoint's multi-token-prediction layer: Qwen3.5 / Qwen3.6 HF checkpoints, and Qwen3.8-Flash-Next HF or GGUF |
+| `--speculative-draft-model-path`, `--spec-draft-model` | `dflash`: required; `mtp`: the target checkpoint | Where the draft weights load from. `dflash`: a `z-lab/*-DFlash*` repo. `mtp`: a Qwen3.8-Flash-Next target also takes a Strata MTP pack (a GGUF that keeps the checkpoint's `mtp.*` tensors under their HF names), and a GGUF target needs one; the `nextn` MTP blocks llama.cpp writes are not read; a separate checkpoint folder is read with the target's quantization config |
+| `--speculative-num-steps`, `--spec-num-steps` | the method's default (3 for `mtp`) | `mtp`: draft tokens per decode step, 1 to 8 |
+| `--speculative-dflash-block-size` | draft's | `dflash`: anchor + drafted tokens per verify; smaller blocks keep less verify memory and draft fewer tokens |
+| `--speculative-draft-quant` | none | `dflash`: `fp8` stores the draft's projections as e4m3 (half the VRAM); only the acceptance rate can move |
+| `--disable-speculative-adaptive` | adaptive on | `dflash`: speculate on every step, even for a request that measures slower than plain decode |
+
+`dflash` keeps prefix reuse (`--cache-type radix`) on, and a larger `--max-running-requests` verifies the decoding requests' blocks together in one batched forward. `mtp` needs `--tp 1` and runs without overlap scheduling; targets with sliding-window or DSV4 window-tier KV are refused at startup. `mtp` also refuses Qwen3.5 / Qwen3.6 GGUF targets and an FTW checkpoint as the draft source, since FTW drops the `mtp.*` tensors. Neither works with `--prefill-layer-major`.
 
 ### API behaviour
 

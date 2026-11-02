@@ -1199,7 +1199,8 @@ def parse_args(
         type=str,
         default=ServerArgs.speculative_algorithm,
         help="Speculative decoding with this draft method: dflash (needs "
-             "--speculative-draft-model-path), or a freetoken.spec proposer. Off by default.",
+             "--speculative-draft-model-path), mtp (the checkpoint's own MTP layers), or a "
+             "freetoken.spec proposer. Off by default.",
     )
     parser.add_argument(
         "--speculative-draft-model-path",
