@@ -2010,28 +2010,32 @@ class Engine:
         else:
             # every target forward (prefill chunks, plain decode steps) feeds the draft contexts
             worker = self.dflash_worker
-            with self.ctx.forward_batch(batch), self.model.forward_host_ctx(batch, use_graph):
-                if worker is not None:
-                    if batch.is_prefill:
-                        for req in batch.reqs:
-                            worker.begin_request(req.uid, req.input_ids, req.cached_len)
-                    if use_graph:
-                        logits, hidden_states = self.graph_runner.replay(
-                            batch, return_hidden_layers=worker.target_layer_ids
-                        )
+            with self.ctx.forward_batch(batch):
+                with self.model.forward_host_ctx(batch, use_graph):
+                    if worker is not None:
+                        if batch.is_prefill:
+                            for req in batch.reqs:
+                                worker.begin_request(req.uid, req.input_ids, req.cached_len)
+                        if use_graph:
+                            logits, hidden_states = self.graph_runner.replay(
+                                batch, return_hidden_layers=worker.target_layer_ids
+                            )
+                        else:
+                            logits, hidden_states = self.model.forward(
+                                return_hidden_layers=worker.target_layer_ids
+                            )
+                    elif use_graph:
+                        logits = self.graph_runner.replay(batch)
                     else:
-                        logits, hidden_states = self.model.forward(
-                            return_hidden_layers=worker.target_layer_ids
-                        )
+                        logits = self.model.forward()
+                # outside the host context: a disk-PLE graph waits on the fill that context's exit
+                # signals, and a first-time Triton module load in the draft would block on that wait
+                if worker is not None:
                     spans, row = [], 0
                     for req in batch.reqs:
                         spans.append((worker.slot_of(req.uid), row, req.extend_len, req.cached_len))
                         row += req.extend_len
                     worker.store_hidden_states_batch(spans, hidden_states)
-                elif use_graph:
-                    logits = self.graph_runner.replay(batch)
-                else:
-                    logits = self.model.forward()
         if self.cpu_moe_executor is not None:
             self.cpu_moe_executor.raise_if_unhealthy()
         return logits
