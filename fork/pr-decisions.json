@@ -1089,7 +1089,7 @@
     "head_sha": "e54c44c948c7",
     "reviewed_at": "2026-10-03",
     "decision": "rejected",
-    "reason": "Built on a much older main: it would revert large parts of current code (quant config plumbing, moe_strategy, gpu selection, EngineConfig post-init), defines resolved_kv_dtype twice, adds [WEIGHT-DIAG] debug prints, and ships AI work logs and a PDF under docs/. Its fp8 KV storage is on main via #354. The CPU-resident embedding idea is planned as our own --embed-device cpu after the queue, crediting this PR's author (see deferred CPU-embedding work).",
+    "reason": "Built on a much older main: it would revert large parts of current code (quant config plumbing, moe_strategy, gpu selection, EngineConfig post-init), defines resolved_kv_dtype twice, adds [WEIGHT-DIAG] debug prints, and ships AI work logs and a PDF under docs/. Its fp8 KV storage is on main via #354. The CPU-resident embedding idea is planned as our own --embed-device cpu after the queue, crediting this PR's author (see deferred CPU-embedding work) (built on next in a53a5b5; since 2026-10-24 an alias of upstream's --embed-weights host, #806).",
     "commits": [],
     "gpu_untested": true,
     "authors": [
@@ -2573,7 +2573,7 @@
     "head_sha": "abd3b143e609",
     "reviewed_at": "2026-10-10",
     "decision": "reimplemented",
-    "reason": "Gemma-4 E2B/E4B support (per-layer embeddings, KV-layer sharing, double-wide MLP) plus a dense GGUF parser. A trial merge conflicts in 13 files (26 hunks) against Gemma-4 code next reworked since (#359, #494, #467 and fixups; the dense GGUF parser part is covered by #359 + 7f2fc79), so it amounts to a reimplementation. Worth doing as its own project after the queue - the E-series models are small enough to test here (E2B/E4B GGUF or safetensors). REVISITED 2026-10-10: reimplemented on next (8589098, Co-authored-by the PR author): per-layer embeddings, KV-layer sharing (shared layers read the source layer's paged KV, no copy; CUDA-graph safe), double-wide MLP; the PLE table can sit in host RAM through the existing --embed-device cpu. google/gemma-4-E2B-it and E4B-it (bf16 safetensors, text) match HF transformers greedy tokens exactly on 5 prompts incl. 2.8k tokens past the sliding window, graphs on/off and chunked prefill alike; decode E2B ~158, E4B ~83-86 tok/s on the 4090; Gemma-4-26B-A4B output byte-identical. Left out: the PR's dense GGUF E-series parsing and its unrelated llama GGUF parser; image/audio paths untested.",
+    "reason": "Gemma-4 E2B/E4B support (per-layer embeddings, KV-layer sharing, double-wide MLP) plus a dense GGUF parser. A trial merge conflicts in 13 files (26 hunks) against Gemma-4 code next reworked since (#359, #494, #467 and fixups; the dense GGUF parser part is covered by #359 + 7f2fc79), so it amounts to a reimplementation. Worth doing as its own project after the queue - the E-series models are small enough to test here (E2B/E4B GGUF or safetensors). REVISITED 2026-10-10: reimplemented on next (8589098, Co-authored-by the PR author): per-layer embeddings, KV-layer sharing (shared layers read the source layer's paged KV, no copy; CUDA-graph safe), double-wide MLP; the PLE table can sit in host RAM through the existing --embed-device cpu (since 2026-10-24: --embed-weights host, upstream #806). google/gemma-4-E2B-it and E4B-it (bf16 safetensors, text) match HF transformers greedy tokens exactly on 5 prompts incl. 2.8k tokens past the sliding window, graphs on/off and chunked prefill alike; decode E2B ~158, E4B ~83-86 tok/s on the 4090; Gemma-4-26B-A4B output byte-identical. Left out: the PR's dense GGUF E-series parsing and its unrelated llama GGUF parser; image/audio paths untested.",
     "commits": [
       "8589098"
     ],
@@ -2582,7 +2582,7 @@
       "mkornreich <52514824+mkornreich@users.noreply.github.com>"
     ],
     "summary": "Gemma-4 E2B/E4B (per-layer embeddings, KV sharing, double-wide MLP); matches HF greedy output exactly",
-    "fixup": "Own version on today's code: shared layers read the source's paged KV, PLE table via --embed-device cpu, GGUF parts left out ([8589098](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/8589098))"
+    "fixup": "Own version on today's code: shared layers read the source's paged KV, PLE table via --embed-weights host, GGUF parts left out ([8589098](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/8589098))"
   },
   "31": {
     "number": 31,
