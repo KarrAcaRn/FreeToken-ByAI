@@ -75,8 +75,8 @@ def _setup():
         _prefill_start={},
     )
     stub._free_req_resources = lambda req: Scheduler._free_req_resources(stub, req)
-    stub._drain_single_token = lambda *a: Scheduler._drain_single_token(stub, *a)
-    stub._drain_multi_token = lambda *a: Scheduler._drain_multi_token(stub, *a)
+    stub._drain_single_token = lambda *a, **kw: Scheduler._drain_single_token(stub, *a, **kw)
+    stub._drain_multi_token = lambda *a, **kw: Scheduler._drain_multi_token(stub, *a, **kw)
     stub._commit_tokens = lambda req, tokens: Scheduler._commit_tokens(stub, req, tokens)
     return pool, cm, tm, dm, pm, sent, stub
 

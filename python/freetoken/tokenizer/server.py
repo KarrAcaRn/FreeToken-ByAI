@@ -258,6 +258,7 @@ def tokenize_worker(
                             if msg.chosen_logprob is not None
                             else None
                         ),
+                        timings=msg.timings,
                     )
                     for msg, reply in zip(detokenize_msg, replies, strict=True)
                 ]

@@ -83,6 +83,11 @@ class ServerArgs(SchedulerConfig):
     # every protocol we speak.
     enable_metrics_report: bool = False
     prefill_layer_major: bool = False
+    # Attach llama.cpp's per-request `timings` object to OpenAI chat/completions and
+    # Responses responses (plus queue_ms and, under speculative decoding, draft_n /
+    # draft_n_accepted). Upstream makes it opt-in; on next it stays on by default
+    # (--no-enable-timings-report turns it off), as next always served timings.
+    enable_timings_report: bool = True
     anthropic_inline_system: str = "auto"
     # Comma-separated hostname allowlist for client-supplied image URLs; empty admits any domain.
     allowed_media_domains: str = ""
@@ -794,6 +799,20 @@ def parse_args(
             "the request must also ask for usage (OpenAI stream_options.include_usage). "
             "Non-standard on every protocol, hence opt-in. Under concurrency the spans are "
             "this request's share of shared batches, not isolated engine throughput."
+        ),
+    )
+
+    parser.add_argument(
+        "--enable-timings-report",
+        action=argparse.BooleanOptionalAction,
+        default=ServerArgs.enable_timings_report,
+        help=(
+            "Attach a llama.cpp-shaped per-request timings object to every chat completion, "
+            "completion and Responses response (and to the final stream chunk), so frontends "
+            "like llama-swap and Open Web UI can show prefill/decode rates and cache hits. "
+            "Spans are measured in the scheduler; queue_ms is a FreeToken extension. On by "
+            "default; --no-enable-timings-report drops it (timings.cache_n reveals the "
+            "prefix-cache hit that --enable-cache-report would otherwise hide)."
         ),
     )
 

@@ -1075,7 +1075,7 @@ def _timed_result() -> GenResult:
     return GenResult(
         reasoning="", content="hi", tool_calls=[], finish_reason="stop",
         prompt_tokens=11, completion_tokens=5, cached_tokens=8,
-        timings=GenTimings(ttft_ms=30.0, prefill_ms=12.0, decode_ms=40.0, total_ms=70.0),
+        gen_timings=GenTimings(ttft_ms=30.0, prefill_ms=12.0, decode_ms=40.0, total_ms=70.0),
     )
 
 
@@ -1104,7 +1104,7 @@ def test_stream_message_delta_carries_metrics():
     events = [
         ContentDelta("hi"),
         GenDone("stop", 4, 2, cached_tokens=1,
-                timings=GenTimings(ttft_ms=5.0, prefill_ms=2.0, decode_ms=9.0, total_ms=14.0)),
+                gen_timings=GenTimings(ttft_ms=5.0, prefill_ms=2.0, decode_ms=9.0, total_ms=14.0)),
     ]
     collected = _collect_events(events, metrics=True)
     md = next(e[1] for e in collected if e[0] == "message_delta")
