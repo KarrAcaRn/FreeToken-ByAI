@@ -487,6 +487,8 @@ class Scheduler(SchedulerIOMixin):
         batch, output = last_data[0].batch, last_data[1]
         output.copy_done_event.synchronize()
         num_tokens = getattr(output, "num_tokens", 1)
+        # tokens are on the host from here: the per-request timings' token stamps
+        now = time.perf_counter()
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         generated = None
@@ -526,9 +528,9 @@ class Scheduler(SchedulerIOMixin):
                         continue
 
                     if num_tokens > 1:
-                        self._drain_multi_token(req, output, i, num_tokens, reply, new_finished_reqs, batch)
+                        self._drain_multi_token(req, output, i, num_tokens, reply, new_finished_reqs, batch, now=now)
                     else:
-                        self._drain_single_token(req, output, i, reply, new_finished_reqs, batch)
+                        self._drain_single_token(req, output, i, reply, new_finished_reqs, batch, now=now)
 
         self.finished_reqs = new_finished_reqs
         # Stamp each reply with the post-batch KV page occupancy so the frontend (shell
@@ -565,12 +567,24 @@ class Scheduler(SchedulerIOMixin):
         """Commit each request's accepted tokens, return the slots its rejected rows took, then the target state; returns the tokens committed."""
         k = self.config.decode_rows_per_req - 1
         counts, finished = [], []
+        now = time.perf_counter()
         for i, req in enumerate(batch.reqs):
             # spec forces normal_loop, which frees an aborted request between steps; overlap would need rollback_tail here and must not donate the GDN slot the verify rolled
             assert not req.aborted, "a verify batch drained an aborted request"
             cached = req.cached_len
-            msg, n = self._commit_tokens(req, output.next_tokens_cpu[i, : int(output.emitted_cpu[i]) + 1])
+            emitted = int(output.emitted_cpu[i])
+            msg, n = self._commit_tokens(req, output.next_tokens_cpu[i, : emitted + 1])
+            # k drafts were proposed; the step hands _commit_tokens the emitted accepted
+            # drafts plus the target's own token, so when a stop lands on a draft every
+            # committed token is an accepted draft: count min(n, emitted), with n already
+            # post stop-truncation. Never exceeds predicted_n - 1: the request's first
+            # committed token came from prefill, outside every verify step.
+            req.stats.stamp_token(now)
+            req.stats.draft_n += k
+            req.stats.draft_n_accepted += min(n, emitted)
             reply.append(msg)
+            if msg.finished:
+                msg.timings = req.stats.finish(req.input_ids.numel() - req.prompt_len)
             req.commit_pending(n)
             self.cache_manager.rollback_tail(req, req.cached_len, cached + k + 1)
             counts.append(n)
@@ -652,7 +666,7 @@ class Scheduler(SchedulerIOMixin):
                 return s
         return None
 
-    def _drain_single_token(self, req, outputs, i, reply, new_finished_reqs, batch):
+    def _drain_single_token(self, req, outputs, i, reply, new_finished_reqs, batch, now=None):
         next_tokens_cpu = outputs.next_tokens_cpu
         next_token = next_tokens_cpu[i]
         req.append_host(next_token.unsqueeze(0))
@@ -704,6 +718,9 @@ class Scheduler(SchedulerIOMixin):
                 top_logprobs=row_top_logprobs,
             )
         )
+        req.stats.stamp_token(time.perf_counter() if now is None else now)
+        if finished:
+            reply[-1].timings = req.stats.finish(req.input_ids.numel() - req.prompt_len)
         # NOTE: overlap scheduling may make the request freed twice, skip second free
         if finished and req not in self.finished_reqs:
             self.decode_manager.remove_req(req)
@@ -720,7 +737,7 @@ class Scheduler(SchedulerIOMixin):
             # None'd GDN ping-pong slots).
             self.cache_manager.cache_req(req, finished=False)
 
-    def _drain_multi_token(self, req, outputs, i, num_tokens, reply, new_finished_reqs, batch):
+    def _drain_multi_token(self, req, outputs, i, num_tokens, reply, new_finished_reqs, batch, now=None):
         first = i * num_tokens
         tokens = outputs.next_tokens_cpu[first:first + _req_token_count(outputs, i)]
         emit_count = _multi_token_emit_count(req.input_ids.numel(), req.max_device_len, tokens.numel())
@@ -745,6 +762,16 @@ class Scheduler(SchedulerIOMixin):
             ))
             if finished:
                 break
+        # Timings: the step's tokens land together. A DFlash step proposed draft_len drafts
+        # and emitted the accepted ones plus the bonus token; every committed token but the
+        # bonus is an accepted draft (all of them when a stop lands inside the block).
+        req.stats.stamp_token(time.perf_counter() if now is None else now)
+        draft_len = getattr(outputs, "draft_len", 0)
+        if isinstance(draft_len, int) and draft_len > 0:
+            req.stats.draft_n += draft_len
+            req.stats.draft_n_accepted += min(appended, tokens.numel() - 1)
+        if finished and reply and reply[-1].uid == req.uid:
+            reply[-1].timings = req.stats.finish(req.input_ids.numel() - req.prompt_len)
         # The step wrote the KV of the anchor and the accepted drafts, i.e. of every emitted
         # token but the last: advance past the ones the request keeps
         if appended > 1:

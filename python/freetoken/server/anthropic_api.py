@@ -428,7 +428,7 @@ def anthropic_full_response(
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             cached_tokens=result.cached_tokens,
-            timings=result.timings,
+            timings=result.gen_timings,
         ) if metrics else None,
     )
 
@@ -609,7 +609,7 @@ async def anthropic_event_stream(
                         prompt_tokens=ev.prompt_tokens,
                         completion_tokens=ev.completion_tokens,
                         cached_tokens=ev.cached_tokens,
-                        timings=ev.timings,
+                        timings=ev.gen_timings,
                     ) if metrics else None,
                 ))
                 yield _event(AnthropicStreamEvent(type="message_stop"))

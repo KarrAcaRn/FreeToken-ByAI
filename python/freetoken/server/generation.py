@@ -132,10 +132,6 @@ class GenTimings:
     prefill_ms: float = 0.0
     decode_ms: float = 0.0
     total_ms: float = 0.0
-    # The llama.cpp `timings` spans, matching /v1/stats: prompt runs to the first output
-    # reply (the whole request when none came), predicted from the first output reply to the last.
-    prompt_ms: float = 0.0
-    predicted_ms: float = 0.0
 
 
 @dataclass
@@ -145,7 +141,11 @@ class GenDone:
     completion_tokens: int
     matched_stop: str | None = None
     cached_tokens: int = 0
-    timings: GenTimings = field(default_factory=GenTimings)
+    # Scheduler-measured llama.cpp spans and counts (ReqStats.finish) off the terminal ack;
+    # None on errors/aborts. Rendered by timings_block.
+    timings: dict[str, Any] | None = None
+    # API-side spans for the --enable-metrics-report `metrics` object (build_metrics).
+    gen_timings: GenTimings = field(default_factory=GenTimings)
 
 
 GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | ToolCallsDelta | GenDone
@@ -161,45 +161,53 @@ class GenResult:
     completion_tokens: int
     matched_stop: str | None = None
     cached_tokens: int = 0
-    timings: GenTimings = field(default_factory=GenTimings)
+    # Scheduler-measured llama.cpp spans and counts (ReqStats.finish) off the terminal ack;
+    # None on errors/aborts. Rendered by timings_block.
+    timings: dict[str, Any] | None = None
+    # API-side spans for the --enable-metrics-report `metrics` object (build_metrics).
+    gen_timings: GenTimings = field(default_factory=GenTimings)
     # Neutral sampled-token logprob entries, one per sampled token (empty when the
     # request did not ask).
     logprobs: list[dict] = field(default_factory=list)
 
 
-def timings_block(
-    prompt_tokens: int, completion_tokens: int, cached_tokens: int,
-    prompt_ms: float, predicted_ms: float,
-) -> dict[str, Any] | None:
-    """llama.cpp's timings shape (server_slot_stats::to_json), which frontends like
-    llama-swap parse off the response. prompt_n counts only the tokens evaluated after
-    the cached prefix and decode runs n_gen - 1 steps (the first token rides the last
-    prompt batch), matching llama.cpp's own arithmetic."""
-    if prompt_ms <= 0.0:
+def timings_block(state: Any, timings: dict[str, Any] | None) -> dict[str, Any] | None:
+    """llama.cpp's per-request timings object (server_slot_stats::to_json, b10408+) as
+    frontends like llama-swap read it, plus queue_ms as a FreeToken extension. The spans
+    and counts are measured in the scheduler (ReqStats) and arrive on the terminal ack:
+    queue_ms covers waiting-queue admission to the first prefill chunk, prompt_ms the
+    first chunk to the first sampled token on the host, predicted_ms the first to the
+    last committed token. prompt_n counts only the evaluated tokens and the decode rates
+    divide by predicted_n - 1 steps (the first token rides the last prompt batch),
+    matching llama.cpp's arithmetic. Values are not rounded. Gated by
+    --enable-timings-report (on by default on next; upstream defaults it off, since
+    cache_n reveals the prefix-cache hit that --enable-cache-report hides)."""
+    if timings is None:
         return None
-    prompt_s = prompt_ms / 1000.0
-    predicted_s = predicted_ms / 1000.0
-    processed = prompt_tokens - cached_tokens
-    gen_steps = max(completion_tokens - 1, 0)
-    return {
-        "cache_n": cached_tokens,
-        "prompt_n": processed,
-        "prompt_ms": round(prompt_ms, 2),
-        "prompt_per_token_ms": round(prompt_ms / processed, 2) if processed > 0 else 0.0,
-        "prompt_per_second": round(processed / prompt_s, 2) if prompt_s > 0 else 0.0,
-        "predicted_n": completion_tokens,
-        "predicted_ms": round(predicted_ms, 2),
-        "predicted_per_token_ms": round(predicted_ms / gen_steps, 2) if gen_steps > 0 else 0.0,
-        "predicted_per_second": round(gen_steps / predicted_s, 2) if predicted_s > 0 else 0.0,
+    config = getattr(state, "config", None) if state is not None else None
+    if not getattr(config, "enable_timings_report", False):
+        return None
+    prompt_n = timings["prompt_n"]
+    predicted_n = timings["predicted_n"]
+    prompt_ms = timings["prompt_ms"]
+    predicted_ms = timings["predicted_ms"]
+    gen_steps = max(predicted_n - 1, 0)
+    block: dict[str, Any] = {
+        "cache_n": timings["cache_n"],
+        "prompt_n": prompt_n,
+        "prompt_ms": prompt_ms,
+        "prompt_per_token_ms": prompt_ms / prompt_n if prompt_n > 0 else 0.0,
+        "prompt_per_second": 1e3 / prompt_ms * prompt_n if prompt_ms > 0 else 0.0,
+        "predicted_n": predicted_n,
+        "predicted_ms": predicted_ms,
+        "predicted_per_token_ms": predicted_ms / gen_steps if gen_steps > 0 else 0.0,
+        "predicted_per_second": 1e3 / predicted_ms * gen_steps if predicted_ms > 0 else 0.0,
+        "queue_ms": timings["queue_ms"],
     }
-
-
-def gen_timings_block(
-    prompt_tokens: int, completion_tokens: int, cached_tokens: int, timings: GenTimings
-) -> dict[str, Any] | None:
-    return timings_block(
-        prompt_tokens, completion_tokens, cached_tokens, timings.prompt_ms, timings.predicted_ms
-    )
+    if timings.get("draft_n", 0) > 0:
+        block["draft_n"] = timings["draft_n"]
+        block["draft_n_accepted"] = timings["draft_n_accepted"]
+    return block
 
 
 @dataclass
@@ -644,8 +652,6 @@ class GenTimer:
             prefill_ms=self.prefill_ms,
             decode_ms=0.0 if first is None else (end - first) * 1000.0,
             total_ms=(end - self.start) * 1000.0,
-            prompt_ms=((end if first is None else first) - self.start) * 1000.0,
-            predicted_ms=0.0 if first is None else (self.last_token_at - first) * 1000.0,
         )
 
 
@@ -1008,6 +1014,7 @@ async def _generate_events_impl(
 
     engine_finish_reason: str | None = None
     engine_matched_stop: str | None = None
+    timings: dict[str, Any] | None = None
     async for ack in state.wait_for_ack(uid):
         if getattr(ack, "error", None):
             raise GenerationError(ack.error, getattr(ack, "error_code", None))
@@ -1017,6 +1024,8 @@ async def _generate_events_impl(
         cached_tokens += ack.cached_tokens
         if collect_logprobs and getattr(ack, "logprobs", None) is not None:
             pending_logprobs.append(ack.logprobs)
+        if getattr(ack, "timings", None) is not None:
+            timings = ack.timings
         content_delta = ack.incremental_output
         if reasoning_parser is not None and content_delta:
             reasoning_delta, content_delta = reasoning_parser.parse_stream_chunk(content_delta)
@@ -1100,7 +1109,8 @@ async def _generate_events_impl(
     yield GenDone(
         finish_reason, prompt_tokens, completion_tokens,
         matched_stop=engine_matched_stop, cached_tokens=cached_tokens,
-        timings=timer.finish(),
+        gen_timings=timer.finish(),
+        timings=timings,
     )
 
 
@@ -1112,6 +1122,7 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any, timer: GenTim
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
+    timings: dict[str, Any] | None = None
     engine_finish_reason: str | None = None
     engine_matched_stop: str | None = None
     async for ack in state.wait_for_ack(uid):
@@ -1121,6 +1132,8 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any, timer: GenTim
         prompt_tokens += ack.prompt_tokens_delta
         completion_tokens += ack.completion_tokens_delta
         cached_tokens += ack.cached_tokens
+        if getattr(ack, "timings", None) is not None:
+            timings = ack.timings
         full_content += ack.incremental_output
         if getattr(ack, "logprobs", None) is not None:
             logprob_entries.append(ack.logprobs)
@@ -1149,6 +1162,7 @@ async def _generate_full_impl(uid: int, spec: GenSpec, state: Any, timer: GenTim
         completion_tokens=completion_tokens,
         matched_stop=engine_matched_stop,
         cached_tokens=cached_tokens,
-        timings=timer.finish(),
+        gen_timings=timer.finish(),
+        timings=timings,
         logprobs=logprob_entries,
     )

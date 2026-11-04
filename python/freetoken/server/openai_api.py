@@ -42,7 +42,6 @@ from .generation import (
     GenDone,
     GenerationError,
     GenSpec,
-    GenTimer,
     GenTimings,
     ReasoningDelta,
     ToolCallArgsDelta,
@@ -50,13 +49,13 @@ from .generation import (
     ToolCallStart,
     build_metrics,
     prompt_token_ids,
-    gen_timings_block,
     generate_events,
     generate_full,
     metrics_enabled,
     prerender_error,
     render_messages,
     resolve_sampling,
+    timings_block,
     submit_generation,
 )
 
@@ -465,11 +464,9 @@ async def handle_chat_completion(
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             cached_tokens=result.cached_tokens,
-            timings=result.timings,
+            timings=result.gen_timings,
         )
-    if (timings := gen_timings_block(
-        result.prompt_tokens, result.completion_tokens, result.cached_tokens, result.timings
-    )) is not None:
+    if (timings := timings_block(state, result.timings)) is not None:
         response["timings"] = timings
     return response
 
@@ -498,7 +495,11 @@ async def stream_chat_completion_chunks(
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
-    timings = GenTimings()
+    timings: dict[str, Any] | None = None
+    gen_timings = GenTimings()
+    # timings ride the stream's LAST chunk only: the usage chunk when the client asked
+    # for one, otherwise the finish chunk
+    include_usage = bool(req.stream_options and req.stream_options.include_usage)
     tool_calls_sent = 0
     open_tool: dict[str, Any] | None = None
     events = generate_events(uid, spec, state, source="/v1/chat/completions")
@@ -606,16 +607,13 @@ async def stream_chat_completion_chunks(
             completion_tokens = ev.completion_tokens
             cached_tokens = ev.cached_tokens
             timings = ev.timings
-            # llama.cpp puts timings on the finish chunk too, so streams without
-            # include_usage still get them.
+            gen_timings = ev.gen_timings
             done = _chat_chunk(req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}])
-            if (block := gen_timings_block(
-                prompt_tokens, completion_tokens, cached_tokens, timings
-            )) is not None:
-                done["timings"] = block
+            if not include_usage and (t := timings_block(state, timings)) is not None:
+                done["timings"] = t
             yield _sse(done)
 
-    if req.stream_options and req.stream_options.include_usage:
+    if include_usage:
         final: dict[str, Any] = {
             "id": f"chatcmpl-{uid}",
             "object": "chat.completion.chunk",
@@ -631,12 +629,10 @@ async def stream_chat_completion_chunks(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
-                timings=timings,
+                timings=gen_timings,
             )
-        if (block := gen_timings_block(
-            prompt_tokens, completion_tokens, cached_tokens, timings
-        )) is not None:
-            final["timings"] = block
+        if (t := timings_block(state, timings)) is not None:
+            final["timings"] = t
         yield _sse(final)
 
     yield b"data: [DONE]\n\n"
@@ -703,20 +699,22 @@ async def handle_completion(
     prompt_tokens = 0
     completion_tokens = 0
     cached_tokens = 0
-    timer = GenTimer()
+    # with several prompts the timings are the FIRST prompt's own spans (its first
+    # choice's), as llama.cpp returns arr[0]; one clock across the sequential loop would
+    # mix the later prompts' queue and prefill into the rates
+    first_timings: dict[str, Any] | None = None
     for prompt_index, prompt in enumerate(prompts):
         fan_out = _completion_fan_out(req.n, prompt, _tokenize_msg, state)
         await fan_out.start()
 
         async def _drain_one(fan_out: ChoiceFanOut = fan_out, prompt_index: int = prompt_index):
-            nonlocal prompt_tokens, completion_tokens, cached_tokens
+            nonlocal prompt_tokens, completion_tokens, cached_tokens, first_timings
             texts = [""] * req.n
             entries: list[list[dict]] = [[] for _ in range(req.n)]
             finish_reasons = ["stop"] * req.n
             try:
                 async with contextlib.aclosing(fan_out.events()) as events:
                     async for index, ack in events:
-                        timer.observe(ack, prefill=index == 0)
                         # Every choice re-reports the shared prompt; OpenAI counts it once per prompt.
                         if index == 0:
                             prompt_tokens += ack.prompt_tokens_delta
@@ -727,6 +725,8 @@ async def handle_completion(
                             entries[index].append(ack.logprobs)
                         if ack.finished:
                             finish_reasons[index] = getattr(ack, "finish_reason", None) or "stop"
+                            if prompt_index == 0 and index == 0:
+                                first_timings = getattr(ack, "timings", None)
             except GenerationError as exc:
                 return create_error_response(str(exc), code=exc.code)
             return [
@@ -758,9 +758,7 @@ async def handle_completion(
         "choices": choices,
         "usage": _usage(prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)),
     }
-    if (timings := gen_timings_block(
-        prompt_tokens, completion_tokens, cached_tokens, timer.finish()
-    )) is not None:
+    if (timings := timings_block(state, first_timings)) is not None:
         response["timings"] = timings
     return response
 
@@ -806,13 +804,15 @@ async def stream_completion_chunks(
     cached_tokens = 0
     text_offsets = [0] * req.n
     unfinished = req.n
-    timer = GenTimer()
-    timings = None
+    # the request's timings: choice 0's scheduler spans, as on the buffered path
+    raw_timings: dict[str, Any] | None = None
+    include_usage = bool(req.stream_options and req.stream_options.include_usage)
     try:
         async with contextlib.aclosing(fan_out.events()) as events:
             async for index, ack in events:
-                timer.observe(ack, prefill=index == 0)
                 if index == 0:
+                    if getattr(ack, "timings", None) is not None:
+                        raw_timings = ack.timings
                     prompt_tokens += ack.prompt_tokens_delta
                     cached_tokens += ack.cached_tokens
                 completion_tokens += ack.completion_tokens_delta
@@ -834,25 +834,25 @@ async def stream_completion_chunks(
                         [{"text": "", "index": index, "finish_reason": finish_reason, "logprobs": None}]
                     )
                     unfinished -= 1
-                    if not unfinished:  # the request's timings ride on its last finish chunk
-                        timings = gen_timings_block(
-                            prompt_tokens, completion_tokens, cached_tokens, timer.finish()
-                        )
-                        if timings is not None:
-                            done_chunk["timings"] = timings
+                    # timings ride the stream's LAST chunk only: the request's last finish
+                    # chunk when no usage chunk follows
+                    if not unfinished and not include_usage and (
+                        t := timings_block(state, raw_timings)
+                    ) is not None:
+                        done_chunk["timings"] = t
                     yield _sse(done_chunk)
     except GenerationError as exc:
         yield _sse({"error": {"message": str(exc), "type": "invalid_request_error", "code": exc.code}})
         yield b"data: [DONE]\n\n"
         return
 
-    if req.stream_options and req.stream_options.include_usage:
+    if include_usage:
         final = chunk(
             [],
             usage=_usage(prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)),
         )
-        if timings is not None:
-            final["timings"] = timings
+        if (t := timings_block(state, raw_timings)) is not None:
+            final["timings"] = t
         yield _sse(final)
     yield b"data: [DONE]\n\n"
 

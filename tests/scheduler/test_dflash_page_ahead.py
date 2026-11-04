@@ -150,3 +150,37 @@ def test_multi_token_drain_reads_each_requests_own_count():
         Scheduler._drain_multi_token(sched, req, outputs, i, 4, reply, set(), None)
     assert [t for m in reply for t in m.next_tokens] == [5, 6, 7, 8, 9, 10]
     assert [r.cached_len for r in reqs] == [11, 13]
+
+
+@pytest.mark.parametrize("eos_at", [None, 1])
+def test_multi_token_drain_counts_drafts_and_attaches_timings(eos_at):
+    """A DFlash step proposes draft_len drafts and emits accepted + bonus; the committed tokens but
+    the bonus (all of them when a stop lands inside the block) count as accepted drafts, and only
+    the terminal reply carries the scheduler timings."""
+    from freetoken.scheduler.scheduler import Scheduler
+
+    eos = 99
+    tokens = torch.tensor([5, 6, 7], dtype=torch.int32)  # 2 accepted drafts + the bonus
+    if eos_at is not None:
+        tokens[eos_at] = eos
+    req = Req(input_ids=torch.arange(1, 11, dtype=torch.int32), table_idx=0, cached_len=9,
+              output_len=3 if eos_at is None else 50, uid=0, sampling_params=SamplingParams(),
+              cache_handle=None)
+    req.cached_len, req.device_len = 10, 11
+    req.stats.enqueued_at, req.stats.first_chunk_at, req.stats.first_token_at = 1.0, 2.0, 3.0
+    req.stats.prompt_n = 10
+    sched = SimpleNamespace(
+        eos_token_ids={eos}, finished_reqs=set(), _match_stop_str=lambda r: None, toolcall_anchor_id=None,
+        decode_manager=SimpleNamespace(remove_req=lambda r: None), _free_req_resources=lambda r: None,
+    )
+    outputs = SimpleNamespace(next_tokens_cpu=tokens, num_tokens=3, chosen_logprobs_cpu=None, draft_len=7)
+    reply = []
+    Scheduler._drain_multi_token(sched, req, outputs, 0, 3, reply, set(), None, now=4.0)
+    assert req.stats.draft_n == 7
+    assert req.stats.draft_n_accepted == 2  # the stop at 1 is itself an accepted draft
+    assert all(m.timings is None for m in reply[:-1])
+    if eos_at is None:
+        # output budget ends with this block: hit_length on the bonus token
+        assert reply[-1].finished
+    t = reply[-1].timings
+    assert t is not None and t["draft_n"] == 7 and t["predicted_ms"] == 1000.0

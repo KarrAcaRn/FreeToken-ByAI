@@ -73,6 +73,7 @@ def _ack(
     finished: bool = False,
     cached: int = 0,
     prefill_ms: float = 0.0,
+    timings: dict | None = None,
 ) -> UserReply:
     return UserReply(
         uid=42,
@@ -83,7 +84,20 @@ def _ack(
         cached_tokens=cached,
         prefill_ms=prefill_ms,
         finish_reason="stop" if finished else None,
+        timings=timings,
     )
+
+
+def _sched_timings(**over) -> dict:
+    """A scheduler ReqStats.finish payload: raw spans and counts, no derived rates."""
+    t = dict(queue_ms=0.0, cache_n=0, prompt_n=0, prompt_ms=0.0, predicted_n=0,
+             predicted_ms=0.0, draft_n=0, draft_n_accepted=0)
+    t.update(over)
+    return t
+
+
+def _timings_state() -> SimpleNamespace:
+    return SimpleNamespace(config=SimpleNamespace(enable_timings_report=True))
 
 
 def _spec() -> GenSpec:
@@ -232,7 +246,7 @@ def test_prefill_ms_from_the_engine_reaches_the_result_unchanged():
         _ack(completion=1, out="b", finished=True),
     ])
     result = asyncio.run(generate_full(42, _spec(), st))
-    assert result.timings.prefill_ms == 12.5
+    assert result.gen_timings.prefill_ms == 12.5
     assert result.cached_tokens == 40
 
 
@@ -261,9 +275,9 @@ def test_ttft_is_measured_at_the_first_generated_token_not_the_admission_ack():
     ])
     result = asyncio.run(generate_full(42, _spec(), st))
     # One gap to the first token (not zero, as an admission-timed TTFT would give), two to the end.
-    assert _GAP_MS * 0.5 < result.timings.ttft_ms < _GAP_MS * 1.9
-    assert result.timings.total_ms > result.timings.ttft_ms + _GAP_MS * 0.5
-    assert result.timings.decode_ms > _GAP_MS * 0.5
+    assert _GAP_MS * 0.5 < result.gen_timings.ttft_ms < _GAP_MS * 1.9
+    assert result.gen_timings.total_ms > result.gen_timings.ttft_ms + _GAP_MS * 0.5
+    assert result.gen_timings.decode_ms > _GAP_MS * 0.5
 
 
 def test_ttft_counts_a_token_the_detokenizer_held_back():
@@ -276,7 +290,7 @@ def test_ttft_counts_a_token_the_detokenizer_held_back():
         _ack(completion=1, out="done", finished=True),
     ])
     result = asyncio.run(generate_full(42, _spec(), st))
-    assert _GAP_MS * 0.5 < result.timings.ttft_ms < _GAP_MS * 1.9
+    assert _GAP_MS * 0.5 < result.gen_timings.ttft_ms < _GAP_MS * 1.9
 
 
 def test_stream_gendone_carries_the_same_timings():
@@ -290,8 +304,8 @@ def test_stream_gendone_carries_the_same_timings():
         return [ev async for ev in generate_events(42, _spec(), st) if isinstance(ev, GenDone)]
 
     (done,) = asyncio.run(drain())
-    assert done.timings.prefill_ms == 7.0
-    assert done.timings.ttft_ms > 0.0
+    assert done.gen_timings.prefill_ms == 7.0
+    assert done.gen_timings.ttft_ms > 0.0
 
 
 def test_build_metrics_splits_prompt_tokens_into_cached_and_prefilled():
@@ -321,8 +335,10 @@ def test_build_metrics_rates_are_zero_rather_than_dividing_by_zero():
 
 
 def test_timings_block_follows_llama_cpp_semantics():
-    t = timings_block(prompt_tokens=1000, completion_tokens=21, cached_tokens=800,
-                      prompt_ms=2500.0, predicted_ms=2000.0)
+    t = timings_block(_timings_state(), _sched_timings(
+        queue_ms=500.0, cache_n=800, prompt_n=200, prompt_ms=2500.0,
+        predicted_n=21, predicted_ms=2000.0,
+    ))
     # prompt_n excludes the cache; decode steps are n - 1 (llama.cpp semantics).
     assert t["cache_n"] == 800
     assert t["prompt_n"] == 200
@@ -330,18 +346,55 @@ def test_timings_block_follows_llama_cpp_semantics():
     assert t["predicted_n"] == 21
     assert t["predicted_per_second"] == 10.0  # 20 decode steps / 2.0 s
     assert t["prompt_ms"] == 2500.0 and t["predicted_ms"] == 2000.0
+    assert t["queue_ms"] == 500.0  # FreeToken extension
+    assert "draft_n" not in t and "draft_n_accepted" not in t  # no drafting
+
+
+def test_timings_block_is_opt_in_and_needs_measured_spans():
+    raw = _sched_timings(prompt_n=10, prompt_ms=100.0, predicted_n=2, predicted_ms=50.0)
+    # off without the flag: usage.prompt_tokens - prompt_n would still leak the cache hit
+    assert timings_block(SimpleNamespace(config=SimpleNamespace()), raw) is None
+    # the responses helpers may pass no state at all
+    assert timings_block(None, raw) is None
+    # errors and aborts deliver no scheduler timings
+    assert timings_block(_timings_state(), None) is None
+
+
+def test_timings_report_is_on_by_default_on_next_and_can_be_turned_off():
+    """next keeps serving timings by default (upstream opts in); the flag is a BooleanOptionalAction."""
+    from freetoken.server.args import ServerArgs
+
+    assert ServerArgs.enable_timings_report is True
+    raw = _sched_timings(prompt_n=10, prompt_ms=100.0, predicted_n=2, predicted_ms=50.0)
+    on = SimpleNamespace(config=SimpleNamespace(enable_timings_report=ServerArgs.enable_timings_report))
+    assert timings_block(on, raw) is not None
+    off = SimpleNamespace(config=SimpleNamespace(enable_timings_report=False))
+    assert timings_block(off, raw) is None
 
 
 def test_timings_block_rates_survive_the_edge_shapes():
-    assert timings_block(10, 0, 0, 0.0, 0.0) is None  # nothing was measured
-    t = timings_block(10, 1, 0, 100.0, 0.0)  # one token: no decode steps
+    state = _timings_state()
+    # one output token: the first rides the last prompt batch, so no decode steps
+    t = timings_block(state, _sched_timings(prompt_n=10, prompt_ms=100.0, predicted_n=1, predicted_ms=0.001))
     assert t["predicted_per_second"] == 0.0 and t["predicted_per_token_ms"] == 0.0
-    t = timings_block(0, 2, 0, 100.0, 50.0)  # fully cached / empty prompt
+    # fully cached prompt: nothing was evaluated
+    t = timings_block(state, _sched_timings(prompt_n=0, prompt_ms=100.0, predicted_n=2, predicted_ms=50.0))
     assert t["prompt_per_second"] == 0.0 and t["prompt_per_token_ms"] == 0.0
+    # values are passed through unrounded
+    t = timings_block(state, _sched_timings(prompt_n=3, prompt_ms=1234.5678, predicted_n=2, predicted_ms=50.0))
+    assert t["prompt_ms"] == 1234.5678 and t["prompt_per_token_ms"] == 1234.5678 / 3
+    # speculative decoding adds the draft counters, and only then
+    t = timings_block(state, _sched_timings(prompt_n=3, prompt_ms=300.0, predicted_n=5,
+                                            predicted_ms=400.0, draft_n=64, draft_n_accepted=40))
+    assert t["draft_n"] == 64 and t["draft_n_accepted"] == 40
 
 
-def test_gen_done_and_result_carry_measured_spans():
-    st = FakeState([_ack(prompt=7, completion=1, out="x"), _ack(completion=4, out="yz", finished=True)])
+def test_gen_done_and_result_carry_the_scheduler_timings():
+    raw = _sched_timings(queue_ms=5.0, prompt_n=7, prompt_ms=70.0, predicted_n=5, predicted_ms=80.0)
+    st = FakeState([
+        _ack(prompt=7, completion=1, out="x"),
+        _ack(completion=4, out="yz", finished=True, timings=raw),
+    ])
 
     async def drain():
         done = None
@@ -351,13 +404,9 @@ def test_gen_done_and_result_carry_measured_spans():
         return done
 
     done = asyncio.run(drain())
-    assert done.timings.prompt_ms > 0.0
-    assert done.timings.predicted_ms >= 0.0
-    assert timings_block(done.prompt_tokens, done.completion_tokens, done.cached_tokens,
-                         done.timings.prompt_ms, done.timings.predicted_ms) is not None
+    assert done.timings is raw  # the terminal ack's scheduler spans, unchanged
 
     result = asyncio.run(generate_full(42, _spec(), FakeState(
-        [_ack(prompt=5, completion=1, out="a"), _ack(completion=2, out="bc", finished=True)]
+        [_ack(prompt=5, completion=1, out="a"), _ack(completion=2, out="bc", finished=True, timings=raw)]
     )))
-    assert result.timings.prompt_ms > 0.0
-    assert result.timings.predicted_ms >= 0.0
+    assert result.timings is raw

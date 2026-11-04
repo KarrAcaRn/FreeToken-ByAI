@@ -70,7 +70,6 @@ from .generation import (
     ToolCallsDelta,
     ToolCallStart,
     build_metrics,
-    gen_timings_block,
     generate_events,
     generate_full,
     metrics_enabled,
@@ -78,6 +77,7 @@ from .generation import (
     resolve_sampling,
     split_tool_lists,
     submit_generation,
+    timings_block,
     with_keepalive,
 )
 from .maintenance import maintenance_state_of, maintenance_unavailable_detail
@@ -170,7 +170,7 @@ async def handle_responses(
     if req.stream:
         events = responses_stream_generator(
             generate_events(uid, spec, state, source="/v1/responses"), req, response_id, created,
-            cache_report=cache_report, metrics=metrics,
+            cache_report=cache_report, metrics=metrics, state=state,
         )
         if request is not None:
             events = state.stream_with_cancellation(events, request, uid)
@@ -181,7 +181,8 @@ async def handle_responses(
     except GenerationError as exc:
         return _error_response(400, str(exc), exc.code)
     response = build_responses_response(
-        result, req, response_id, created, cache_report=cache_report, metrics=metrics
+        result, req, response_id, created, cache_report=cache_report, metrics=metrics,
+        state=state,
     )
     return JSONResponse(content=response.model_dump(mode="json"))
 
@@ -421,6 +422,7 @@ def build_responses_response(
     created: int,
     cache_report: bool = False,
     metrics: bool = False,
+    state: Any = None,
 ) -> Response:
     truncated = result.finish_reason == "length"
     item_status = "incomplete" if truncated else "completed"
@@ -469,11 +471,9 @@ def build_responses_response(
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             cached_tokens=result.cached_tokens,
-            timings=result.timings,
+            timings=result.gen_timings,
         ) if metrics else None,
-        timings=gen_timings_block(
-            result.prompt_tokens, result.completion_tokens, result.cached_tokens, result.timings
-        ),
+        timings=timings_block(state, result.timings),
     )
 
 
@@ -528,6 +528,7 @@ async def responses_stream_generator(
     created: int,
     cache_report: bool = False,
     metrics: bool = False,
+    state: Any = None,
 ) -> AsyncIterator[str]:
     seq = _Seq()
 
@@ -742,11 +743,9 @@ async def responses_stream_generator(
                     prompt_tokens=ev.prompt_tokens,
                     completion_tokens=ev.completion_tokens,
                     cached_tokens=ev.cached_tokens,
-                    timings=ev.timings,
+                    timings=ev.gen_timings,
                 ) if metrics else None
-                final_timings = gen_timings_block(
-                    ev.prompt_tokens, ev.completion_tokens, ev.cached_tokens, ev.timings
-                )
+                final_timings = timings_block(state, ev.timings)
                 for f in close_current():
                     yield f
                 if finish_reason == "length":
@@ -757,8 +756,8 @@ async def responses_stream_generator(
                             usage=_usage(usage_pt, usage_ct, usage_cached),
                             incomplete_reason="max_output_tokens",
                             request_metrics=request_metrics,
-                            timings=final_timings,
                         ),
+                        **({"timings": final_timings} if final_timings is not None else {}),
                     ))
                 else:
                     yield _sse(ResponseCompletedEvent(
@@ -767,8 +766,8 @@ async def responses_stream_generator(
                             "completed", output_items,
                             usage=_usage(usage_pt, usage_ct, usage_cached),
                             request_metrics=request_metrics,
-                            timings=final_timings,
                         ),
+                        **({"timings": final_timings} if final_timings is not None else {}),
                     ))
     except GenerationError as exc:
         # Request failed before/instead of producing output (template render error, over-length

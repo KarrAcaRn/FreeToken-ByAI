@@ -48,6 +48,10 @@ class UserReply(BaseFrontendMsg):
     # Scheduler-measured prefill span (see DetokenizeMsg.prefill_ms). Arrives once, on the
     # reply carrying the request's first generated token; 0.0 on every other reply.
     prefill_ms: float = 0.0
+    # Scheduler-measured per-request timings (queue/prompt/predicted spans, cache/prompt/
+    # predicted counts, draft counters), passthrough of DetokenizeMsg.timings: present on
+    # the terminal reply of a served request, None otherwise.
+    timings: dict | None = None
     # Set (with finished=True) when a request failed before producing output — e.g. a chat
     # template that the tokenizer cannot render, or a prompt that exceeds the KV budget the
     # scheduler can serve. Carries a human-readable reason. Without this, such a request would
