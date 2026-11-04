@@ -6,10 +6,20 @@
 # "--model all" lässt alle Einträge mit skip = true aus. removed = "Grund" streicht ein Modell ganz (kein Lauf, nicht
 # auf der Seite). Jedes Modell braucht mindestens 80k Kontext, langsame (< 35 tok/s) 40k (MIN_CONTEXT in run.py), sonst bricht der Lauf ab.
 
+[qwen3_5-0_8b-wsp]
+# echt page: no generation_config in the repo; model card: 0.6 / top_p 0.95 / top_k 20 / presence 1.5
+sampling = { temperature = 0.6, top_p = 0.95, top_k = 20, presence_penalty = 1.5 }
+label = "Qwen3.5 0.8B (Weight-Space Programming)"
+group = "Klein (dicht)"
+path = "models--RikiyaT--Qwen3.5-0.8B-weight-space-programming/snapshots/*"
+flags = "--kv-cache-dtype fp8"
+caps = ["vision"]
+
 [qwen3-0_6b]
 label = "Qwen3 0.6B"
 group = "Klein (dicht)"
 path = "models--Qwen--Qwen3-0.6B/snapshots/*"
+removed = "ersetzt durch Qwen3.5 0.8B (Weight-Space Programming)"
 # YaRN x4 wie in der Qwen3-Modellkarte: 40k -> 131k Kontext
 flags = '''--kv-cache-dtype fp8 --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}''''
 
