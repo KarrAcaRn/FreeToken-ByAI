@@ -3042,7 +3042,8 @@
     "fixup": "Test reaches the locked tombstone through swa pool pressure, since next keeps the prompt head's swa (#488) ([371d985](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/371d985))",
     "authors": [
       "Chen Cheng <85005591+ischencheng@users.noreply.github.com>"
-    ]
+    ],
+    "upstream": "merged"
   },
   "650": {
     "number": 650,
@@ -3236,7 +3237,8 @@
     "summary": "ROCm CPU-expert graph replay fix with a numeric capture probe; no AMD GPU here, not judged yet",
     "reviewed_at": "2026-10-20",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "763": {
     "number": 763,
@@ -3623,7 +3625,8 @@
     "commits": [
       "e920eb4"
     ],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "788": {
     "number": 788,
@@ -3655,7 +3658,8 @@
     "summary": "Fused sigmoid routing already on main via #804 for the same models",
     "reviewed_at": "2026-10-23",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "closed"
   },
   "809": {
     "number": 809,
@@ -3772,7 +3776,8 @@
       "a4a62a55"
     ],
     "gpu_untested": false,
-    "fixup": "Spans taken from #504's shared GenTimer instead of a second capture; metrics and timings coexist"
+    "fixup": "Spans taken from #504's shared GenTimer instead of a second capture; metrics and timings coexist",
+    "upstream": "merged"
   },
   "848": {
     "number": 848,
@@ -3793,7 +3798,8 @@
     "reason": "Same one-line clamp (min(top_k, vocab_size) before the int32 cast) is already on next via #790 (e920eb4).",
     "summary": "Already covered by #790, which clamps top_k to the vocabulary the same way",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "closed"
   },
   "849": {
     "number": 849,
@@ -3856,7 +3862,8 @@
     "reason": "Lifts the refusal of NVFP4 weight scales on qwen4exp GGUFs (and refuses a scaled PLE table). fused() applies the scales generically, but whether every qwen4exp NVFP4 tensor (embedding, untiled GDN projections, experts) is served correctly needs a run on an NVFP4 qwen4exp GGUF, which we do not have; not judged on its merits yet.",
     "summary": "Allows NVFP4 weight scales in qwen4exp GGUFs; deferred: no NVFP4 qwen4exp GGUF here to validate",
     "commits": [],
-    "gpu_untested": true
+    "gpu_untested": true,
+    "upstream": "merged"
   },
   "844": {
     "number": 844,
@@ -3946,6 +3953,6 @@
     "summary": "Faster CPU nvfp4 W4A8 MoE kernels (VNNI); deferred: this VM's CPU exposes no AVX-VNNI/AVX-512 to run them",
     "commits": [],
     "gpu_untested": true,
-    "upstream": "closed"
+    "upstream": "merged"
   }
 }
