@@ -1,12 +1,8 @@
-"""Thin wrappers over sgl_kernel's fused causal-conv1d ops (borrowed kernel, not a
-Layer), used by the GatedDeltaNet conv. These replace a per-request Python loop that
-did ``torch.cat([left_state, seg])`` + ``F.conv1d`` (a generic 2D depthwise kernel) —
-one fused kernel instead, with the per-request conv state read/updated in place by
-slot index (``cache_indices``), so it matches the LinearStatePool layout exactly:
-``conv_states[num_slots, conv_dim, kernel-1]``.
+"""Slot-indexed causal depthwise convolution via sgl_kernel or Triton.
 
-Convention mirrors sglang's ``causal_conv1d.py`` sgl_kernel path. silu is applied
-inside the kernel; the conv state is updated in place (no separate scatter).
+State is updated in place in [num_slots, conv_dim, kernel-1] layout.
+Activation defaults to silu. Width 7 always uses a dedicated Triton path;
+pass activation=None for LFM3's short convolution.
 """
 from __future__ import annotations
 
@@ -23,8 +19,9 @@ def causal_conv1d_varlen(
     cache_indices: torch.Tensor,    # [batch] int32 slot id per request
     has_initial_state: torch.Tensor,  # [batch] bool (carry conv state across chunks)
     max_seq_len: int | None = None,   # host-known longest extend_len; None derives it on device
+    activation: str | None = "silu",
 ) -> torch.Tensor:
-    """Varlen (prefill) depthwise causal conv with silu; returns silu(conv) and refreshes
+    """Varlen (prefill) depthwise causal conv; returns activation(conv) and refreshes
     ``conv_states[cache_indices]`` with each request's tail.
 
     Whether ``x`` survives depends on the backend: sgl_kernel convolves ``x`` in place and
@@ -37,6 +34,15 @@ def causal_conv1d_varlen(
     host value it already has."""
     from freetoken.kernel.backend import is_sgl_kernel_installed
 
+    assert activation in (None, "silu", "swish")
+    if weight.shape[-1] == 7:
+        from freetoken.kernel.triton.short_conv_triton import causal_conv1d_varlen as short_conv
+
+        return short_conv(
+            x, weight, conv_states, cu_seqlens, cache_indices, has_initial_state,
+            max_seq_len=max_seq_len, activation=activation,
+        )
+
     if not is_sgl_kernel_installed():
         from freetoken.kernel.triton.causal_conv1d_triton import (
             causal_conv1d_varlen as triton_causal_conv1d_varlen,
@@ -44,7 +50,7 @@ def causal_conv1d_varlen(
 
         return triton_causal_conv1d_varlen(
             x, weight, conv_states, cu_seqlens, cache_indices, has_initial_state,
-            max_seq_len=max_seq_len,
+            max_seq_len=max_seq_len, activation=activation,
         )
 
     from sgl_kernel import causal_conv1d_fwd
@@ -54,7 +60,7 @@ def causal_conv1d_varlen(
     causal_conv1d_fwd(
         x, weight, None, conv_states,
         cu_seqlens.to(torch.int32), cache_indices.to(torch.int32),
-        has_initial_state, True, _PAD_SLOT_ID,
+        has_initial_state, activation is not None, _PAD_SLOT_ID,
     )
     return x
 
@@ -76,26 +82,33 @@ def causal_conv1d_verify(
 
 def causal_conv1d_decode(
     x: torch.Tensor,                # [batch, conv_dim] (one token per request)
-    conv_state: torch.Tensor,       # [num_slots, conv_dim, state_len>=kernel-1] (in place)
+    conv_state: torch.Tensor,       # [num_slots, conv_dim, kernel-1] (in place)
     weight: torch.Tensor,           # [conv_dim, kernel]
     conv_state_indices: torch.Tensor,  # [batch] int32 slot id per request
+    activation: str | None = "silu",
 ) -> torch.Tensor:
-    """Single-token (decode) causal conv update with silu; shifts+appends the new
-    token into ``conv_state[conv_state_indices]`` in place and returns silu(conv)."""
+    """Single-token (decode) causal conv update; shifts+appends the new
+    token into ``conv_state[conv_state_indices]`` in place and returns activation(conv)."""
     from freetoken.kernel.backend import is_sgl_kernel_installed
+
+    assert activation in (None, "silu", "swish")
+    if weight.shape[-1] == 7:
+        from freetoken.kernel.triton.short_conv_triton import causal_conv1d_decode as short_conv
+
+        return short_conv(x, conv_state, weight, conv_state_indices, activation=activation)
 
     if not is_sgl_kernel_installed():
         from freetoken.kernel.triton.causal_conv1d_triton import (
             causal_conv1d_decode as triton_causal_conv1d_decode,
         )
 
-        return triton_causal_conv1d_decode(x, conv_state, weight, conv_state_indices)
+        return triton_causal_conv1d_decode(x, conv_state, weight, conv_state_indices, activation=activation)
 
     from sgl_kernel import causal_conv1d_update
 
     x = x.unsqueeze(-1)
     causal_conv1d_update(
-        x, conv_state, weight, None, True, None,
+        x, conv_state, weight, None, activation is not None, None,
         conv_state_indices.to(torch.int32), _PAD_SLOT_ID,
     )
     return x.squeeze(-1)
