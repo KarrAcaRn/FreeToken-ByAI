@@ -396,6 +396,13 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         arch_aliases=("MuseGlimmerGGUFForCausalLM",),
     ),
     AotModel(
+        name="LiquidAI/LFM3-1.7B",
+        architecture="Lfm3ForCausalLM",
+        hidden_size=2048,
+        kv_groups=((4, 128),),
+        aliases=("LiquidAI/LFM3-1.7B-Base",),
+    ),
+    AotModel(
         name="meta-llama/Llama-3.1-8B-Instruct",
         architecture="LlamaForCausalLM",
         hidden_size=4096,

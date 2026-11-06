@@ -2,11 +2,11 @@ from dataclasses import replace
 from functools import cache
 
 import torch
-from freetoken.layers.rotary import RotaryEmbedding
 
 from freetoken.attention.base import AttentionSpec
 from freetoken.core import get_global_ctx
 from freetoken.layers import LinearColParallelMerged
+from freetoken.layers.rotary import RotaryEmbedding
 from freetoken.models.qwen3.attention import Qwen3Attention
 
 from .model import Lfm3RMSNorm
