@@ -258,6 +258,8 @@ def parse_args(
             " ".join(str(v) for v in text_cfg.get("architectures", []) or []),
         ]
         marker = " ".join(candidates).lower()
+        if "lfm3" in marker:
+            return "qwen3_coder"
         if "flint" in marker:
             return "glm47"
         if "gpt_oss" in marker or "gpt-oss" in marker or "gptoss" in marker:
@@ -311,6 +313,8 @@ def parse_args(
             " ".join(str(v) for v in text_cfg.get("architectures", []) or []),
         ]
         marker = " ".join(candidates).lower()
+        if "lfm3" in marker:
+            return "qwen3"
         if "flint" in marker:
             return "flint"
         # Qwen3 Instruct checkpoints (Instruct-2507, Qwen3-VL-*-Instruct, Qwen3-Coder-*-Instruct)

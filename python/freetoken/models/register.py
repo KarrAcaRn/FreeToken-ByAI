@@ -99,6 +99,14 @@ _DSV4_PROCESSOR = "freetoken.mm.processors.deepseek_v4:DSV4MMProcessor"
 _DSV4_ENCODERS = (EncoderSpec("vision", "vision_n_layers", ("image",)),)
 
 _MODEL_REGISTRY: dict[str, ModelSpec] = {
+    "Lfm3ForCausalLM": ModelSpec(
+        "freetoken.models.lfm3", "Lfm3ForCausalLM",
+        checkpoint_segments=(("feed_forward.down_proj", "feed_forward.w2"),),
+        packed_modules_mapping=(
+            ("qkv_proj", ("q_proj", "k_proj", "v_proj")),
+            ("gate_up_proj", ("w1", "w3")),
+        ),
+    ),
     "FlintGGUFForCausalLM": ModelSpec(
         "freetoken.models.flint", "FlintForCausalLM",
         parse_config="parse_gguf_config", iter_weights="iter_gguf_weights",
