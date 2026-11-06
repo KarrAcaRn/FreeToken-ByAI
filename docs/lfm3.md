@@ -32,6 +32,11 @@ processes: PID 136120 (`decider_server.main`, 3426 MiB) and PID 205015
 (`run_server.py`, 4854 MiB). Neither was stopped. Release these workloads
 before measuring throughput and requiring an empty compute-process list.
 
+On retry, the compute-process list was empty: the GPU blocker is resolved.
+The snapshot was still absent, `findmnt /mnt/cephfs_Buero` still reported no
+mount, and a fresh `snapshot_download` attempt failed with the same
+`PermissionError`. Checkpoint access remains the prerequisite for execution.
+
 ## Requested checkpoint checks
 
 | Check | Result |
@@ -70,3 +75,4 @@ The local execution log is `~/.cache/ft-scratch/lfm3-part4/regression.log`.
 The pytest temporary directory was removed. After the test process exited,
 `nvidia-smi --query-compute-apps=pid --format=csv,noheader` listed only the
 pre-existing PIDs 136120 and 205015. No GPU process from this task remains.
+The retry started no GPU process and confirmed an empty compute-process list.
