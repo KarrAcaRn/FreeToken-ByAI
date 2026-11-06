@@ -1,5 +1,10 @@
 # LFM3 model integration (part 3)
 
+> Historical handoff from part 3. Open-work and unavailable-checkpoint statements
+> below describe that stage, not current support. Parts 4-5 completed bf16, FP8
+> and NVFP4 serving validation. See [current validation](lfm3.md),
+> [supported models](models.md#lfm3-text) and [completion report](lfm3-report.md).
+
 ## Scope and decisions
 
 The package `python/freetoken/models/lfm3/` implements the text architecture

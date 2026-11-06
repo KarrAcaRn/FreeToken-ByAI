@@ -235,3 +235,63 @@ ist beendet. `~/.cache/ft-pytest/lfm3` ist entfernt. Die abschließende Abfrage
 Taskbeginn vorhanden. Es läuft **kein eigener GPU-Prozess** mehr. Die
 wörtliche Forderung einer global leeren Liste ist damit nicht erfüllt;
 fremde Desktop-Sitzungen wurden nicht beendet.
+
+## Code-Review Runde 1
+
+Die Branch-Anmerkung ist durch die ausdrückliche Arbeitsanweisung dieser
+Sitzung geklärt: Worktree `FreeToken-ByAI-1a1a59f3`, Basis `next-speed`,
+Branch `task/1a1a59f3-task-lfm3-unterst-tzung-in-freetoken-plan-pr-fen`;
+kein Branchwechsel, kein eigener Merge/Push. Das ist kein Upstream-Branch
+auf `main`. Ein späterer Upstream-Port wäre separate Arbeit.
+
+Übernommen wurden folgende Absicherungen und Korrekturen:
+
+- Conv-Gewichte gehen unmittelbar in ihren eigenen Sharding-Zweig, ohne
+  zuvor unnötig `shard_tensor` aufzurufen.
+- CPU-Ladetests initialisieren TP=2 über die öffentliche API in separaten
+  Prozessen. Beide Ranks rekonstruieren Conv-B/C/x, Conv-Kanäle, Out-Projektion,
+  Q/K/V und Per-Head-Gates exakt. Quantisierte MLPs werden auf beiden Ranks
+  gegen unabhängige Dequantisierung geprüft, einschließlich der Globals von
+  `down_proj` und einem synthetischen NVFP4-`o_proj`. Der echte NVFP4-Snapshot
+  lässt Attention weiterhin in bf16. Das ersetzt keinen Multi-GPU-Servingtest.
+- Der Graph-Harness erfasst jetzt Batch 4. Ein echter Request hat damit drei
+  Padding-Zeilen; die Logitparität über mehrere Decode-Schritte bleibt erhalten.
+  Slot 0 ist laut Pool-Vertrag dauerhaft reservierter Sink und wird niemals
+  an echte Requests vergeben. Mehrere Padding-Schreiber gefährden daher keine
+  Live-Historie; ein neuer Kernelpfad wurde dafür nicht eingeführt.
+- Die Track-Metadatenprüfung deckt `cached_len=59..64` ab. Die vermuteten
+  negativen Indizes treten nicht auf: CHUNK-Grenzen werden relativ zum Extend
+  berechnet, nicht absolut zur Sequenz. Die erste Snapshot-Grenze liegt
+  mindestens 64 neue Tokens zurück; das Sechserfenster bleibt in diesem
+  Request. Die bisher missverständliche Docstring erklärt das jetzt explizit.
+- Der Modell-Paritätsfall für ungleiche Request-Längen läuft zusätzlich mit
+  Fenster 256 und 267/259 Prompt-Tokens, inklusive Decode, Padding und
+  Wiederverwendung einer schmutzigen State-Slot. Die Vergleichstoleranzen
+  bleiben unverändert. Die ersten neuen Läufe fanden einen Testaufbaufehler:
+  der wiederzuverwendende Slot konnte bereits als Track-Slot desselben neuen
+  Requests geleast sein. Der Harness tauscht dann dessen eigene Slot-Rollen,
+  statt den freien Pool auf der Suche nach diesem bereits belegten Slot zu leeren.
+- FP8/NVFP4 führen zusätzlich den echten LFM3-MLP auf der GPU gegen eine
+  unabhängige Torch-Rechnung aus geladenen, dequantisierten Gewichten aus.
+  Das prüft den Ein-Zeilen-Decodepfad (W8A16/W4A16), keine vollständige
+  HF-Quantmodellparität und keine neue dynamische FP8-Prefill-Referenz.
+- Die Parser-Auswahl war bereits durch die Live-Registry-Tests erfasst.
+  Eine zusätzliche Assertion im vorhandenen Testfile schützt nun auch das
+  exakte Paar `qwen3_coder`/`qwen3` gegen andere gültige, aber falsche Parser.
+- Die beiden historischen Hand-off-Dokumente verweisen jetzt oben deutlich
+  auf die abgeschlossene bf16/FP8/NVFP4-Validierung und den aktuellen Support.
+
+Variante A bleibt die dokumentierte Speicherentscheidung. Echte SWA-Ersparnis
+ist unverändert Variante B und gehört nicht in diese Review-Korrektur.
+Gezielter Lauf vor der abschließenden Parser-Assertion: **106 bestanden**,
+11 Warnungen, 37.20 Sekunden. Die vollständige Abschlusssuite folgt unten.
+
+Review-Abschlusssuite mit demselben vollständigen Befehl wie Teil 5:
+**3281 bestanden, 317 übersprungen, 10 abgewählt**, 13 Warnungen in
+**183.96 Sekunden**, einschließlich **26 LFM3-Fällen**. Alle neuen
+Fenster-/Sharding-/Forward-Fälle und die genaue Parser-Assertion sind darin
+enthalten. Keine Toleranz wurde gelockert. `git diff --check` erfolgreich.
+Logs: `~/.cache/ft-scratch/lfm3-review1/`. Das pytest-Verzeichnis wurde nach
+Abschluss entfernt; keine Server wurden für diese Review-Runde gestartet.
+Die GPU-Prozessliste enthält weiterhin nur die bereits vorher vorhandenen
+Desktop-PIDs 235776 und 236743, keine eigenen Testprozesse.

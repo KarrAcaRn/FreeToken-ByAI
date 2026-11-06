@@ -73,13 +73,6 @@ def iter_weights(
                     # Row-parallel globals scale output rows, not the sharded input axis.
                     if role == "weight_global" and any(p in shard_name for p in (".down_proj.", ".o_proj.")):
                         shard_name = "weight_global"
-                    tensor = shard_tensor(
-                        shard_name,
-                        raw,
-                        rank=tp_info.rank,
-                        world_size=tp_info.size,
-                        num_kv_heads=config.num_kv_heads,
-                    )
                     if ".conv.in_proj." in name:
                         tensor = torch.cat([part.chunk(tp_info.size, dim=0)[tp_info.rank]
                                             for part in raw.chunk(3, dim=0)], dim=0).contiguous()
@@ -87,6 +80,14 @@ def iter_weights(
                         tensor = raw.chunk(tp_info.size, dim=1)[tp_info.rank].contiguous()
                     elif ".conv.conv." in name:
                         tensor = raw.chunk(tp_info.size, dim=0)[tp_info.rank].contiguous()
+                    else:
+                        tensor = shard_tensor(
+                            shard_name,
+                            raw,
+                            rank=tp_info.rank,
+                            world_size=tp_info.size,
+                            num_kv_heads=config.num_kv_heads,
+                        )
                     del raw
                     yield name, tensor
 

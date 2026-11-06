@@ -1,5 +1,10 @@
 # LFM3 infrastructure (part 2)
 
+> Historical handoff from part 2. Open-work and unavailable-checkpoint statements
+> below describe that stage, not current support. Parts 4-5 completed bf16, FP8
+> and NVFP4 serving validation. See [current validation](lfm3.md),
+> [supported models](models.md#lfm3-text) and [completion report](lfm3-report.md).
+
 This change prepares the engine for LFM3; it does not register or load the model.
 
 ## Decisions and corrections to the original plan

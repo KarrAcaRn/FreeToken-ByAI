@@ -227,7 +227,8 @@ def test_short_conv_snapshot_roundtrip_and_budget(tp_size):
     assert pool.num_free_slots == 10
 
 
-def test_short_conv_track_metadata_with_fresh_and_restored_requests():
+@pytest.mark.parametrize('cached', [59, 60, 61, 62, 63, 64])
+def test_short_conv_track_metadata_with_fresh_and_restored_requests(cached):
     from freetoken.attention.linear import build_fla_metadata
     from freetoken.core import Batch, Req, SamplingParams
     from freetoken.kernel.fla.chunk import CHUNK_SIZE
@@ -236,7 +237,7 @@ def test_short_conv_track_metadata_with_fresh_and_restored_requests():
                            9, torch.float32, torch.device("cpu"), tp_size=1)
     reqs = []
     for i, (cached, extend, slot, track) in enumerate(((0, 2, 7, (1, 2)),
-                                                    (CHUNK_SIZE, CHUNK_SIZE + 3, 6, (3, 4)))):
+                                                    (cached, CHUNK_SIZE + 3, 6, (3, 4)))):
         reqs.append(Req(input_ids=torch.arange(cached + extend), table_idx=i,
                         cached_len=cached, output_len=1, uid=i, sampling_params=SamplingParams(),
                         cache_handle=None, linear_slot_idx=slot, mamba_ping_pong=track))
@@ -250,4 +251,4 @@ def test_short_conv_track_metadata_with_fresh_and_restored_requests():
     assert meta.track_dst.tolist() == [3]
     assert meta.track_boundary_row.tolist() == [2 + CHUNK_SIZE]
     assert meta.track_conv_src.tolist() == [list(range(2 + CHUNK_SIZE - 6, 2 + CHUNK_SIZE))]
-    assert reqs[1].mamba_last_track_seqlen == 2 * CHUNK_SIZE
+    assert reqs[1].mamba_last_track_seqlen == cached + CHUNK_SIZE

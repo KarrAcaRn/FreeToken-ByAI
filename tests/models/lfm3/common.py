@@ -11,13 +11,13 @@ from freetoken.core import Batch, Context, Req, SamplingParams, set_global_ctx
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
-def checkpoint(folder, sandwich=True):
+def checkpoint(folder, sandwich=True, sliding_window=8):
     c = dict(
         architectures=['Lfm3ForCausalLM'], model_type='lfm3', num_hidden_layers=6,
         layer_types=['conv', 'full_attention', 'conv', 'sliding_attention', 'full_attention', 'conv'],
         hidden_size=128, intermediate_size=256, head_dim=64, num_attention_heads=4,
         num_key_value_heads=2, vocab_size=256, norm_eps=1e-5, conv_L_cache=7,
-        conv_bias=False, use_sandwich_norm=sandwich, sliding_window=8,
+        conv_bias=False, use_sandwich_norm=sandwich, sliding_window=sliding_window,
         tie_word_embeddings=True, max_position_embeddings=512,
         rope_parameters={'full_attention': dict(rope_type='default', rope_theta=1e6, partial_rotary_factor=0.5),
                          'sliding_attention': dict(rope_type='default', rope_theta=1e4)},
@@ -94,7 +94,7 @@ class TinyEngine:
         self.dummy = Req(torch.tensor([0], dtype=torch.int32), 3, 0, 1, -1, SamplingParams(), None)
         self.dummy.linear_slot_idx = 0
         self.graph = GraphRunner(torch.cuda.current_stream(), self.device, self.model.forward,
-                                 self.backend, [2] if graphs else [], None, 0, 512,
+                                 self.backend, [4] if graphs else [], None, 0, 512,
                                  self.dummy, linear_backend=self.linear)
 
     def request(self, tokens, row=0, cached=True):
@@ -129,3 +129,18 @@ class TinyEngine:
         self.graph.destroy_cuda_graphs()
         self.previous_stream.wait_stream(self.stream)
         torch.cuda.set_stream(self.previous_stream)
+
+
+def load_tp_weights(folder, rank, size):
+    """Initialize the process-global TP configuration through its public API."""
+    import subprocess
+    import sys
+    output = folder / f'loaded-{rank}-{size}.pt'
+    subprocess.run([sys.executable, '-c', """import sys, torch
+from freetoken.distributed import set_tp_info
+from freetoken.models.lfm3.weight import iter_weights
+set_tp_info(int(sys.argv[2]), int(sys.argv[3]))
+weights = dict(iter_weights(sys.argv[1], torch.device("cpu"), include_moe_experts=False, include_non_moe=True))
+torch.save(weights, sys.argv[4])
+""", str(folder), str(rank), str(size), str(output)], check=True)
+    return torch.load(output, weights_only=True)

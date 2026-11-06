@@ -120,10 +120,12 @@ def build_fla_metadata(
 
 
 def _build_track_metadata(reqs, cu_host, device, pin, km1: int):
-    """Hybrid-radix (extra_buffer): for each request that crosses a ×CHUNK boundary this
-    prefill forward, snapshot its GDN state at the deepest mid-chunk boundary into its current
-    ping-pong slot. Returns the ``FLAMetadata`` track kwargs, all None when no request
-    tracks (non-hybrid, or all extends < CHUNK+1)."""
+    """Snapshot at the deepest CHUNK boundary relative to each request's extend start.
+
+    Even with unaligned cached_len, the boundary is at least CHUNK tokens into
+    this forward, so the conv history never reads a previous request's rows.
+    Returns all None when no request tracks (non-hybrid or extends < CHUNK+1).
+    """
     empty = dict(track_dst=None, track_h_row=None, track_conv_src=None, track_boundary_row=None)
     if not any(r.mamba_ping_pong is not None for r in reqs):
         return empty

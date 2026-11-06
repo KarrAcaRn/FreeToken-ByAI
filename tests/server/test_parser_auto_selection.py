@@ -178,3 +178,7 @@ def test_every_qwen3_instruct_checkpoint_skips_the_reasoning_parser():
 def test_flint_uses_optional_reasoning_and_xml_tool_calls():
     assert _inferred("FlintForCausalLM") == ("glm47", "flint")
     assert _inferred("FlintGGUFForCausalLM") == ("glm47", "flint")
+
+
+def test_lfm3_uses_the_liquid_template_formats():
+    assert _inferred("Lfm3ForCausalLM") == ("qwen3_coder", "qwen3")
