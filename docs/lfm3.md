@@ -1,10 +1,10 @@
-# LFM3 bf16 GPU validation (part 4)
+# LFM3 validation record
 
 Validated on 2026-11-06 on RTX 4090 (24 GB, sm_89), NVIDIA 595.99.02,
 PyTorch 2.14.1+cu130 and Transformers 5.18.0, with parts 1-3 through
 `7063d0be`. The previously missing CephFS checkpoint is now accessible.
-No model/kernel changes were needed. FP8/NVFP4 checkpoints and optional GGUF
-remain part 5; online FP8 below is a separate runtime conversion.
+No model/kernel changes were needed in part 4. Part 5 checkpoint quantization
+results are consolidated below; online FP8 below is a separate runtime conversion.
 
 ## Required correction to the serving recipe
 
@@ -192,3 +192,143 @@ processes exited, and `~/.cache/ft-pytest/lfm3` was deleted. The final
 **235776 and 236743**, the pre-existing GNOME remote desktop and Ptyxis
 processes. No task-owned GPU process remains; the literal empty-list
 condition is not met because these desktop processes were left untouched.
+
+## FP8 and NVFP4 validation (part 5)
+
+2026-11-06, same RTX 4090 and environment as above, based on `a2166909`.
+The command above was used with these `--model-path` values, one server at a
+time, keeping `--online-quant none` and all other flags identical:
+
+- FP8: `~/.cache/huggingface/hub/models--LiquidAI--LFM3-1.7B-FP8/snapshots/243955da95b1cd68026f293b29de4b4c13f3638f`
+- NVFP4: `~/.cache/huggingface/hub/models--LiquidAI--LFM3-1.7B-NVFP4/snapshots/5f8f594ffc22400b02a11e00e2d9393a9371c161`
+
+### Loader correction and execution semantics
+
+The existing registry correctly maps `gate_up_proj` to `w1|w3`, `down_proj`
+to `w2`, and `qkv_proj` to `q_proj|k_proj|v_proj`. However, `QuantConfig`
+declares storage roles; it does not translate the tensors yielded by the
+family loader. The first FP8 serve failed with
+`KeyError: model.layers.0.feed_forward.gate_up_proj.weight_scale_inv`.
+The LFM3 loader now translates dialect storage names before sharding/fusion:
+
+- compressed-tensors `weight_scale` becomes `weight_scale_inv`, with its
+  bf16 values unchanged (these are multiplicative dequantization scales).
+- ModelOpt `weight_scale_2` becomes fp32 `weight_global`, expanded per output
+  row before fusion, preserving different globals for w1 and w3. Row-parallel
+  projections retain all output-row globals. Weight shapes are read from all
+  shard headers, so a global need not share a file with its weight.
+- `input_scale` remains a fp32 scalar; fused parts use their maximum, matching
+  the existing dense readers. The sm_89 execution path does not consume it.
+
+A scan of every two-dimensional non-embedding weight against its dialect and
+mapped scheme found **116 FP8 / 37 bf16** projections in FP8 and **72 NVFP4 /
+81 bf16** projections in NVFP4. Thus conv and gates remain bf16 in both, and
+all attention remains bf16 in NVFP4. Norms and tied embeddings stay bf16.
+
+The FP8 backend is `TritonFp8BlockLinearKernel`: 128x128 weight scales,
+dynamic per-token group-128 FP8 activations above one row, W8A16 GEMV at one
+row. The NVFP4 log selects `TritonNvfp4LinearKernel`, rejecting b12x (requires
+sm_120/sm_121) and cuBLAS (NVFP4 tensor cores require sm_100+). It transposes
+packed weights/scales to the K-major resident layout and dequantizes in its
+Triton kernel with bf16 activations: **W4A16**, not W4A4 activation emulation.
+The separately available `emulation` backend is not selected. Native W4A4
+hardware and tensor-parallel serving were not tested here.
+
+### Token comparison and quality
+
+Reuse part 4's saved exact input token IDs and cold bf16 API responses from
+`lfm3-part4/inputs.json` and `ft_api.json`. Flush before every completion;
+`temperature=0`, `max_tokens=50`, `ignore_eos=true`, `logprobs=2`.
+Compare the ordered per-token strings returned by the API, not retokenized
+completion text. Counts below are equal prefixes, not total matching tokens;
+divergence positions are one-based. No new HF quantized-reference run is claimed.
+
+| Prompt | FP8 prefix / first divergence | NVFP4 prefix / first divergence |
+| --- | --- | --- |
+| Sky, 21 input tokens | 15 / 16 | 11 / 12 |
+| Python unique items, 31 input tokens | 28 / 29 | 0 / 1 |
+| Tomatoes, 27 input tokens | 50 / none within 50 | 29 / 30 |
+| Secret codes, 8347 input tokens (additional case) | 12 / 13 | 8 / 9 |
+
+Both sky explanations discuss scattering; both coding continuations describe
+order-preserving deduplication; both tomato answers start a container-growing
+guide. NVFP4's first coding token is `**` rather than bf16's `To`, so a zero
+matching prefix here is a change of answer format, not incoherent output.
+A longer NVFP4 request produced a complete `unique_items` function; executing
+its first code block on `[3, 1, 3, 2, 1]` gave `[3, 1, 2]`. The subsequent
+example-test block was truncated at the 700-token limit.
+Both long-input continuations identify ORCHID-731 and COBALT-492 but retain
+reasoning-like prose despite disabled thinking, as already seen in bf16.
+
+Chat with thinking disabled and enabled returned 391 for `17 * 23` for both
+checkpoints; enabled thinking produced separate `reasoning_content`.
+**Quality caveat:** NVFP4's thinking-disabled answer included a malformed
+written multiplication row (`153` for the shifted `17 * 20`) before correctly
+stating `340 + 51 = 391`. This is not a claim of error-free arithmetic or
+quantized/bf16 equivalence. These samples are plausibility checks, not a
+quality benchmark, and early quantization divergences were not dismissed as
+bf16 near-ties.
+
+### Measurements
+
+API `timings` fields, cold prefix cache; these first requests include warmup
+and scheduling effects. Decode uses 49 intervals for 50 generated tokens.
+
+| Measurement | FP8 | NVFP4 |
+| --- | ---: | ---: |
+| Weight-load timer | 1.19 s | 1.92 s |
+| CLI args to API ready | about 11 s | about 15 s |
+| Allocated KV tokens | 828635 | 851863 |
+| K+V memory | 17.39 GiB | 17.87 GiB |
+| 8347-token prefill | 242.406 ms | 255.197 ms |
+| Long prefill tok/s | 34433.93 | 32708.10 |
+| Long decode tok/s | 163.07 | 193.62 |
+| Coding prefill tok/s | 891.30 | 1092.04 |
+| Coding decode tok/s | 167.46 | 201.59 |
+
+### Optional GGUF
+
+A range read of the first 64 KiB of `LFM3-1.7B-BF16.gguf` from
+[LiquidAI/LFM3-1.7B-GGUF](https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/tree/cd0c74c575b5c416f3011b5b4c298077f26ca8c2)
+confirmed `general.architecture = lfm3` (revision
+`cd0c74c575b5c416f3011b5b4c298077f26ca8c2`). No full GGUF was downloaded.
+The vendored constants only know LFM2/LFM2MOE; there is no LFM3 GGUF config
+adapter or tensor mapping. Adding a constant alone would not establish the
+mixed layer layout, sandwich norms, attention gates and per-type proportional
+RoPE. That separate adapter and parity validation are deferred; GGUF is
+**unsupported**, not silently routed through LFM2.
+
+### Verification artifacts
+
+Local logs, API responses, exact input reuse script and GGUF inspection are
+in `~/.cache/ft-scratch/lfm3-part5/`. The original failed FP8 startup is
+`fp8-server.log`; successful startup is `fp8-fixed-server.log`.
+The two new cases in the existing `tests/models/lfm3/test_parity.py` compare
+loaded fused FP8/NVFP4 weights against independent dequantization, including
+distinct w1/w3 globals and weights/scales in separate shards. Replacing globals
+with 1 intentionally failed the numerical assertion (maximum relative error
+3); the mutation was restored. This guards silent scaling corruption, not
+only whether startup raises an error. The original 15 GPU parity cases also
+passed; the expanded standalone run was **17 passed**, 11 warnings, 9.19 s.
+
+Final part 5 regression command:
+
+```bash
+export PATH=/home/basti/claude/FreeToken-ByAI/.venv/bin:/usr/local/cuda/bin:$PATH
+export CUDA_HOME=/usr/local/cuda
+export PYTHONPATH="$PWD/python"
+python -m pytest tests/models tests/engine tests/scheduler tests/kvcache \
+  tests/attention tests/layers tests/server tests/tokenizer tests/kernels \
+  -m 'not slow' -q --basetemp ~/.cache/ft-pytest/lfm3
+```
+
+Result: **3266 passed, 317 skipped, 10 deselected**, 13 warnings in
+**463.14 s**, including all 17 LFM3 cases. The run included first-time GGML
+CUDA JIT compilation; no C++ source was changed. `git diff --check` passed.
+The loader/test fix is commit `44fc2665`.
+
+All task-owned servers and test processes exited, and
+`~/.cache/ft-pytest/lfm3` was removed. The final compute-process query still
+lists the same pre-existing **235776** (GNOME remote desktop) and **236743**
+(Ptyxis). Thus **no task-owned GPU process remains**, but the literal globally
+empty-list condition is not met; unrelated desktop processes were not killed.

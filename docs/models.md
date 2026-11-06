@@ -5,6 +5,7 @@ for them; other checkpoints of the same architectures work too.
 
 | Model | HF checkpoints |
 |---|---|
+| [LFM3 text](lfm3.md) | [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B), [FP8](https://huggingface.co/LiquidAI/LFM3-1.7B-FP8), [NVFP4](https://huggingface.co/LiquidAI/LFM3-1.7B-NVFP4); [Base](https://huggingface.co/LiquidAI/LFM3-1.7B-Base) shares the architecture but was not run |
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) |
 | DeepSeek-V4 | [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731), [deepseek-ai/DeepSeek-V4-Flash-Vision-Exp](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) |
 | GLM-5.3-Flash | [RedHatAI/GLM-5.3-Flash-NVFP4](https://huggingface.co/RedHatAI/GLM-5.3-Flash-NVFP4) |
@@ -21,6 +22,40 @@ for them; other checkpoints of the same architectures work too.
 | MiniMax-M3 | [nvidia/MiniMax-M3-NVFP4](https://huggingface.co/nvidia/MiniMax-M3-NVFP4) |
 | Muse-Glimmer | [meta-models/Muse-Glimmer-30B](https://huggingface.co/meta-models/Muse-Glimmer-30B), [RedHatAI/Muse-Glimmer-30B-NVFP4](https://huggingface.co/RedHatAI/Muse-Glimmer-30B-NVFP4) |
 | [Flint](flint.md) | [FutureMLS-Lab/flint-nvfp4-coldgptq](https://huggingface.co/FutureMLS-Lab/flint-nvfp4-coldgptq), [RecursiveSI/flint-nvfp4-gguf](https://huggingface.co/RecursiveSI/flint-nvfp4-gguf) |
+
+### LFM3 text
+
+```bash
+ft serve --model-path LiquidAI/LFM3-1.7B --port 19500 --online-quant none \
+  --max-running-requests 4 --max-seq-len-override 16384 \
+  --max-extend-length 2048 --cuda-graph-max-bs 4 \
+  --enable-cache-report --enable-metrics-report
+```
+
+Substitute `LiquidAI/LFM3-1.7B-FP8` or `LiquidAI/LFM3-1.7B-NVFP4` for the
+quantized checkpoints. `--online-quant none` preserves checkpoint precision
+(the fork otherwise defaults to online FP8). Local snapshot paths work too.
+Auto selects Triton attention, hybrid radix, `qwen3` reasoning and
+`qwen3_coder` tool parsing. Sliding layers use full KV storage with a window
+mask: **no SWA memory saving**. Only the Triton attention backend is supported;
+speculative decoding is rejected. VL, Omni, Audio and GGUF are not supported.
+
+RTX 4090, 24 GB, bf16 KV, batch 1, 8347-token cold prompt; single observations,
+not controlled performance comparisons. Load is the safetensors progress timer.
+Part 4's bf16 decode used 219 generated tokens, part 5's quantized runs used 50.
+
+| Checkpoint | Load | Allocated KV tokens | Prefill tok/s | Decode tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| bf16 | 1.73 s | 769988 | 35190.20 | 192.90 |
+| FP8 | 1.19 s | 828635 | 34433.93 | 163.07 |
+| NVFP4 | 1.92 s | 851863 | 32708.10 | 193.62 |
+
+FP8 uses block-128 weights, dynamic group-128 activation quantization for GEMM
+and W8A16 GEMV at one row. NVFP4 on sm_89 uses Triton **W4A16**, not emulated
+W4A4; the checkpoint's activation scale is loaded but unused by that kernel.
+These observations do not establish quantization speedups. See the
+[validation record](lfm3.md) for exact revisions, commands, token comparisons,
+quality caveats and tests, and the [German completion report](lfm3-report.md).
 
 ### Image input
 
