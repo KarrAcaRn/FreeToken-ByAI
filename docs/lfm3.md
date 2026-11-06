@@ -1,78 +1,194 @@
-# LFM3 bf16 validation (part 4)
+# LFM3 bf16 GPU validation (part 4)
 
-## Status: blocked before checkpoint execution
+Validated on 2026-11-06 on RTX 4090 (24 GB, sm_89), NVIDIA 595.99.02,
+PyTorch 2.14.1+cu130 and Transformers 5.18.0, with parts 1-3 through
+`7063d0be`. The previously missing CephFS checkpoint is now accessible.
+No model/kernel changes were needed. FP8/NVFP4 checkpoints and optional GGUF
+remain part 5; online FP8 below is a separate runtime conversion.
 
-On 2026-11-06, the assigned task branch contained parts 1-3 through
-`7063d0be`. The real checkpoint validation is **not complete**. The synthetic
-parity results in [part 3](lfm3-model.md) do not establish real-checkpoint
-generation parity or serving throughput.
+## Required correction to the serving recipe
 
-The requested snapshot was absent:
-
-```text
-~/.cache/huggingface/hub/models--LiquidAI--LFM3-1.7B/snapshots/ac2586a34f1a1c03329dbdcdefabd8b6478ddaa7
-```
-
-Hugging Face's API resolved that exact revision and listed its model weights,
-tokenizer, template and remote-code files. Downloading it with the installed
-`huggingface_hub.snapshot_download` failed with:
-
-```text
-PermissionError: [Errno 13] Permission denied: '/mnt/cephfs_Buero/ki_modelle/huggingface'
-```
-
-The HF hub cache is a symlink to
-`/mnt/cephfs_Buero/ki_modelle/huggingface/hub`; `findmnt /mnt/cephfs_Buero`
-reported no mount. Restore the intended cache mount/access, provide the
-snapshot, or authorize an alternative download location before continuing.
-The shared cache symlink was not changed.
-
-The RTX 4090 (24 GB, driver 595.99.02) also had two pre-existing compute
-processes: PID 136120 (`decider_server.main`, 3426 MiB) and PID 205015
-(`run_server.py`, 4854 MiB). Neither was stopped. Release these workloads
-before measuring throughput and requiring an empty compute-process list.
-
-On retry, the compute-process list was empty: the GPU blocker is resolved.
-The snapshot was still absent, `findmnt /mnt/cephfs_Buero` still reported no
-mount, and a fresh `snapshot_download` attempt failed with the same
-`PermissionError`. Checkpoint access remains the prerequisite for execution.
-
-## Requested checkpoint checks
-
-| Check | Result |
-| --- | --- |
-| Three identical tokenized prompts, 50 greedy tokens vs HF bf16 | Not run: weights unavailable |
-| First divergence and same-prefix top-2 logits | Not measured |
-| Chat, thinking on/off, streaming reasoning, coding | Not run |
-| Structured tool call and tool-result round | Not run |
-| At least 8k tokens, beginning/middle retrieval and HF parity | Not run |
-| Multi-turn radix hit vs cold output | Not run |
-| Parallel mixed lengths vs individual greedy outputs | Not run |
-| Optional real-server cache rebuild | Not run |
-| Load time, KV capacity, prefill/decode throughput, CUDA graphs | No real-checkpoint measurements |
-
-No serving or HF model process was started. No real-checkpoint divergence
-was observed or ruled out, and no model fix is justified by this attempt.
-FP8/NVFP4 and optional GGUF remain part 5.
-
-## Regression verification
-
-Environment: existing `/home/basti/claude/FreeToken-ByAI/.venv`, PyTorch
-`2.14.1+cu130`, Transformers `5.18.0`, this checkout's Python sources and
-native extensions. Command:
+**Pass `--online-quant none` for bf16 validation.** This fork defaults to
+online FP8 even when the checkpoint is bf16. The initial server log showed
+`quant_backend='linear.none=fp8'`; its larger differences were not a bf16
+parity result. With the explicit flag, the log shows `quant_backend=None`.
+The existing CLI behavior was not changed for other models.
 
 ```bash
 export PATH=/home/basti/claude/FreeToken-ByAI/.venv/bin:/usr/local/cuda/bin:$PATH
 export CUDA_HOME=/usr/local/cuda
 export PYTHONPATH="$PWD/python"
-python -m pytest tests/models tests/engine tests/scheduler tests/kvcache tests/attention tests/layers \
-  -m 'not slow' -q --basetemp ~/.cache/ft-pytest/lfm3
+LFM3_SNAPSHOT="$HOME/.cache/huggingface/hub/models--LiquidAI--LFM3-1.7B/snapshots/ac2586a34f1a1c03329dbdcdefabd8b6478ddaa7"
+ft serve --model-path "$LFM3_SNAPSHOT" --port 19500 --online-quant none \
+  --max-running-requests 4 --max-seq-len-override 16384 \
+  --max-extend-length 2048 --cuda-graph-max-bs 4 \
+  --enable-cache-report --enable-metrics-report
 ```
 
-Result: **1381 passed, 228 skipped, 5 deselected**, 21 warnings in 112.60 s.
-This includes `tests/models/lfm3`; it uses synthetic weights, not the missing checkpoint.
-The local execution log is `~/.cache/ft-scratch/lfm3-part4/regression.log`.
-The pytest temporary directory was removed. After the test process exited,
-`nvidia-smi --query-compute-apps=pid --format=csv,noheader` listed only the
-pre-existing PIDs 136120 and 205015. No GPU process from this task remains.
-The retry started no GPU process and confirmed an empty compute-process list.
+Auto selects `triton`, `hybrid_radix`, page size 1, `qwen3` reasoning and
+`qwen3_coder` tools. Graphs capture batch sizes 1, 2 and 4. Wait for
+`/v1/cache/status` to report `state=serving`; `/health` alone can succeed
+before generation is available. Stop each server by its recorded PID.
+
+## HF comparison
+
+HF loaded this exact snapshot with `trust_remote_code=True`,
+`dtype=torch.bfloat16`, `attn_implementation='sdpa'`; no separate venv or
+reference-code edits were needed. Both sides used the checkpoint template
+with `add_generation_prompt=True, enable_thinking=False`. `/v1/tokenize`
+confirmed identical input IDs for all four cases. The completions endpoint
+received those IDs with `temperature=0, max_tokens=50, ignore_eos=true`.
+Each final comparison started with a flushed cache.
+
+HF used cached token-by-token decode. A direct FreeToken run using the
+existing model/cache/GraphRunner parity harness, enlarged for the real
+checkpoint, recorded token IDs and raw top-2 logits. Its decoded per-token
+outputs matched the server's logprob token list in all four cases. Both used
+PyTorch's default bf16 reduction setting; disabling reduced-precision GEMM
+reductions was also examined, but was not substituted into the reported run.
+
+Positions below are **one-based generated-token positions**.
+
+| Prompt | Input tokens | First 50 greedy tokens vs HF |
+| --- | ---: | --- |
+| Explain why the sky is blue in three sentences. | 21 | 50/50 identical |
+| Write a Python function that returns the unique items of a list while preserving order. Explain its complexity. | 31 | 50/50 identical |
+| Describe how to grow tomatoes in a balcony container, including watering and sunlight. | 27 | First divergence at 30; bf16 tie |
+| Beginning/middle secret-code retrieval | 8347 | 50/50 identical, across five prefill chunks |
+
+At position 30 of the tomato prompt, with the **same 29-token generated
+prefix**, the raw logits were:
+
+| Candidate | Token ID | HF bf16 | FreeToken bf16 |
+| --- | ---: | ---: | ---: |
+| ` &` | 900 | 23.375 | 23.375 |
+| newline | 207 | 23.250 | 23.375 |
+
+HF selects ` &`; FreeToken's argmax selects the lower ID at the exact tie.
+The FT gap is 0, the HF gap is 0.125 (one bf16 ULP at this magnitude). This
+is the near-tie exception, not a claim of 50-token equality for this prompt.
+No larger-margin first divergence remains in the cold bf16 comparison.
+
+For contrast, the discarded online-FP8 run diverged at positions 48, 27
+and 11 for sky, code and long input, with FT top-2 gaps 0.625, 0.125 and
+0.125 respectively (HF gaps 0, 0.125 and 0.25). Explicitly retaining bf16
+weights removes these three divergences. The separate bf16 reduction-mode
+diagnostic also changed HF's own greedy output, confirming that reduction
+settings must be kept fixed when comparing these close logits.
+
+The long input starts with `At the beginning of this archive the first
+secret code is ORCHID-731. Remember it.`, then repeats `The archive records
+ordinary deliveries of paper, pencils, and envelopes. No special codes
+appear in these records.` plus a newline 180 times. The middle sentence is
+`At the middle of this archive the second secret code is COBALT-492.
+Remember it.`, followed by the same 180 repetitions, then `What are the
+first and second secret codes? Reply with both codes only.` The server log
+shows chunks of 2048, 2048, 2048, 2048 and 155 tokens. Both codes were
+recovered. With thinking enabled, the final content was just the two codes,
+with reasoning separately parsed. With thinking disabled this checkpoint
+can still generate reasoning-like prose and a stray `</think>` on this
+repetitive input; disabling thinking is a template instruction, not a
+constraint on generated tokens. The raw HF continuation likewise begins
+with reasoning-like prose. This is an output-quality limitation.
+
+## API, cache and concurrency
+
+- `17 * 23` returned 391 with thinking off and on. Thinking-on responses
+  had separate `reasoning_content`. Both streaming responses reconstructed
+  exactly the corresponding buffered content/reasoning fields.
+- The coding request produced a set-based `unique_in_order` function.
+  Executing it on `[3, 1, 3, 2, 1]` returned `[3, 1, 2]`.
+- `get_weather` parsed as a structured tool call with JSON arguments
+  `{"city":"Berlin","unit":"celsius"}` and `finish_reason=tool_calls`.
+  After a tool result reporting 18 C and sunny, the assistant reported
+  those values. That continuation also reported 131 cached prompt tokens.
+- A multi-turn balcony-project chat reported **128 cached tokens** on the
+  253-token follow-up. Its 57-token answer named careful watering and full
+  sunlight. The message was exactly equal after flushing the cache, where
+  the reported hit was zero, and again after a full server restart
+  (`cached_prompt_tokens=0`, 253 input tokens).
+- Four simultaneous requests used mixed lengths 21, 31, 27 and 8347,
+  each generating 100 tokens. Logs prove four active requests. Sky and
+  long outputs matched individual runs exactly. Code and tomatoes differed
+  only after a first equal-prefix bf16 tie, detailed below. This does **not**
+  establish unconditional batch-invariant text for arbitrary prompts.
+- A second mixed-length batch (22, 246, 28, 9044 tokens) returned exactly
+  the individual answers for all four requests: `2+2 = 4`, `PINEAPPLE`,
+  `Katze`, and `ORCHID, COBALT`. The long request retrieved labels from
+  beginning and middle with 750 background repetitions on each side.
+
+The first concurrent-run divergences have the following top-2 logprobs
+(logprob differences equal logit differences):
+
+| Prompt / position | Candidates | Individual | Concurrent |
+| --- | --- | --- | --- |
+| Code / 29 | ` occurrences`, ` occurrence` | -0.824011, -0.949011 | -0.854615, -0.854615 |
+| Tomatoes / 30 | ` &`, newline | -1.019635, -1.019635 | -0.966135, -1.091135 |
+
+Each has an exact tie on one side and a one-ULP gap on the other. The
+unquantized backend uses a fp32-accumulating Triton GEMV for a single bf16
+row and torch GEMM for larger batches; attention also partitions reductions
+by batch size. Bitwise batch invariance is not guaranteed by these paths.
+These measured ties explain why full greedy strings can differ without
+request-state corruption; they are retained here rather than hidden by
+choosing only the four stable-answer prompts.
+
+## Measurements
+
+Single-run observations, not an A/B performance claim; desktop GPU processes
+occupied about 0.5 GiB. All numbers below use **bf16**, CUDA graphs enabled,
+and the command above (the online-FP8 exploratory run is excluded).
+
+| Measurement | Result |
+| --- | ---: |
+| Safetensors weight-load progress timer | 1.73 s |
+| CLI parsed arguments to API ready (log timestamps) | about 9 s, warm kernel cache |
+| Allocated full KV capacity (log) | 769988 tokens, 16.15 GiB K+V |
+| Cold 8347-token prefill | 237.197 ms, 35190.20 tok/s |
+| Decode bs=1, that long prompt | 192.90 tok/s, 219 generated tokens |
+| Decode bs=1, coding prompt | 196.95 tok/s |
+| Four active requests, steady decode scheduler interval | 515.61 aggregate tok/s |
+| Four mixed requests, 400 generated tokens including prefill/HTTP time | 1.0473 s, about 382 aggregate tok/s |
+
+Do not compare the last two rows as the same metric. The first parallel
+scheduler interval includes the long prefill and measured 275.32 tok/s;
+the later 515.61 tok/s interval had four requests decoding. No throughput
+claim is made for maximum context or sustained production load.
+
+## Verification and handoff
+
+```bash
+python -m pytest tests/models tests/engine tests/scheduler tests/kvcache tests/attention tests/layers \
+  -m 'not slow' -q --basetemp ~/.cache/ft-pytest/lfm3
+FREETOKEN_REBUILD_TEST_MODEL="$LFM3_SNAPSHOT" \
+FREETOKEN_REBUILD_EXTRA_ARGS='--online-quant none --max-running-requests 4 --max-seq-len-override 16384 --max-extend-length 2048 --cuda-graph-max-bs 4' \
+  python -m pytest tests/e2e/test_cache_rebuild.py -q --basetemp ~/.cache/ft-pytest/lfm3
+```
+
+The optional real-server rebuild test passed: **1 passed in 19.20 s**,
+including KV resizing, conv-state pool resizing, graph recapture, flush,
+and refusal of an impossible allocation without losing serving capability.
+Final regression: **1419 passed, 214 skipped, 5 deselected**, 21 warnings
+in 126.11 s, including all 15 LFM3 parity cases. The earlier blocked attempt
+had 1381 passed / 228 skipped; restoring checkpoint access enabled more
+checkpoint-dependent coverage. `git diff --check` passed. No C++ source
+changed, so no extension rebuild was necessary.
+
+Local scripts, inputs, raw HF/FT logits and API responses are retained in
+`~/.cache/ft-scratch/lfm3-part4/` (`hf_run.py`, `direct_run.py`, `api_run.py`,
+`chat_run.py`, `stable_batch.py`, corresponding JSON/log files).
+`hf_default.json` is the reported HF baseline; `hf.json` is the separate
+fp32-reduction diagnostic. No new regression test was added because no
+production-model arithmetic or state bug was found. Existing model parity
+tests already cover the relevant state transitions.
+
+All work remains on the assigned Tasks-Board branch, not `feat/lfm3` from
+the superseded parent plan. No branch switch, merge, push, or change to the
+protected worktrees was made.
+
+Every server launched for this task was stopped, all HF/diagnostic/pytest
+processes exited, and `~/.cache/ft-pytest/lfm3` was deleted. The final
+`nvidia-smi --query-compute-apps=pid --format=csv,noheader` still lists
+**235776 and 236743**, the pre-existing GNOME remote desktop and Ptyxis
+processes. No task-owned GPU process remains; the literal empty-list
+condition is not met because these desktop processes were left untouched.
