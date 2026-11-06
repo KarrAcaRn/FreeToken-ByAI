@@ -1,4 +1,8 @@
 from dataclasses import replace
+from functools import cache
+
+import torch
+from freetoken.layers.rotary import RotaryEmbedding
 
 from freetoken.attention.base import AttentionSpec
 from freetoken.core import get_global_ctx
@@ -8,11 +12,23 @@ from freetoken.models.qwen3.attention import Qwen3Attention
 from .model import Lfm3RMSNorm
 
 
+@cache
+def _liquid_rope(rope, dtype):
+    # HF casts cos/sin to the activation dtype before its fp32 rotation.
+    table = rope._cos_sin_cache.to(dtype).float()
+    result = RotaryEmbedding(rope.head_size, rope.rotary_dim, table)
+    if dtype == torch.float32:
+        from freetoken.kernel.triton.rope import apply_rope_with_cos_sin_cache_inplace
+        result.apply_rope_with_cos_sin_cache_inplace = apply_rope_with_cos_sin_cache_inplace
+    return result
+
+
 class Lfm3Attention(Qwen3Attention):
     def __init__(self, config, layer_id: int, *, prefix: str):
         sliding = config.layer_types[layer_id] == "sliding_attention"
         rotary = config.sliding_rotary if sliding else config.rotary_config
         super().__init__(replace(config, rotary_config=rotary), layer_id, prefix=prefix)
+        self.rotary = _liquid_rope(self.rotary, torch.get_default_dtype())
         self.q_norm = Lfm3RMSNorm(self.head_dim, config.rms_norm_eps)
         self.k_norm = Lfm3RMSNorm(self.head_dim, config.rms_norm_eps)
         self.gate_proj = LinearColParallelMerged(
@@ -33,7 +49,7 @@ class Lfm3Attention(Qwen3Attention):
             ctx.batch.get_attn_positions(), q.flatten(1), k.flatten(1),
         )
         o = ctx.attn_backend.forward(
-            q.view(-1, self.num_qo_heads, self.head_dim), k, v,
+            q.view(-1, self.num_qo_heads, self.head_dim), k, v.contiguous(),
             self.layer_id, ctx.batch, attn_spec=self._spec,
         )
         gate = self.gate_proj.forward(x).sigmoid().unsqueeze(-1)

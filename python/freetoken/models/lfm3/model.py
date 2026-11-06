@@ -16,6 +16,13 @@ class Lfm3RMSNorm(BaseOP):
         return (xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + self.eps)).to(x.dtype) * self.weight
 
 
+class Lfm3MLP(GatedMLP):
+    def forward(self, x):
+        gate, up = self.gate_up_proj.forward(x).chunk(2, dim=-1)
+        # Match Liquid's bf16 rounding between SiLU and multiplication.
+        return self.down_proj.forward(torch.nn.functional.silu(gate) * up)
+
+
 class Lfm3DecoderLayer(BaseOP):
     def __init__(self, config, layer_id: int, *, prefix: str):
         from .attention import Lfm3Attention
@@ -26,7 +33,7 @@ class Lfm3DecoderLayer(BaseOP):
             self.conv = Lfm3Conv(config, layer_id, prefix=f"{prefix}.conv")
         else:
             self.self_attn = Lfm3Attention(config, layer_id, prefix=f"{prefix}.self_attn")
-        self.feed_forward = GatedMLP(config, quant_config=config.quant, prefix=f"{prefix}.feed_forward")
+        self.feed_forward = Lfm3MLP(config, quant_config=config.quant, prefix=f"{prefix}.feed_forward")
         self.operator_norm = Lfm3RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.ffn_norm = Lfm3RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_operator_norm = Lfm3RMSNorm(config.hidden_size, config.rms_norm_eps) if config.use_sandwich_norm else None
