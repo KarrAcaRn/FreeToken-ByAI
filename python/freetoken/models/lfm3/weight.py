@@ -5,7 +5,8 @@ from typing import Iterator
 import safetensors
 import torch
 from freetoken.distributed import get_tp_info
-from freetoken.models.loader import MergeRule, iter_merged_tensors, iter_weight_files, shard_tensor
+from freetoken.models.loader import MergeRule, iter_merged_tensors, iter_weight_files, read_safetensors_header, shard_tensor
+from freetoken.models.register import checkpoint_quant_config, get_model_spec
 from freetoken.utils import cached_load_hf_config
 from tqdm import tqdm
 
@@ -30,12 +31,18 @@ def iter_weights(
     if not include_non_moe:
         return
 
-    config = parse_config(cached_load_hf_config(model_path))
+    hf_config = cached_load_hf_config(model_path)
+    config = parse_config(hf_config)
+    quant = checkpoint_quant_config(model_path, hf_config, get_model_spec("Lfm3ForCausalLM"))
     tp_info = get_tp_info()
+    input_scales: dict[str, list[torch.Tensor]] = {}
+    files = iter_weight_files(model_path)
+    shapes = {name: entry["shape"] for file in files
+              for name, entry in read_safetensors_header(file).items() if name != "__metadata__"}
 
     def sharded_tensors() -> Iterator[tuple[str, torch.Tensor]]:
         for file in tqdm(
-            iter_weight_files(model_path),
+            files,
             desc="Loading weights",
             disable=not tp_info.is_primary(),
         ):
@@ -43,7 +50,29 @@ def iter_weights(
                 for raw_name in f.keys():
                     name = raw_name.replace(".feed_forward.w2.", ".feed_forward.down_proj.")
                     raw = f.get_tensor(raw_name)
+                    module, _, suffix = raw_name.rpartition(".")
+                    scheme = quant.scheme_for_name(module)
+                    role = suffix
+                    if scheme is not None:
+                        for candidate, stored in quant.storage(scheme).items():
+                            if suffix in stored.names:
+                                role = candidate
+                                name = name.rsplit(".", 1)[0] + "." + role
+                                if stored.reciprocal:
+                                    raw = raw.float().reciprocal()
+                                break
+                    if role == "input_scale":
+                        for source, rule in _MERGE_RULES.items():
+                            name = name.replace(source + ".", rule.fused_suffix + ".")
+                        input_scales.setdefault(name, []).append(raw.float().reshape(()))
+                        continue
+                    if role == "weight_global":
+                        rows = shapes[module + ".weight"][0]
+                        raw = raw.float().reshape(()).expand(rows).contiguous()
                     shard_name = name.replace(".feed_forward.w1.", ".feed_forward.gate_proj.").replace(".feed_forward.w3.", ".feed_forward.up_proj.")
+                    # Row-parallel globals scale output rows, not the sharded input axis.
+                    if role == "weight_global" and any(p in shard_name for p in (".down_proj.", ".o_proj.")):
+                        shard_name = "weight_global"
                     tensor = shard_tensor(
                         shard_name,
                         raw,
@@ -66,5 +95,7 @@ def iter_weights(
         _MERGE_RULES,
         model_name="lfm3",
     )
+    for name, scales in input_scales.items():
+        yield name, torch.stack(scales).max()
 
 __all__ = ["iter_weights"]
