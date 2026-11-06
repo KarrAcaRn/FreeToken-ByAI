@@ -345,6 +345,10 @@ def _required_attn_types(model_config) -> frozenset[AttnType]:
     types = frozenset(
         spec.attn_type for spec in specs_fn() if spec.attn_type.backend_driven
     )
+    # A full pool may retain every token while individual layers mask a window.
+    if any(getattr(g, "per_layer_sliding_window", False)
+           for g in getattr(model_config, "attention_groups", ())):
+        types |= {AttnType.SWA}
     return types or frozenset({AttnType.FULL})
 
 
@@ -3350,6 +3354,11 @@ def _adjust_config(config: EngineConfig):
         )
         logger.info_rank0(f"Auto-selected attention backend: {config.attention_backend}")
     _validate_attention_backend_choice(config, override, required_attn_types)
+    if getattr(config, "speculative_algorithm", None) is not None:
+        from freetoken.models.config import ShortConvGroupConfig
+
+        if any(isinstance(g, ShortConvGroupConfig) for g in getattr(model_config, "attention_groups", ())):
+            raise ValueError("speculative decoding does not support short-conv state yet: it has no verify handler")
     if getattr(config, "spec_verify", False):
         _adjust_spec_config(config, override, is_dsv4 or is_dsv41 or has_swa_attention)
 

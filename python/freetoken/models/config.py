@@ -168,6 +168,7 @@ class FullAttentionGroupConfig(BaseAttentionGroupConfig):
     # GQA + ratio > 1 -> AttnType.QSA (Qwen3.8); MLA + ratio > 1 -> the glm5_next
     # kpool DSA layout (attn type stays DSA; the pool factory branches on mla).
     index_ratio: int = 1
+    per_layer_sliding_window: bool = False
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,18 @@ class LinearGatedDeltaGroupConfig(BaseAttentionGroupConfig):
 
 
 @dataclass(frozen=True)
+class ShortConvGroupConfig(BaseAttentionGroupConfig):
+    """Channel-sharded short-conv history, without a GDN recurrence."""
+
+    kind: ClassVar[Literal["short_conv"]] = "short_conv"
+    cache_kind: ClassVar[Literal["linear_state"]] = "linear_state"
+    variant: ClassVar[Literal["short_conv"]] = "short_conv"
+
+    conv_dim: int
+    conv_kernel_dim: int = 7
+
+
+@dataclass(frozen=True)
 class DSV4AttentionGroupConfig(BaseAttentionGroupConfig):
     """DSV4 sparse attention (window + compressed tiers + Lightning Indexer). Standalone
     class on purpose: subclassing SWAAttentionGroupConfig would flip has_swa_attention
@@ -225,6 +238,7 @@ AttentionGroupConfig: TypeAlias = (
     FullAttentionGroupConfig
     | SWAAttentionGroupConfig
     | LinearGatedDeltaGroupConfig
+    | ShortConvGroupConfig
     | DSV4AttentionGroupConfig
 )
 
@@ -430,7 +444,7 @@ class ModelConfig:
     @property
     def has_linear_attention(self) -> bool:
         return any(
-            isinstance(group, LinearGatedDeltaGroupConfig)
+            isinstance(group, (LinearGatedDeltaGroupConfig, ShortConvGroupConfig))
             for group in self.attention_groups
         )
 
@@ -463,14 +477,14 @@ class ModelConfig:
             raise ValueError("Expected at most one SWA attention group")
         return groups[0] if groups else None
 
-    def linear_attention_group(self) -> LinearGatedDeltaGroupConfig | None:
+    def linear_attention_group(self) -> LinearGatedDeltaGroupConfig | ShortConvGroupConfig | None:
         groups = [
             group
             for group in self.attention_groups
-            if isinstance(group, LinearGatedDeltaGroupConfig)
+            if isinstance(group, (LinearGatedDeltaGroupConfig, ShortConvGroupConfig))
         ]
         if len(groups) > 1:
-            raise ValueError("Expected at most one linear-gated-delta attention group")
+            raise ValueError("Expected at most one linear-state attention group")
         return groups[0] if groups else None
 
     def is_swa_layer(self, layer_id: int) -> bool:
@@ -489,14 +503,14 @@ class ModelConfig:
     def is_linear_layer(self, layer_id: int) -> bool:
         return isinstance(
             self.attention_group_for_layer(layer_id),
-            LinearGatedDeltaGroupConfig,
+            (LinearGatedDeltaGroupConfig, ShortConvGroupConfig),
         )
 
     def attn_type_for_layer(self, layer_id: int) -> AttnType:
         """Canonical per-layer attention-type lookup (the taxonomy is declared
         top-down on the attention groups; this is the layer-granular view)."""
         group = self.attention_group_for_layer(layer_id)
-        if isinstance(group, LinearGatedDeltaGroupConfig):
+        if isinstance(group, (LinearGatedDeltaGroupConfig, ShortConvGroupConfig)):
             return AttnType.LINEAR
         if isinstance(group, SWAAttentionGroupConfig):
             return AttnType.SWA

@@ -180,7 +180,7 @@ class FLACaptureData:
 
 
 class LinearAttnBackend(BaseAttnBackend):
-    """Metadata of the linear-attention layers (GatedDeltaNet, KDA), next to the attention backend: ``FLAMetadata`` per forward, ``FLACaptureData`` for CUDA graphs.
+    """Metadata of the slot-state layers (GatedDeltaNet, KDA, short conv), next to the attention backend: ``FLAMetadata`` per forward, ``FLACaptureData`` for CUDA graphs.
 
     The layers run their own kernels and read ``batch.fla_metadata``, so ``forward`` is never called.
     """

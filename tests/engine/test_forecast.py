@@ -275,6 +275,30 @@ def test_hybrid_state_pool_is_the_engines(tiny_hybrid):
     assert f.kv_bytes_per_token == 2 * 1 * 64 * 2 * 1
 
 
+
+def test_short_conv_forecast_prices_only_history(tiny_hybrid):
+    from dataclasses import replace
+    from freetoken.models.config import ShortConvGroupConfig
+    from freetoken.kvcache import create_kvcache_pool
+    from freetoken.kvcache.linear_state_pool import LinearStatePool
+
+    config, model = _resolved(tiny_hybrid)
+    mc = config.model_config
+    full = replace(mc.attention_groups[-1], per_layer_sliding_window=True)
+    conv = ShortConvGroupConfig(name="conv", layer_ids=(0, 1, 2), conv_dim=128)
+    object.__setattr__(config, "model_config", replace(mc, attention_groups=(conv, full)))
+    assert config.model_config.has_linear_attention
+    assert not config.model_config.has_swa_attention
+    f = fc_mod.forecast_inputs(config, model, None).forecast()
+    pool = LinearStatePool(conv, f.state_slots, config.dtype, torch.device("cpu"), tp_size=1)
+    kv = create_kvcache_pool(model_config=config.model_config, num_pages=2, page_size=1,
+                             dtype=config.dtype, device=torch.device("cpu"))
+    assert f.state_slots == 25
+    assert f.state_bytes == pool.conv_states.numel() * pool.conv_states.element_size()
+    assert f.state_bytes == 25 * 3 * 128 * 6 * 2
+    assert f.kv_bytes_per_token == 2 * 1 * 64 * 2
+    assert kv._kv_buffer.shape[1] == 1
+
 def test_hybrid_no_fit_suggests_a_smaller_state_pool(tiny_hybrid):
     from freetoken.engine.forecast import forecast_inputs, suggest_tips
 

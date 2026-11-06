@@ -54,6 +54,12 @@ def _model_config(kind):
     )
     if kind == "full":
         specs = (_spec("full", AttnType.FULL),)
+    elif kind == "full_window":
+        mc.attention_groups = (FullAttentionGroupConfig(
+            name="full", layer_ids=(0, 1), num_kv_heads=1, head_dim=64,
+            rotary_config=mc.rotary_config, per_layer_sliding_window=True,
+        ),)
+        specs = (_spec("full", AttnType.FULL),)
     elif kind == "swa":
         mc.has_swa_attention = True
         specs = (
@@ -113,6 +119,7 @@ def _patch_env(monkeypatch, *, major=9, flashinfer=True, sgl=True):
         ("full", "fa,fi"),  # sm90 tree
         ("linear_hybrid", "fa,fi"),  # LINEAR never constrains backend choice
         ("swa", "triton"),
+        ("full_window", "triton"),
         ("mla", "dsa"),  # plain latent MLA
         ("dsa", "dsa"),  # MLA + DSA indexer (GLM-5.2 shape)
         ("dsv4", "dsv4_sparse"),
@@ -406,3 +413,32 @@ def test_linear_attention_defaults_to_hybrid_radix():
 
     assert _resolve_cache_type(True, "radix") == "hybrid_radix"
     assert _resolve_cache_type(True, "naive") == "naive"
+
+
+@pytest.mark.parametrize("backend", ["auto", "triton", "fi", "fa", "trtllm", "triton,fi"])
+def test_full_pool_window_backend_on_sm89(monkeypatch, backend):
+    from freetoken.engine.engine import _adjust_config
+
+    _patch_env(monkeypatch, major=8)
+    config = _config("full_window", attention_backend=backend)
+    if backend in ("auto", "triton"):
+        _adjust_config(config)
+        assert config.attention_backend == "triton"
+        assert config.model_config.kv_cache_group_specs()[0].sliding_window is None
+    else:
+        with pytest.raises(ValueError, match="swa|SWA|sm100|SM100"):
+            _adjust_config(config)
+
+
+@pytest.mark.parametrize("algorithm", ["mtp", "dflash"])
+def test_short_conv_refuses_speculation(monkeypatch, algorithm):
+    from freetoken.engine.engine import _adjust_config
+    from freetoken.models.config import ShortConvGroupConfig
+
+    _patch_env(monkeypatch, major=8)
+    config = _config("full_window", attention_backend="auto", speculative_algorithm=algorithm)
+    config.model_config.attention_groups += (
+        ShortConvGroupConfig(name="conv", layer_ids=(2, 3), conv_dim=512),
+    )
+    with pytest.raises(ValueError, match="short-conv state.*no verify handler"):
+        _adjust_config(config)

@@ -6,7 +6,7 @@ from typing import List
 import torch
 from freetoken.distributed import get_tp_info
 from freetoken.env import ENV
-from freetoken.models.config import LinearGatedDeltaGroupConfig, SlotStateSpec, SlotVerify
+from freetoken.models.config import LinearGatedDeltaGroupConfig, ShortConvGroupConfig, SlotStateSpec, SlotVerify
 from freetoken.utils import div_even
 
 _SSM_DTYPES = {
@@ -22,10 +22,12 @@ def ssm_state_dtype() -> torch.dtype:
 
 
 def _linear_local_dims(
-    group: LinearGatedDeltaGroupConfig, tp_size: int
+    group: LinearGatedDeltaGroupConfig | ShortConvGroupConfig, tp_size: int
 ) -> tuple[int, int, int, int]:
-    """TP-local ``(n_layers, conv_dim, v_heads, k_heads)`` for the GDN state tensors -- the single
+    """TP-local ``(n_layers, conv_dim, v_heads, k_heads)`` for the slot-state tensors -- the single
     source of the sharding math shared by the pool allocation and the byte estimate."""
+    if isinstance(group, ShortConvGroupConfig):
+        return len(group.layer_ids), div_even(group.conv_dim, tp_size), 0, 0
     local_k_heads = div_even(group.num_key_heads, tp_size, allow_replicate=True)
     local_v_heads = div_even(group.num_value_heads, tp_size, allow_replicate=True)
     local_conv_dim = 2 * local_k_heads * group.key_head_dim + local_v_heads * group.value_head_dim
@@ -33,11 +35,10 @@ def _linear_local_dims(
 
 
 class LinearStatePool:
-    """Per-request recurrent state (conv + SSM) for GatedDeltaNet layers.
+    """Per-request conv history and optional GDN recurrent state.
 
-    Indexed by ``Req.table_idx`` (0..max_running_req), the same per-request slot the
-    page table uses, so the scheduler's existing admit/free of ``table_idx`` covers the
-    state's lifetime. One fixed slot per running request; no paging, no eviction.
+    ShortConv groups allocate only conv history. Hybrid-radix requests use independent
+    live, track and cached snapshot slots; naive requests use ``Req.table_idx``.
 
     A model can declare extra per-request tensors on the same slots through
     ``ModelConfig.slot_states`` (see ``SlotStateSpec``); they advance, snapshot, COW and
@@ -47,7 +48,7 @@ class LinearStatePool:
 
     def __init__(
         self,
-        group: LinearGatedDeltaGroupConfig,
+        group: LinearGatedDeltaGroupConfig | ShortConvGroupConfig,
         num_slots: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -73,11 +74,12 @@ class LinearStatePool:
         )
         # SSM recurrent state. fp32 by default (matches HF mamba_ssm_dtype); the dtype is
         # overridable via FREETOKEN_MAMBA_SSM_DTYPE (see ssm_state_dtype).
-        self.recurrent_states = torch.zeros(
-            (n_layers, num_slots, local_v_heads, group.key_head_dim, group.value_head_dim),
-            dtype=ssm_state_dtype(),
-            device=device,
-        )
+        self.recurrent_states = None
+        if isinstance(group, LinearGatedDeltaGroupConfig):
+            self.recurrent_states = torch.zeros(
+                (n_layers, num_slots, local_v_heads, group.key_head_dim, group.value_head_dim),
+                dtype=ssm_state_dtype(), device=device,
+            )
         self._local_index = {layer_id: i for i, layer_id in enumerate(group.layer_ids)}
 
         self._slot_specs = tuple(slot_states)
@@ -122,11 +124,12 @@ class LinearStatePool:
             (n_layers, self._num_host_slots, local_conv_dim, group.conv_kernel_dim - 1),
             dtype=self._conv_dtype, **opts,
         )
-        self.host_recurrent_states = torch.zeros(
-            (n_layers, self._num_host_slots, local_v_heads,
-             group.key_head_dim, group.value_head_dim),
-            dtype=ssm_state_dtype(), **opts,
-        )
+        if isinstance(group, LinearGatedDeltaGroupConfig):
+            self.host_recurrent_states = torch.zeros(
+                (n_layers, self._num_host_slots, local_v_heads,
+                 group.key_head_dim, group.value_head_dim),
+                dtype=ssm_state_dtype(), **opts,
+            )
         self.host_slot_states = {
             spec.name: torch.full(
                 (max(1, len(spec.layer_ids)), self._num_host_slots, *spec.shape),
@@ -192,8 +195,9 @@ class LinearStatePool:
         holds a slot and the radix tree owning donated snapshots is discarded too.
         """
         n_layers, _, local_conv_dim, km1 = self.conv_states.shape
-        _, _, local_v_heads, key_head_dim, value_head_dim = self.recurrent_states.shape
-        conv_dtype, rec_dtype = self.conv_states.dtype, self.recurrent_states.dtype
+        rec_shape = self.recurrent_states.shape if self.recurrent_states is not None else None
+        rec_dtype = self.recurrent_states.dtype if rec_shape is not None else None
+        conv_dtype = self.conv_states.dtype
         device = self._device
         self.conv_states = None
         self.recurrent_states = None
@@ -204,11 +208,10 @@ class LinearStatePool:
         self.conv_states = torch.zeros(
             (n_layers, num_slots, local_conv_dim, km1), dtype=conv_dtype, device=device
         )
-        self.recurrent_states = torch.zeros(
-            (n_layers, num_slots, local_v_heads, key_head_dim, value_head_dim),
-            dtype=rec_dtype,
-            device=device,
-        )
+        if rec_shape is not None:
+            self.recurrent_states = torch.zeros(
+                (n_layers, num_slots, *rec_shape[2:]), dtype=rec_dtype, device=device,
+            )
         self.slot_states = self._alloc_slot_states(num_slots)
         self._num_slots = num_slots
         self._free_slots = list(range(1, num_slots))
@@ -226,7 +229,8 @@ class LinearStatePool:
         if isinstance(slots, (list, tuple)):
             slots = torch.as_tensor(slots, dtype=torch.long, device=self._device)
         self.conv_states[:, slots] = 0
-        self.recurrent_states[:, slots] = 0
+        if self.recurrent_states is not None:
+            self.recurrent_states[:, slots] = 0
         for spec in self._slot_specs:
             self.slot_states[spec.name][:, slots] = spec.fill_value
 
@@ -234,7 +238,8 @@ class LinearStatePool:
         """Copy a whole-sequence snapshot (conv + recurrent, all layers) from slot ``src`` to
         ``dst``. Used for COW-on-restore (donated snapshot -> fresh live slot)."""
         self.conv_states[:, dst].copy_(self.conv_states[:, src])
-        self.recurrent_states[:, dst].copy_(self.recurrent_states[:, src])
+        if self.recurrent_states is not None:
+            self.recurrent_states[:, dst].copy_(self.recurrent_states[:, src])
         for t in self.slot_states.values():
             t[:, dst].copy_(t[:, src])
 
@@ -253,10 +258,11 @@ class LinearStatePool:
     def host_bytes_per_slot(self) -> int:
         if self.host_conv_states is None:
             return 0
-        per = self.host_conv_states[0].numel() * self.host_conv_states.element_size()
-        per += self.host_recurrent_states[0].numel() * self.host_recurrent_states.element_size()
+        per = self.host_conv_states[:, 0].numel() * self.host_conv_states.element_size()
+        if self.host_recurrent_states is not None:
+            per += self.host_recurrent_states[:, 0].numel() * self.host_recurrent_states.element_size()
         for t in self.host_slot_states.values():
-            per += t[0].numel() * t.element_size()
+            per += t[:, 0].numel() * t.element_size()
         return per
 
     def alloc_host(self, n: int = 1) -> list[int]:
@@ -280,14 +286,16 @@ class LinearStatePool:
     def to_host(self, src: int, dst: int) -> None:
         """Archive a device checkpoint into a bank slot (D2H, async from pinned RAM)."""
         self.host_conv_states[:, dst].copy_(self.conv_states[:, src], non_blocking=True)
-        self.host_recurrent_states[:, dst].copy_(self.recurrent_states[:, src], non_blocking=True)
+        if self.recurrent_states is not None:
+            self.host_recurrent_states[:, dst].copy_(self.recurrent_states[:, src], non_blocking=True)
         for name, t in self.host_slot_states.items():
             t[:, dst].copy_(self.slot_states[name][:, src], non_blocking=True)
 
     def from_host(self, src: int, dst: int) -> None:
         """Restore a bank checkpoint into a live device slot (H2D) -- the resume path."""
         self.conv_states[:, dst].copy_(self.host_conv_states[:, src], non_blocking=True)
-        self.recurrent_states[:, dst].copy_(self.host_recurrent_states[:, src], non_blocking=True)
+        if self.recurrent_states is not None:
+            self.recurrent_states[:, dst].copy_(self.host_recurrent_states[:, src], non_blocking=True)
         for name, t in self.host_slot_states.items():
             self.slot_states[name][:, dst].copy_(t[:, src], non_blocking=True)
 
@@ -307,7 +315,8 @@ class LinearStatePool:
     def reset(self, table_idx: int) -> None:
         """Zero a slot across all linear layers (new request takes this table_idx)."""
         self.conv_states[:, table_idx].zero_()
-        self.recurrent_states[:, table_idx].zero_()
+        if self.recurrent_states is not None:
+            self.recurrent_states[:, table_idx].zero_()
         for spec in self._slot_specs:
             self.slot_states[spec.name][:, table_idx] = spec.fill_value
 
@@ -325,6 +334,8 @@ class LinearStatePool:
 
     def attach_verify_scratch(self, max_bs: int, rows_per_req: int) -> None:
         """Build the scratch for verify batches of up to ``max_bs`` requests with ``rows_per_req`` rows each, and the verify handler of every slot state; build_fla_metadata hands the GDN scratch to the GDN layers."""
+        if isinstance(self._group, ShortConvGroupConfig):
+            raise ValueError("short-conv state has no verify handler")
         self.verify_scratch = LinearVerifyScratch(self, max_bs, rows_per_req)
         self._verify_handlers = {
             spec.name: spec.verify(spec, max_bs, rows_per_req, self._device, self._state_dtype(spec))
@@ -347,10 +358,9 @@ class LinearStatePool:
 
     def bytes_per_slot(self) -> int:
         """Total state bytes for one request (all linear layers)."""
-        per = (
-            self.conv_states[:, 0].numel() * self.conv_states.element_size()
-            + self.recurrent_states[:, 0].numel() * self.recurrent_states.element_size()
-        )
+        per = self.conv_states[:, 0].numel() * self.conv_states.element_size()
+        if self.recurrent_states is not None:
+            per += self.recurrent_states[:, 0].numel() * self.recurrent_states.element_size()
         for t in self.slot_states.values():
             per += t[:, 0].numel() * t.element_size()
         return int(per)
@@ -397,7 +407,7 @@ class LinearVerifyScratch:
 
 
 def linear_state_bytes_per_req(
-    group: LinearGatedDeltaGroupConfig,
+    group: LinearGatedDeltaGroupConfig | ShortConvGroupConfig,
     tp_size: int,
     dtype: torch.dtype,
     slot_states: tuple[SlotStateSpec, ...] = (),
@@ -407,7 +417,10 @@ def linear_state_bytes_per_req(
     n_layers, local_conv_dim, local_v_heads, _ = _linear_local_dims(group, tp_size)
 
     conv_elems = local_conv_dim * (group.conv_kernel_dim - 1)
-    rec_elems = local_v_heads * group.key_head_dim * group.value_head_dim
+    rec_elems = (
+        local_v_heads * group.key_head_dim * group.value_head_dim
+        if isinstance(group, LinearGatedDeltaGroupConfig) else 0
+    )
     conv_bytes = conv_elems * dtype.itemsize  # conv state in model dtype
     rec_bytes = rec_elems * ssm_state_dtype().itemsize  # recurrent state (default fp32)
     total = n_layers * (conv_bytes + rec_bytes)
@@ -443,6 +456,8 @@ def verify_scratch_bytes(config, rows_per_req: int) -> int:
     group = config.model_config.linear_attention_group()
     if group is None or rows_per_req <= 1:
         return 0
+    if isinstance(group, ShortConvGroupConfig):
+        raise ValueError("short-conv state has no verify handler")
     n_layers, conv_dim, hv, hk = _linear_local_dims(group, config.tp_info.size)
     rows = n_layers * config.max_running_req * rows_per_req
     stash = rows * (hk * group.key_head_dim + hv * group.value_head_dim + 2 * hv) * 4
@@ -462,6 +477,8 @@ def dflash_verify_bytes_per_token(config) -> int:
     group = config.model_config.linear_attention_group()
     if group is None:
         return 0
+    if isinstance(group, ShortConvGroupConfig):
+        raise ValueError("short-conv state has no verify handler")
     n_layers, conv_dim, v_heads, _ = _linear_local_dims(group, config.tp_info.size)
     elem = torch.empty((), dtype=config.dtype).element_size()
     return n_layers * elem * (conv_dim * (group.conv_kernel_dim - 1) + conv_dim + 2 * v_heads)

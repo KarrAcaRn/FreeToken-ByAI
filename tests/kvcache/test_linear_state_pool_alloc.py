@@ -12,7 +12,7 @@ from freetoken.kvcache.linear_state_pool import (
     linear_state_bytes_per_req,
     state_pool_bytes,
 )
-from freetoken.models.config import LinearGatedDeltaGroupConfig, SlotStateSpec
+from freetoken.models.config import LinearGatedDeltaGroupConfig, ShortConvGroupConfig, SlotStateSpec
 
 
 def _group():
@@ -189,3 +189,65 @@ def test_slot_state_bytes_for_the_real_geometry():
     delta = linear_state_bytes_per_req(group, 1, torch.bfloat16, (spec,)) - \
         linear_state_bytes_per_req(group, 1, torch.bfloat16)
     assert delta == 4 * 2560 * 9 * 2 == 180 * 1024
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_short_conv_snapshot_roundtrip_and_budget(tp_size):
+    # A recurrence accidentally charged/allocated here, or channel sharding drift,
+    # would silently reduce the planned KV capacity.
+    group = ShortConvGroupConfig(name="conv", layer_ids=tuple(range(13)), conv_dim=2048)
+    pool = LinearStatePool(group, 8, torch.bfloat16, torch.device("cpu"),
+                           tp_size=tp_size, host_slots=5)
+    expected = 13 * (2048 // tp_size) * 6 * 2
+    assert pool.recurrent_states is None and pool.host_recurrent_states is None
+    assert pool.bytes_per_slot() == pool.host_bytes_per_slot() == expected
+    assert linear_state_bytes_per_req(group, tp_size, torch.bfloat16) == expected
+    src, dst = pool.alloc(2)
+    host = pool.alloc_host()[0]
+    payload = torch.arange(pool.conv_states[:, src].numel(), dtype=torch.float32).reshape_as(
+        pool.conv_states[:, src]).to(torch.bfloat16)
+    pool.conv_states[:, src].copy_(payload)
+    pool.to_host(src, host)
+    pool.reset(src)
+    pool.from_host(host, dst)
+    pool.copy_from(dst, src)
+    assert torch.equal(pool.conv_states[:, src], payload)
+    pool.clear_slots([dst])
+    assert pool.conv_states[:, dst].count_nonzero() == 0
+    assert torch.equal(pool.conv_states[:, src], payload)
+    pool.rebuild(11)
+    assert pool.num_free_slots == 10 and pool.recurrent_states is None
+    assert pool.bytes_per_slot() == expected
+    assert pool.conv_states.count_nonzero() == 0
+    pool.from_host(host, 1)
+    assert torch.equal(pool.conv_states[:, 1], payload)
+    pool.free_host(host)
+    pool.alloc(2)
+    pool.reclaim_all_slots()
+    assert pool.num_free_slots == 10
+
+
+def test_short_conv_track_metadata_with_fresh_and_restored_requests():
+    from freetoken.attention.linear import build_fla_metadata
+    from freetoken.core import Batch, Req, SamplingParams
+    from freetoken.kernel.fla.chunk import CHUNK_SIZE
+
+    pool = LinearStatePool(ShortConvGroupConfig(name="conv", layer_ids=(0,), conv_dim=32),
+                           9, torch.float32, torch.device("cpu"), tp_size=1)
+    reqs = []
+    for i, (cached, extend, slot, track) in enumerate(((0, 2, 7, (1, 2)),
+                                                    (CHUNK_SIZE, CHUNK_SIZE + 3, 6, (3, 4)))):
+        reqs.append(Req(input_ids=torch.arange(cached + extend), table_idx=i,
+                        cached_len=cached, output_len=1, uid=i, sampling_params=SamplingParams(),
+                        cache_handle=None, linear_slot_idx=slot, mamba_ping_pong=track))
+    batch = Batch(reqs=reqs, phase="prefill")
+    batch.padded_reqs = reqs
+    meta = build_fla_metadata(batch, torch.device("cpu"), pool)
+    assert meta.cache_indices.tolist() == [7, 6]
+    assert meta.has_initial_state.tolist() == [False, True]
+    assert meta.fresh_state_indices.tolist() == [7]
+    assert meta.cu_seqlens.tolist() == [0, 2, CHUNK_SIZE + 5]
+    assert meta.track_dst.tolist() == [3]
+    assert meta.track_boundary_row.tolist() == [2 + CHUNK_SIZE]
+    assert meta.track_conv_src.tolist() == [list(range(2 + CHUNK_SIZE - 6, 2 + CHUNK_SIZE))]
+    assert reqs[1].mamba_last_track_seqlen == 2 * CHUNK_SIZE

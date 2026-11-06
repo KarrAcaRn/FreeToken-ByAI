@@ -103,3 +103,47 @@ def test_graph_replay_matches_eager_attention(monkeypatch, name, rows_per_req):
     graph.replay()
     torch.cuda.synchronize()
     torch.testing.assert_close(out, expected, atol=1e-2, rtol=1e-2)
+
+
+def test_short_conv_graph_replay_uses_live_slots():
+    from freetoken.attention.linear import LinearAttnBackend
+    from freetoken.kernel.causal_conv1d import causal_conv1d_decode
+    from freetoken.kvcache.linear_state_pool import LinearStatePool
+    from freetoken.models.config import ShortConvGroupConfig
+
+    device = torch.device("cuda")
+    pool = LinearStatePool(ShortConvGroupConfig(name="conv", layer_ids=(0,), conv_dim=32),
+                           6, torch.float32, device, tp_size=1)
+    backend = LinearAttnBackend(device, pool)
+    backend.init_capture_graph(128, [2])
+    capture = Batch(reqs=[_req(0, 0, 1)] * 2, phase="decode")
+    capture.padded_reqs = capture.reqs
+    backend.prepare_for_capture(capture)
+    x = torch.arange(64, device=device, dtype=torch.float32).view(2, 32) / 64
+    weight = torch.arange(7, device=device, dtype=torch.float32).expand(32, -1).contiguous() / 7
+    state = pool.conv_states[0]
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        causal_conv1d_decode(x, state, weight, capture.fla_metadata.cache_indices, activation=None)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            out = causal_conv1d_decode(x, state, weight, capture.fla_metadata.cache_indices, activation=None)
+    torch.cuda.current_stream().wait_stream(stream)
+    for slots in ((4, 2), (1, 3)):
+        state.copy_(torch.arange(state.numel(), device=device).reshape_as(state) / state.numel())
+        before = state.clone()
+        reqs = [_req(i, 8, 1) for i in range(2)]
+        for req, slot in zip(reqs, slots):
+            req.linear_slot_idx = slot
+        replay = Batch(reqs=reqs, phase="decode")
+        replay.padded_reqs = reqs
+        backend.prepare_metadata(replay)
+        backend.prepare_for_replay(replay)
+        graph.replay()
+        torch.cuda.synchronize()
+        window = torch.cat((before[list(slots)], x.unsqueeze(-1)), dim=-1)
+        torch.testing.assert_close(out, (window * weight).sum(-1))
+        expected = before.clone()
+        expected[list(slots)] = window[:, :, 1:]
+        torch.testing.assert_close(state, expected)
