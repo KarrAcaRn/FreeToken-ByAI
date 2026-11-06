@@ -126,6 +126,7 @@ MARKUP_MARKERS = {
 # family, mirroring args.py auto-inference. think_open == "" when the chat template
 # opens the block implicitly (model emits only the closing marker).
 REASONING_FAMILIES = {
+    "lfm3": ("qwen3_coder", "qwen3", "", "</think>"),
     "flint": ("glm47", "flint", "<think>", "</think>"),
     "dsv4": ("deepseekv32", "deepseekv32", "", "</think>"),
     "dsv4.1": ("deepseekv41", "deepseekv32", "", "</think>"),
