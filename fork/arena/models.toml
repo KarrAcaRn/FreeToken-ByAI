@@ -15,6 +15,16 @@ path = "models--RikiyaT--Qwen3.5-0.8B-weight-space-programming/snapshots/*"
 flags = "--kv-cache-dtype fp8"
 caps = ["vision"]
 
+[lfm3-1_7b-nvfp4]
+# echt page: generation_config has no sampling; LFM3 card "General" profile: 0.1 / top_k 50
+# (the card also lists repetition_penalty 1.1 - ft serve has no repetition_penalty, left out)
+sampling = { temperature = 0.1, top_k = 50 }
+label = "LFM3 1.7B (NVFP4)"
+group = "Klein (dicht)"
+path = "models--LiquidAI--LFM3-1.7B-NVFP4/snapshots/*"
+# --online-quant none: validated recipe (docs/lfm3.md); online fp8 on the bf16 conv/attention parts diverged
+flags = "--kv-cache-dtype fp8 --online-quant none"
+
 [qwen3-0_6b]
 label = "Qwen3 0.6B"
 group = "Klein (dicht)"
