@@ -1232,6 +1232,35 @@ def test_stream_chat_usage_chunk_carries_cached_tokens():
     assert usage["prompt_tokens_details"] == {"cached_tokens": 3}
 
 
+@pytest.mark.parametrize("endpoint", ["chat", "completions"])
+def test_stream_continuous_usage_counts_tokens_not_chunks(endpoint):
+    # a speculative-decoding step commits several tokens in one reply
+    state = FakeState([
+        UserReply(uid=42, incremental_output="", finished=False, prompt_tokens_delta=5),
+        UserReply(uid=42, incremental_output="a", finished=False, completion_tokens_delta=1),
+        UserReply(uid=42, incremental_output="bcd", finished=True, completion_tokens_delta=3),
+    ])
+    options = {"include_usage": True, "continuous_usage_stats": True}
+    if endpoint == "chat":
+        text = lambda choice: choice["delta"].get("content")
+
+        async def collect():
+            stream = stream_chat_completion_chunks(42, chat_request(tools=None, stream_options=options), state)
+            return [chunk async for chunk in stream]
+    else:
+        text = lambda choice: choice["text"]
+
+        async def collect():
+            # next streams completions through the n>1 choice fan-out, which the handler builds
+            req = CompletionRequest(model="client-model", prompt="hi", stream=True, stream_options=options)
+            response = await handle_completion(req, request=None, state=state, model_sampling={})
+            return [chunk async for chunk in response.body_iterator]
+
+    events = [e for e in parse_sse(run(collect())) if isinstance(e, dict)]
+    deltas = [e for e in events if e["choices"] and text(e["choices"][0])]
+    assert [(e["usage"]["prompt_tokens"], e["usage"]["completion_tokens"]) for e in deltas] == [(5, 1), (5, 4)]
+
+
 def _timings_stream_state() -> FakeState:
     state = FakeState([UserReply(
         uid=42, incremental_output="hi", finished=True, prompt_tokens_delta=5,

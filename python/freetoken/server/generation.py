@@ -152,6 +152,15 @@ GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | T
 
 
 @dataclass
+class GenUsage:
+    """Token counts of a streaming generation so far. generate_events() updates it from each engine reply before it yields that reply's events."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+
+
+@dataclass
 class GenResult:
     reasoning: str
     content: str
@@ -511,8 +520,8 @@ def _make_reasoning_parser(spec: GenSpec, state: Any) -> ReasoningParser | None:
             or bool(ctk.get("enable_thinking"))
             or bool(ctk.get("thinking"))
         )
-    elif parser_name == "flint":
-        # Flint opens its own optional think block, including when tools are present.
+    elif parser_name in ("flint", "ricursive"):
+        # These families open their own optional think block, including when tools are present.
         force_reasoning = False
     elif parser_name == "minimax_m3":
         # M3's template pre-opens <mm:think> only in thinking_mode "enabled" (the
@@ -842,7 +851,7 @@ def _record_generation(
 
 
 async def generate_events(
-    uid: int, spec: GenSpec, state: Any, *, source: str | None = None
+    uid: int, spec: GenSpec, state: Any, *, source: str | None = None, usage: GenUsage | None = None
 ) -> AsyncIterator[GenEvent]:
     """Wraps `_generate_events_impl` to log the request with its totals, read off the terminal
     `GenDone`. The `finally` still records the row on a mid-stream disconnect — but with 0 tokens
@@ -852,7 +861,9 @@ async def generate_events(
     completion_tokens = 0
     error: str | None = None
     try:
-        async for ev in _generate_events_impl(uid, spec, state, timer):
+        async for ev in _generate_events_impl(
+            uid, spec, state, timer, usage if usage is not None else GenUsage()
+        ):
             if isinstance(ev, GenDone):
                 prompt_tokens = ev.prompt_tokens
                 completion_tokens = ev.completion_tokens
@@ -894,7 +905,7 @@ async def generate_full(
 
 
 async def _generate_events_impl(
-    uid: int, spec: GenSpec, state: Any, timer: GenTimer
+    uid: int, spec: GenSpec, state: Any, timer: GenTimer, usage: GenUsage
 ) -> AsyncIterator[GenEvent]:
     """Protocol-neutral streaming generation. Yields semantic events (reasoning /
     content / tool-call deltas) terminated by exactly one GenDone. Produces no wire
@@ -907,9 +918,6 @@ async def _generate_events_impl(
     carry the output ordinal (0, 1, ...) in tool_index. Formats whose detector
     cannot parse incrementally (supports_streaming=False) keep the previous
     buffer-everything-then-parse-at-the-end behavior."""
-    prompt_tokens = 0
-    completion_tokens = 0
-    cached_tokens = 0
     pending = ""
     pending_logprobs: list[dict] = []
     parse_tools = spec.parse_tools
@@ -1019,9 +1027,9 @@ async def _generate_events_impl(
         if getattr(ack, "error", None):
             raise GenerationError(ack.error, getattr(ack, "error_code", None))
         timer.observe(ack)
-        prompt_tokens += ack.prompt_tokens_delta
-        completion_tokens += ack.completion_tokens_delta
-        cached_tokens += ack.cached_tokens
+        usage.prompt_tokens += ack.prompt_tokens_delta
+        usage.completion_tokens += ack.completion_tokens_delta
+        usage.cached_tokens += ack.cached_tokens
         if collect_logprobs and getattr(ack, "logprobs", None) is not None:
             pending_logprobs.append(ack.logprobs)
         if getattr(ack, "timings", None) is not None:
@@ -1107,8 +1115,8 @@ async def _generate_events_impl(
 
     # Entries without a content delta are intentionally dropped in streaming mode.
     yield GenDone(
-        finish_reason, prompt_tokens, completion_tokens,
-        matched_stop=engine_matched_stop, cached_tokens=cached_tokens,
+        finish_reason, usage.prompt_tokens, usage.completion_tokens,
+        matched_stop=engine_matched_stop, cached_tokens=usage.cached_tokens,
         gen_timings=timer.finish(),
         timings=timings,
     )
