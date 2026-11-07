@@ -43,6 +43,7 @@ from .generation import (
     GenerationError,
     GenSpec,
     GenTimings,
+    GenUsage,
     ReasoningDelta,
     ToolCallArgsDelta,
     ToolCallsDelta,
@@ -492,17 +493,23 @@ async def stream_chat_completion_chunks(
         )
     )
 
-    prompt_tokens = 0
-    completion_tokens = 0
-    cached_tokens = 0
     timings: dict[str, Any] | None = None
     gen_timings = GenTimings()
     # timings ride the stream's LAST chunk only: the usage chunk when the client asked
     # for one, otherwise the finish chunk
     include_usage = bool(req.stream_options and req.stream_options.include_usage)
+    continuous_usage = include_usage and bool(req.stream_options.continuous_usage_stats)
+    # the final usage chunk reads it too, so a stream cut by an error reports what it produced
+    usage = GenUsage()
+
+    def emit(chunk: dict[str, Any]) -> bytes:
+        if continuous_usage:
+            chunk["usage"] = _reported_usage(state, usage)
+        return _sse(chunk)
+
     tool_calls_sent = 0
     open_tool: dict[str, Any] | None = None
-    events = generate_events(uid, spec, state, source="/v1/chat/completions")
+    events = generate_events(uid, spec, state, source="/v1/chat/completions", usage=usage)
     while True:
         try:
             ev = await events.__anext__()
@@ -516,7 +523,7 @@ async def stream_chat_completion_chunks(
             )
             break
         if isinstance(ev, ReasoningDelta):
-            yield _sse(
+            yield emit(
                 _chat_chunk(
                     req,
                     uid,
@@ -527,7 +534,7 @@ async def stream_chat_completion_chunks(
             choice: dict[str, Any] = {"delta": {"content": ev.text}, "index": 0, "finish_reason": None}
             if ev.logprobs:
                 choice["logprobs"] = {"content": [chat_content_entry(e) for e in ev.logprobs]}
-            yield _sse(_chat_chunk(req, uid, [choice]))
+            yield emit(_chat_chunk(req, uid, [choice]))
         elif isinstance(ev, ToolCallStart):
             open_tool = {
                 "index": tool_calls_sent,
@@ -535,7 +542,7 @@ async def stream_chat_completion_chunks(
                 "sent": "",
                 "stable": ev.args_prefix_stable,
             }
-            yield _sse(
+            yield emit(
                 _chat_chunk(
                     req, uid,
                     [{
@@ -554,7 +561,7 @@ async def stream_chat_completion_chunks(
             # fragments stream; otherwise the full arguments arrive at close.
             if open_tool is not None and open_tool["stable"] and ev.fragment:
                 open_tool["sent"] += ev.fragment
-                yield _sse(
+                yield emit(
                     _chat_chunk(
                         req, uid,
                         [{
@@ -578,7 +585,7 @@ async def stream_chat_completion_chunks(
                         else final if not open_tool["sent"] else ""
                     )
                     if remainder:
-                        yield _sse(
+                        yield emit(
                             _chat_chunk(
                                 req, uid,
                                 [{
@@ -595,7 +602,7 @@ async def stream_chat_completion_chunks(
                     continue
                 # Standalone complete call (buffered fallback path).
                 for delta in _tool_call_deltas([call], start_index=tool_calls_sent):
-                    yield _sse(
+                    yield emit(
                         _chat_chunk(
                             req, uid,
                             [{"delta": {"tool_calls": [delta]}, "index": 0, "finish_reason": None}],
@@ -603,15 +610,12 @@ async def stream_chat_completion_chunks(
                     )
                 tool_calls_sent += 1
         elif isinstance(ev, GenDone):
-            prompt_tokens = ev.prompt_tokens
-            completion_tokens = ev.completion_tokens
-            cached_tokens = ev.cached_tokens
             timings = ev.timings
             gen_timings = ev.gen_timings
             done = _chat_chunk(req, uid, [{"delta": {}, "index": 0, "finish_reason": ev.finish_reason}])
             if not include_usage and (t := timings_block(state, timings)) is not None:
                 done["timings"] = t
-            yield _sse(done)
+            yield emit(done)
 
     if include_usage:
         final: dict[str, Any] = {
@@ -620,15 +624,13 @@ async def stream_chat_completion_chunks(
             "created": int(time.time()),
             "model": req.model,
             "choices": [],
-            "usage": _usage(
-                prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)
-            ),
+            "usage": _reported_usage(state, usage),
         }
         if metrics_enabled(state):
             final["metrics"] = build_metrics(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cached_tokens=cached_tokens,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                cached_tokens=usage.cached_tokens,
                 timings=gen_timings,
             )
         if (t := timings_block(state, timings)) is not None:
@@ -799,25 +801,30 @@ async def stream_completion_chunks(
             **extra,
         }
 
-    prompt_tokens = 0
-    completion_tokens = 0
-    cached_tokens = 0
+    usage = GenUsage()
     text_offsets = [0] * req.n
     unfinished = req.n
     # the request's timings: choice 0's scheduler spans, as on the buffered path
     raw_timings: dict[str, Any] | None = None
     include_usage = bool(req.stream_options and req.stream_options.include_usage)
+    continuous_usage = include_usage and bool(req.stream_options.continuous_usage_stats)
+
+    def emit(payload: dict[str, Any]) -> bytes:
+        if continuous_usage:
+            payload["usage"] = _reported_usage(state, usage)
+        return _sse(payload)
+
     try:
         async with contextlib.aclosing(fan_out.events()) as events:
             async for index, ack in events:
                 if index == 0:
                     if getattr(ack, "timings", None) is not None:
                         raw_timings = ack.timings
-                    prompt_tokens += ack.prompt_tokens_delta
-                    cached_tokens += ack.cached_tokens
-                completion_tokens += ack.completion_tokens_delta
+                    usage.prompt_tokens += ack.prompt_tokens_delta
+                    usage.cached_tokens += ack.cached_tokens
+                usage.completion_tokens += ack.completion_tokens_delta
                 if ack.incremental_output:
-                    yield _sse(chunk([{
+                    yield emit(chunk([{
                         "text": ack.incremental_output,
                         "index": index,
                         "finish_reason": None,
@@ -840,17 +847,14 @@ async def stream_completion_chunks(
                         t := timings_block(state, raw_timings)
                     ) is not None:
                         done_chunk["timings"] = t
-                    yield _sse(done_chunk)
+                    yield emit(done_chunk)
     except GenerationError as exc:
         yield _sse({"error": {"message": str(exc), "type": "invalid_request_error", "code": exc.code}})
         yield b"data: [DONE]\n\n"
         return
 
     if include_usage:
-        final = chunk(
-            [],
-            usage=_usage(prompt_tokens, completion_tokens, _reported_cached(state, cached_tokens)),
-        )
+        final = chunk([], usage=_reported_usage(state, usage))
         if (t := timings_block(state, raw_timings)) is not None:
             final["timings"] = t
         yield _sse(final)
@@ -981,6 +985,10 @@ def _sse(payload: dict[str, Any]) -> bytes:
 def _reported_cached(state: Any, cached_tokens: int) -> int:
     """The prefix-cache hit to report; 0 unless --enable-cache-report is set."""
     return cached_tokens if getattr(state.config, "enable_cache_report", False) else 0
+
+
+def _reported_usage(state: Any, usage: GenUsage) -> dict[str, Any]:
+    return _usage(usage.prompt_tokens, usage.completion_tokens, _reported_cached(state, usage.cached_tokens))
 
 
 def _usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -> dict[str, Any]:
