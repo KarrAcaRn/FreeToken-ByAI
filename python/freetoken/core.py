@@ -135,11 +135,6 @@ class Req:
     # _process_last_data frees the request when the batch drains (after copy_done.synchronize).
     aborted: bool = False
     stop_decode_status: DecodeStatus | None = None
-    # DFlash: KV pages are allocated through this length, ahead of device_len, for the verify
-    # block (allocate_paged(ahead=...)); 0 when nothing allocates ahead.
-    paged_len: int = 0
-    # DFlash: a request that finished inside a verify block has its GDN state past cached_len
-    linear_state_ahead: bool = False
     # Timing/draft counters shared with every other chunk Req of this request (set by
     # the PrefillManager from the PendingReq's instance; a default blank otherwise).
     stats: ReqStats = field(default_factory=ReqStats, init=False, repr=False)

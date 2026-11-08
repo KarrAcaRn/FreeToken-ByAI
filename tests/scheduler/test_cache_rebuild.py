@@ -277,9 +277,8 @@ def test_deferred_flush_runs_at_idle_and_times_out_while_busy(monkeypatch, loop)
             sched.decode_manager.runnable = busy
             Scheduler.normal_loop(sched)
         else:
-            # Only the in-flight batch keeps the overlap scheduler busy here; a 1-token batch is
-            # not drained before scheduling (next's DFlash drain reads last_data[1]).
-            Scheduler.overlap_loop(sched, (None, SimpleNamespace(num_tokens=1)) if busy else None)
+            # Only the in-flight batch keeps the overlap scheduler busy here.
+            Scheduler.overlap_loop(sched, object() if busy else None)
 
     Scheduler._process_one_msg(sched, FlushCacheBackendMsg(request_id="a", timeout=10.0))
     Scheduler._process_one_msg(sched, FlushCacheBackendMsg(request_id="b", timeout=10.0))

@@ -36,7 +36,6 @@ def _setup():
 
     events = []
     engine = SimpleNamespace(
-        dflash_worker=None,
         commit_verify=lambda reqs, counts, out: events.append(("commit", [r.uid for r in reqs], list(counts))),
     )
 

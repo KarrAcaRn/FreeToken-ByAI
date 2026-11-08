@@ -144,7 +144,6 @@ def _build_engine(monkeypatch, ledger: _Ledger, *, moe: int, kv: int, budget: in
         attn_backend=types.SimpleNamespace(reset_capture=lambda: None),
         graph_runner=_FakeGraphRunner(),
         _sync_get_memory=lambda: (0, 0),
-        dflash_worker=None,
         linear_backend=None,
         spec=None,
         _spec_budget=lambda config: (0, 0),

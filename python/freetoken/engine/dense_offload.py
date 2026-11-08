@@ -28,9 +28,9 @@ logger = init_logger(__name__)
 
 _ALIGN = 256
 # Smaller tensors stay resident: norm weights and GDN gates (A_log, dt_bias) are a rounding error
-# of a layer's bytes, and some of them are read outside the layer's forward -- the DFlash commit
-# replays GDN recurrences with A_log/dt_bias after the verify, when the staging buffer may already
-# hold another layer. Anything that big code reads outside forward() would need the same care.
+# of a layer's bytes, and keeping them resident means code that reads them outside the layer's
+# forward never sees a staging buffer that already holds another layer. Anything that big code
+# reads outside forward() would need the same care.
 _MIN_TENSOR_BYTES = 1 << 20
 
 

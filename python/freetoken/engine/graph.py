@@ -3,13 +3,11 @@ from __future__ import annotations
 import ctypes
 import functools
 import gc
-import math
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal
 
 import torch
-import torch.nn.functional as F
 from freetoken.core import Batch, Req, get_global_ctx
 from freetoken.distributed import get_tp_info
 from freetoken.utils import init_logger, mem_GB
@@ -19,32 +17,9 @@ from tqdm import tqdm
 if TYPE_CHECKING:
     from freetoken.attention import BaseAttnBackend
     from freetoken.attention.linear import LinearAttnBackend
-    from freetoken.models import BaseLLMModel
     from freetoken.moe.offload_cache import OffloadMoeCache
 
 logger = init_logger(__name__)
-
-
-def project_lm_head_all_positions(lm_head, hidden_states: torch.Tensor) -> torch.Tensor:
-    """Project every hidden row through an LM head, bypassing prefill last-token slicing."""
-    tied = getattr(lm_head, "tied_embedding", None)
-    if tied is not None:
-        logits = lm_head.tied_kernel.linear(hidden_states, tied.weight, lm_head.bias)
-    elif getattr(lm_head, "quant_method", None) is not None:
-        # the head's own kernel: a quantized (e.g. NVFP4) head stores packed weights
-        logits = lm_head.quant_method.apply(lm_head, hidden_states)
-    else:
-        logits = F.linear(hidden_states, lm_head.weight, getattr(lm_head, "bias", None))
-    tp_size = getattr(lm_head, "tp_size", 1)
-    if tp_size == 1:
-        return logits
-
-    output_tensor = lm_head._comm.all_gather(logits)
-    input_shape = logits.shape
-    output_tensor = output_tensor.view((tp_size,) + input_shape)
-    output_tensor = output_tensor.permute(1, 0, 2).contiguous()
-    output_tensor = output_tensor.reshape(input_shape[:1] + (tp_size * input_shape[1],))
-    return output_tensor[:, : lm_head.num_embeddings]
 
 
 @dataclass
@@ -55,17 +30,6 @@ class GraphCaptureBuffer:
     # [3, bs * rows_per_req] t/h/w rope positions; allocated only for mrope models (else None).
     mrope_positions: torch.Tensor | None
     rows_per_req: int = 1
-    # DFlash target-verify graphs only (init_dflash_verify): their outputs and GDN state inputs
-    logits: torch.Tensor | None = None
-    hidden_states: list[torch.Tensor] | None = None
-    table_idx: torch.Tensor | None = None  # per-request GDN state slot
-    fla_cu_seqlens: torch.Tensor | None = None
-    fla_has_initial_state: torch.Tensor | None = None
-    # (requests, verify len); on a GDN target, per-token conv states and recurrence inputs (FLAMetadata)
-    dflash_shape: tuple[int, int] = (1, 1)
-    dflash_conv_states: torch.Tensor | None = None
-    dflash_gdn_mixed: torch.Tensor | None = None
-    dflash_gdn_ab: torch.Tensor | None = None
 
     @classmethod
     def init(cls, bs: int, device: torch.device, dummy_loc: int, mrope: bool = False, rows_per_req: int = 1) -> GraphCaptureBuffer:
@@ -79,42 +43,6 @@ class GraphCaptureBuffer:
             ),
             rows_per_req=rows_per_req,
         )
-
-    @classmethod
-    def init_dflash_verify(
-        cls,
-        bs: int,
-        verify_len: int,
-        device: torch.device,
-        storage: DFlashVerifyStorage,
-    ) -> GraphCaptureBuffer:
-        """Buffers of one (bs, verify_len) verify graph. The large ones (logits, hidden states,
-        GDN commit inputs) are views of ``storage``, shared by every verify graph -- they never
-        run at once."""
-        rows = bs * verify_len
-        buffer = GraphCaptureBuffer(
-            input_ids=torch.zeros(rows, dtype=torch.int32, device=device),
-            out_loc=torch.zeros(rows, dtype=torch.int32, device=device),
-            positions=torch.zeros(rows, dtype=torch.int32, device=device),
-            mrope_positions=None,
-            logits=storage.logits[:rows],
-            hidden_states=[h[:rows] for h in storage.hidden] if storage.hidden else None,
-            table_idx=torch.zeros(bs, dtype=torch.int32, device=device),
-            fla_cu_seqlens=torch.arange(
-                0, (bs + 1) * verify_len, verify_len, dtype=torch.int32, device=device),
-            fla_has_initial_state=torch.ones(bs, dtype=torch.bool, device=device),
-            dflash_shape=(bs, verify_len),
-        )
-        if storage.conv is not None:
-            layers, conv_dim, km1, num_v = storage.gdn_dims
-            conv_shape = (rows, layers, conv_dim, km1)
-            mixed_shape = (layers, rows, conv_dim)
-            ab_shape = (layers, 2, rows, num_v)
-            buffer.dflash_conv_states = storage.conv[: math.prod(conv_shape)].view(conv_shape)
-            n_mixed = math.prod(mixed_shape)
-            buffer.dflash_gdn_mixed = storage.inputs[:n_mixed].view(mixed_shape)
-            buffer.dflash_gdn_ab = storage.inputs[n_mixed : n_mixed + math.prod(ab_shape)].view(ab_shape)
-        return buffer
 
     def set_batch(self, batch: Batch) -> None:
         bs = batch.padded_size
@@ -133,67 +61,6 @@ class GraphCaptureBuffer:
         self.positions[_rows] = batch.positions
         if self.mrope_positions is not None:
             self.mrope_positions[:, _rows] = batch.mrope_positions
-
-    def copy_dflash_verify_from(self, batch: Batch) -> None:
-        bs, verify_len = self.dflash_shape
-        rows = bs * verify_len
-        self.input_ids[:rows] = batch.input_ids[:rows]
-        if batch.out_loc is not None:
-            self.out_loc[:rows] = batch.out_loc[:rows]
-        self.positions[:rows] = batch.positions[:rows]
-        from freetoken.attention.linear import gdn_slot
-
-        slots = torch.tensor([gdn_slot(r) for r in batch.reqs[:bs]], dtype=torch.int32, pin_memory=True)
-        self.table_idx[:bs].copy_(slots, non_blocking=True)
-
-    def set_dflash_target_verify_batch(self, batch: Batch, *, return_linear_snapshots: bool = False) -> None:
-        from freetoken.attention.linear import FLAMetadata
-
-        bs, verify_len = self.dflash_shape
-        rows = bs * verify_len
-        batch.input_ids = self.input_ids[:rows]
-        batch.out_loc = self.out_loc[:rows]
-        batch.positions = self.positions[:rows]
-        linear = return_linear_snapshots
-        if linear and self.dflash_conv_states is None:
-            raise RuntimeError("DFlash target verify graph requires linear snapshot buffers")
-        batch.fla_metadata = FLAMetadata(
-            cu_seqlens=self.fla_cu_seqlens[: bs + 1],
-            cache_indices=self.table_idx[:bs],
-            has_initial_state=self.fla_has_initial_state[:bs],
-            dflash_disable_state_update=linear,
-            dflash_conv_states_buffer=self.dflash_conv_states if linear else None,
-            dflash_gdn_mixed=self.dflash_gdn_mixed if linear else None,
-            dflash_gdn_ab=self.dflash_gdn_ab if linear else None,
-        )
-
-
-@dataclass
-class DFlashVerifyStorage:
-    """Flat storage the verify graphs' large buffers view (see init_dflash_verify)."""
-
-    logits: torch.Tensor                 # [rows, vocab] fp32
-    hidden: list[torch.Tensor]           # per returned target layer: [rows, hidden]
-    conv: torch.Tensor | None = None     # GDN: per-token conv states
-    inputs: torch.Tensor | None = None   # GDN: per-token q/k/v + a/b gates
-    gdn_dims: tuple[int, int, int, int] = (0, 0, 0, 0)  # layers, conv_dim, kernel-1, value heads
-
-    @classmethod
-    def alloc(cls, rows, vocab_size, device, *, hidden_size, hidden_dtype, num_hidden_layers,
-              linear_state_pool=None) -> DFlashVerifyStorage:
-        storage = cls(
-            logits=torch.empty(rows, vocab_size, dtype=torch.float32, device=device),
-            hidden=[torch.empty(rows, hidden_size, dtype=hidden_dtype, device=device)
-                    for _ in range(num_hidden_layers)],
-        )
-        if linear_state_pool is not None:
-            conv, rec = linear_state_pool.conv_states, linear_state_pool.recurrent_states
-            layers, conv_dim, km1, num_v = conv.shape[0], conv.shape[2], conv.shape[3], rec.shape[2]
-            storage.conv = torch.empty(rows * conv[:, 0].numel(), dtype=conv.dtype, device=device)
-            storage.inputs = torch.empty(
-                rows * layers * (conv_dim + 2 * num_v), dtype=hidden_dtype, device=device)
-            storage.gdn_dims = (layers, conv_dim, km1, num_v)
-        return storage
 
 
 def _determine_cuda_graph_bs(
@@ -222,32 +89,6 @@ def _determine_cuda_graph_bs(
 
 def get_free_memory(device: torch.device) -> int:
     return torch.cuda.mem_get_info(device)[0]
-
-
-def _dflash_target_verify_lens_within_budget(
-    lens: List[int],
-    linear_state_pool,
-    budget_bytes: int,
-    hidden_dtype: torch.dtype = torch.bfloat16,
-) -> List[int]:
-    """Keep the verify lens whose GDN commit buffers fit in ``budget_bytes``. All target-verify
-    graphs share one buffer sized for the longest kept len (the graphs never run at once). A
-    dropped len falls back to decode-loop verify at runtime, so this is a pure
-    performance/robustness gate."""
-    if linear_state_pool is None:
-        return list(lens)
-    per_token_bytes = dflash_verify_bytes_per_token(linear_state_pool, hidden_dtype)
-    return [n for n in sorted(lens) if n * per_token_bytes <= budget_bytes]
-
-
-def dflash_verify_bytes_per_token(linear_state_pool, hidden_dtype: torch.dtype) -> int:
-    """Bytes a verified token keeps for the GDN commit: per linear layer, the conv state after
-    it, its post-conv q/k/v and its a/b gates (the commit replays the recurrence from them)."""
-    conv = linear_state_pool.conv_states        # [layers, slots, conv_dim, K-1]
-    rec = linear_state_pool.recurrent_states    # [layers, slots, heads, K, V]
-    layers, conv_dim, num_v = conv.shape[0], conv.shape[2], rec.shape[2]
-    elem = torch.empty((), dtype=hidden_dtype).element_size()
-    return conv[:, 0].numel() * conv.element_size() + layers * (conv_dim + 2 * num_v) * elem
 
 
 @functools.cache
@@ -298,12 +139,6 @@ class GraphRunner:
         pool: Any = None,
         out_dtype: torch.dtype | None = None,
         linear_backend: LinearAttnBackend | None = None,
-        model: BaseLLMModel | None = None,
-        hidden_layer_ids: set[int] | None = None,
-        hidden_size: int | None = None,
-        hidden_dtype: torch.dtype | None = None,
-        dflash_target_verify_lens: list[int] | None = None,
-        dflash_verify_batch_sizes: list[int] | None = None,
     ) -> None:
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
@@ -331,25 +166,6 @@ class GraphRunner:
         self._out: List[torch.Tensor] | None = None
         self._out_is_tuple = False
         self._out_rows: Dict[int, tuple[int, ...]] = {}
-        # DFlash: the decode graphs also return these target layers' hidden states, and the
-        # target-verify graphs run model.model + lm_head over every verify row
-        self.model = model
-        self.hidden_layer_ids = set(hidden_layer_ids or [])
-        self.hidden_size = hidden_size
-        self.hidden_dtype = hidden_dtype
-        if self.hidden_layer_ids:
-            plain_forward, ids = forward, self.hidden_layer_ids
-
-            def forward():
-                logits, hidden_states = plain_forward(return_hidden_layers=ids)
-                return (logits, *hidden_states)
-
-            self.forward = forward
-        self.dflash_target_verify_lens = sorted(set(dflash_target_verify_lens or []))
-        self.dflash_verify_batch_sizes = sorted(set(dflash_verify_batch_sizes or []))
-        # verify len -> plain decode time / verify time, for the adaptive gate's baseline
-        self.dflash_plain_over_verify: Dict[int, float] = {}
-        self._plain_decode_ms: float | None = None
         self._capture_graphs(max_seq_len)
 
     def _reset_moe_offload_cache(self) -> None:
@@ -361,9 +177,8 @@ class GraphRunner:
         outs = out if self._out_is_tuple else (out,)
         if self._out is None:
             # the largest batch is captured first, so its outputs size the buffers
-            # out_dtype applies to the first output (logits); DFlash hidden states keep theirs
-            assert self.out_dtype is None or len(outs) == 1 or self.hidden_layer_ids, "out_dtype applies to a single output"
-            self._out = [torch.empty_like(o, dtype=(self.out_dtype if i == 0 else None) or o.dtype) for i, o in enumerate(outs)]
+            assert self.out_dtype is None or len(outs) == 1, "out_dtype applies to a single output"
+            self._out = [torch.empty_like(o, dtype=self.out_dtype or o.dtype) for o in outs]
         for buf, o in zip(self._out, outs, strict=True):
             buf[: o.shape[0]] = o
         self._out_rows[bs] = tuple(o.shape[0] for o in outs)
@@ -376,8 +191,6 @@ class GraphRunner:
         # graphs-disabled early return so that config gets the phase too.
         emit_progress("Capturing CUDA graphs / warming up", 0, 0)
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
-        self.dflash_target_verify_graph_map: Dict[tuple[int, int], torch.cuda.CUDAGraph] = {}
-        self.dflash_target_verify_buffers: Dict[tuple[int, int], GraphCaptureBuffer] = {}
         if self.max_graph_bs == 0:
             return logger.info_rank0("CUDA graph is disabled.")
 
@@ -434,119 +247,6 @@ class GraphRunner:
         self._reset_moe_offload_cache()
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory after capturing CUDA graphs: {mem_GB(free_memory)}")
-        if self.dflash_target_verify_lens and 1 in self.graph_map:
-            # timed now, while the decode buffers still hold the bs=1 capture inputs
-            self._plain_decode_ms = self._time_replay(self.graph_map[1])
-        self._capture_dflash_target_verify_graphs(max_seq_len, pool)
-
-    def _capture_dflash_target_verify_graphs(self, max_seq_len: int, pool) -> None:
-        if not self.dflash_target_verify_lens:
-            return
-        assert self.model is not None, "DFlash target verify graphs need the model"
-        model = self.model
-        vocab_size = self._out[0].shape[-1]  # the decode graphs' logits
-        init_verify = getattr(self.attn_backend, "init_dflash_target_verify_capture_graph", None)
-        prepare_capture = getattr(self.attn_backend, "prepare_for_dflash_target_verify_capture", None)
-        if init_verify is None or prepare_capture is None:
-            logger.warning_rank0("DFlash target verify CUDA graph is disabled for this attention backend.")
-            self.dflash_target_verify_lens = []
-            return
-        # one request at every verify len; batches of requests at the full block
-        block = max(self.dflash_target_verify_lens)
-        max_bs = getattr(self.attn_backend, "dflash_verify_max_bs", 1)
-        shapes = [(1, n) for n in self.dflash_target_verify_lens] + [
-            (b, block) for b in self.dflash_verify_batch_sizes if 1 < b <= max_bs
-        ]
-        linear_state_pool = get_global_ctx().linear_state_pool
-        if linear_state_pool is not None:
-            # the engine released the draft worker's reservation for this buffer just before
-            budget = int(get_free_memory(self.device) * 0.9)
-            per_row = dflash_verify_bytes_per_token(linear_state_pool, self.hidden_dtype)
-            kept = [(b, n) for b, n in shapes if b * n * per_row <= budget]
-            if len(kept) < len(shapes):
-                logger.warning_rank0(
-                    f"DFlash target verify graphs limited to {kept or '[]'} (commit buffer memory "
-                    "budget); other verifies fall back to the decode-loop verify."
-                )
-            shapes = kept
-        self.dflash_target_verify_lens = [n for b, n in shapes if b == 1]
-        if not shapes:
-            return
-        storage = DFlashVerifyStorage.alloc(
-            max(b * n for b, n in shapes), vocab_size, self.device,
-            hidden_size=self.hidden_size, hidden_dtype=self.hidden_dtype,
-            num_hidden_layers=len(self.hidden_layer_ids), linear_state_pool=linear_state_pool,
-        )
-        init_verify(max_seq_len=max_seq_len, shapes=shapes)
-        dummy_slot = (self.dummy_req.linear_slot_idx
-                      if self.dummy_req.linear_slot_idx is not None
-                      else self.dummy_req.table_idx)
-        for bs, verify_len in shapes:
-            graph = torch.cuda.CUDAGraph()
-            buffer = GraphCaptureBuffer.init_dflash_verify(bs, verify_len, self.device, storage)
-            batch = Batch(reqs=[self.dummy_req] * bs, phase="decode")
-            batch.padded_reqs = batch.reqs
-            prepare_capture(batch, verify_len)
-            buffer.set_dflash_target_verify_batch(
-                batch, return_linear_snapshots=linear_state_pool is not None
-            )
-            buffer.positions.copy_(
-                torch.arange(verify_len, dtype=torch.int32, device=self.device).repeat(bs))
-            buffer.table_idx.fill_(dummy_slot)
-            rows = bs * verify_len
-            with get_global_ctx().forward_batch(batch):
-                self._run_dflash_target_verify_into_buffer(model, rows, buffer)
-                with torch.cuda.graph(graph, pool=pool, stream=self.stream):
-                    self._run_dflash_target_verify_into_buffer(model, rows, buffer)
-                _upload_graph(graph, self.stream)
-                self._reset_moe_offload_cache()
-            self.dflash_target_verify_graph_map[bs, verify_len] = graph
-            self.dflash_target_verify_buffers[bs, verify_len] = buffer
-            if bs == 1 and self._plain_decode_ms is not None:
-                verify_ms = self._time_replay(graph)
-                if verify_ms > 0:
-                    self.dflash_plain_over_verify[verify_len] = self._plain_decode_ms / verify_ms
-
-        logger.info_rank0(f"DFlash target verify graphs captured for (requests, len) {shapes}")
-        if self.dflash_plain_over_verify:
-            ratios = ", ".join(f"{n}: {r:.2f}" for n, r in self.dflash_plain_over_verify.items())
-            logger.info_rank0(
-                f"DFlash plain decode {self._plain_decode_ms:.2f} ms; plain/verify ratio by len {{{ratios}}}"
-            )
-
-    def _time_replay(self, graph: torch.cuda.CUDAGraph, iters: int = 10) -> float:
-        """Median ms of a captured graph replayed on its own (dummy) capture inputs."""
-        graph.replay()  # warm
-        times = []
-        for _ in range(iters):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record(self.stream)
-            graph.replay()
-            end.record(self.stream)
-            end.synchronize()
-            times.append(start.elapsed_time(end))
-        self._reset_moe_offload_cache()
-        return sorted(times)[len(times) // 2]
-
-    def _run_dflash_target_verify_into_buffer(
-        self,
-        model: BaseLLMModel,
-        bs: int,
-        buffer: GraphCaptureBuffer,
-        offset: int = 0,
-    ) -> None:
-        hidden, hidden_states = model.model.forward(
-            get_global_ctx().batch.input_ids,
-            return_hidden_layers=self.hidden_layer_ids,
-        )
-        logits = project_lm_head_all_positions(model.lm_head, hidden)
-        buffer.logits[offset : offset + bs].copy_(logits[:bs])
-        if buffer.hidden_states is None:
-            return
-        assert len(hidden_states) == len(buffer.hidden_states)
-        for dst, src in zip(buffer.hidden_states, hidden_states):
-            dst[offset : offset + bs].copy_(src[:bs])
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
         return (
@@ -555,64 +255,8 @@ class GraphRunner:
             and batch.size <= self.max_graph_bs
         )
 
-    def can_return_hidden_layers(self, hidden_layer_ids: set[int] | None) -> bool:
-        return set(hidden_layer_ids or []) == self.hidden_layer_ids
-
-    def can_use_dflash_target_verify_graph(self, batch: Batch, verify_len: int) -> bool:
-        return (
-            batch.padded_size == batch.size
-            and batch.input_ids.numel() == batch.size * verify_len
-            and (batch.size, verify_len) in self.dflash_target_verify_graph_map
-        )
-
-    def replay_dflash_target_verify(
-        self,
-        batch: Batch,
-        verify_len: int,
-        *,
-        return_hidden_layers: set[int] | None = None,
-        return_linear_snapshots: bool = False,
-    ):
-        """Verify ``batch.size`` requests of ``verify_len`` tokens each. Returns the logits
-        [rows, vocab], then the hidden states (when asked) and the GDN commit inputs (when
-        asked): per-token conv states, post-conv q/k/v and a/b gates."""
-        assert self.can_use_dflash_target_verify_graph(batch, verify_len)
-        wants_hidden = bool(return_hidden_layers)
-        assert not wants_hidden or self.can_return_hidden_layers(return_hidden_layers)
-        key = (batch.size, verify_len)
-        buffer = self.dflash_target_verify_buffers[key]
-        assert not wants_hidden or buffer.hidden_states is not None
-        assert not return_linear_snapshots or buffer.dflash_conv_states is not None
-        original_phase = batch.phase
-        batch.phase = "decode"
-        try:
-            buffer.copy_dflash_verify_from(batch)
-            buffer.set_dflash_target_verify_batch(batch, return_linear_snapshots=return_linear_snapshots)
-            self.attn_backend.prepare_for_dflash_target_verify_replay(batch, verify_len)
-            self.dflash_target_verify_graph_map[key].replay()
-        finally:
-            batch.phase = original_phase
-        rows = batch.size * verify_len
-        out = [buffer.logits[:rows]]
-        if wants_hidden:
-            out.append([h[:rows] for h in buffer.hidden_states])
-        if return_linear_snapshots:
-            out.append((
-                buffer.dflash_conv_states[:rows],
-                buffer.dflash_gdn_mixed[:, :rows],
-                buffer.dflash_gdn_ab[:, :, :rows],
-            ))
-        return out[0] if len(out) == 1 else tuple(out)
-
-    def replay(
-        self,
-        batch: Batch,
-        *,
-        return_hidden_layers: set[int] | None = None,
-    ) -> Any:
+    def replay(self, batch: Batch) -> Any:
         assert self.can_use_cuda_graph(batch) and self._out is not None
-        wants_hidden = bool(return_hidden_layers)
-        assert not wants_hidden or self.can_return_hidden_layers(return_hidden_layers)
         self.buffer.copy_from(batch)
         padded = batch.padded_size
         g = self.graph_map[padded]
@@ -623,9 +267,6 @@ class GraphRunner:
         outs = tuple(
             buf[: rows // padded * batch.size] for buf, rows in zip(self._out, self._out_rows[padded], strict=True)
         )
-        if self.hidden_layer_ids:
-            # the forward returned (logits, *hidden states); hand the hidden states out only when asked
-            return (outs[0], list(outs[1:])) if wants_hidden else outs[0]
         return outs if self._out_is_tuple else outs[0]
 
     def pad_batch(self, batch: Batch) -> None:
@@ -644,8 +285,6 @@ class GraphRunner:
         # free-before-alloc cannot reclaim this GPU memory. empty_cache() is left to the
         # caller / next capture (GraphRunner._capture_graphs already runs it).
         self.graph_map = {}
-        self.dflash_target_verify_graph_map = {}
-        self.dflash_target_verify_buffers = {}
         self.buffer = None
         self._out = None
         gc.collect()

@@ -1217,25 +1217,6 @@ def parse_args(
         ),
     )
 
-    # speculative decoding
-    parser.add_argument(
-        "--speculative-algorithm",
-        "--spec-algo",
-        type=str,
-        default=ServerArgs.speculative_algorithm,
-        help=(
-            "Speculative decoding with this draft method (mtp: the checkpoint's own MTP layers; dflash: a DFlash 2 draft "
-            "checkpoint from --speculative-draft-model-path). Off by default."
-        ),
-    )
-    parser.add_argument(
-        "--speculative-draft-model-path",
-        "--spec-draft-model",
-        type=str,
-        default=ServerArgs.speculative_draft_model_path,
-        help="Draft weights; by default they come from the target checkpoint. Required for dflash, which reads a separate draft checkpoint.",
-    )
-
     parser.add_argument(
         "--enable-special-token-ckpt",
         action="store_true",
@@ -1284,11 +1265,30 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative-algorithm",
+        "--spec-algo",
+        type=str,
+        default=ServerArgs.speculative_algorithm,
+        help=(
+            "Speculative decoding with this draft method (mtp: the checkpoint's own MTP layers; dflash: a DFlash 2 draft "
+            "checkpoint from --speculative-draft-model-path). Off by default."
+        ),
+    )
+
+    parser.add_argument(
         "--speculative-num-steps",
         "--spec-num-steps",
         type=int,
         default=ServerArgs.speculative_num_steps,
         help="Draft tokens per decode step (k); 0 takes the method's default.",
+    )
+
+    parser.add_argument(
+        "--speculative-draft-model-path",
+        "--spec-draft-model",
+        type=str,
+        default=ServerArgs.speculative_draft_model_path,
+        help="Draft weights; by default they come from the target checkpoint. Required for dflash, which reads a separate draft checkpoint.",
     )
 
     parser.add_argument(

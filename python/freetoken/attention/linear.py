@@ -53,15 +53,6 @@ class FLAMetadata:
     track_conv_src: torch.Tensor | None = None   # [nt, kernel-1] int64 conv-input token positions
     track_boundary_row: torch.Tensor | None = None  # [nt] int64 forward-local row of the track boundary; states with their own left context (qwen4_exp PLE) derive their windows from it
 
-    # DFlash verify: a multi-token decode-shaped forward that leaves the live slot untouched.
-    # GDN stores the conv state after each token, and the recurrence inputs (post-conv q/k/v
-    # and the raw a/b gates); the commit replays the recurrence over the accepted tokens
-    # (GatedDeltaNet.dflash_commit) instead of keeping one full state per token.
-    dflash_disable_state_update: bool = False
-    dflash_conv_states_buffer: torch.Tensor | None = None  # [T, layers, conv_dim, K-1]
-    dflash_gdn_mixed: torch.Tensor | None = None           # [layers, T, conv_dim]
-    dflash_gdn_ab: torch.Tensor | None = None              # [layers, 2, T, num_v_heads]
-
 
 def gdn_slot(req) -> int:
     """The request's GDN state slot: its hybrid-radix live slot (decoupled from table_idx) when allocated, else table_idx (naive GDN keeps the old keying)."""
