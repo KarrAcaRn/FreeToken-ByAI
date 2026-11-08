@@ -129,6 +129,26 @@ group = "MoE"
 path = "models--RedHatAI--Qwen3.6-35B-A3B-NVFP4/snapshots/*"
 flags = "--kv-cache-dtype fp8 --text-model-only --speculative-algorithm dflash --speculative-draft-model-path /mnt/cephfs_Buero/ki_modelle/huggingface/hub/models--incoai--Qwen3.6-35B-A3B-DFlash2/snapshots/51ef7b6923ad6c14cb1bb41c37a9041446496ab6"
 
+[ornith-1_5-35b-a3b]
+# Qwen3.5-MoE fine-tune (Qwen3_5MoeForConditionalGeneration), same setup as qwen3_6-35b-a3b;
+# echt page: model card "general tasks" 0.6 / top_p 0.95 / top_k 20 (generation_config's 1.0 is the card's
+# benchmark-reproduction setting)
+sampling = { temperature = 0.6, top_p = 0.95, top_k = 20 }
+label = "Ornith 1.5 35B-A3B (NVFP4)"
+group = "MoE"
+path = "models--ornith-ai--Ornith-1.5-35B-A3B-NVFP4/snapshots/*"
+flags = "--kv-cache-dtype fp8 --text-model-only"
+
+[ornith-1_5-35b-a3b-dflash]
+# upstream DFlash 2 (#857) with felkhayer's DFlash2-Splash draft (block 8, window 2048); the official
+# ornith-ai draft is DFlash v1 (refused), jzinno's DFlash2 measured slower (code 264 / math 178 / prose 128 tok/s
+# vs Splash 286 / 213 / 186, plain 182 / 166 / 212 on next-speed, 2026-11-08)
+sampling = { temperature = 0.6, top_p = 0.95, top_k = 20 }
+label = "Ornith 1.5 35B-A3B (NVFP4 + DFlash)"
+group = "MoE"
+path = "models--ornith-ai--Ornith-1.5-35B-A3B-NVFP4/snapshots/*"
+flags = "--kv-cache-dtype fp8 --text-model-only --speculative-algorithm dflash --speculative-draft-model-path /home/basti/.cache/huggingface/hub/models--felkhayer--Ornith-1.5-35B-A3B-DFlash2-Splash/snapshots/b0f00b837e77562540706470263a5517d8314fb6"
+
 [muse-glimmer-30b]
 label = "Muse Glimmer 30B (NVFP4)"
 group = "Groß (dicht)"
