@@ -123,10 +123,11 @@ path = "models--RedHatAI--Qwen3.6-35B-A3B-NVFP4/snapshots/*"
 flags = "--kv-cache-dtype fp8 --text-model-only"
 
 [qwen3_6-35b-a3b-dflash]
+# since 2026-11-08 upstream DFlash 2 (#857) with the incoai draft; older results came from the fork DFlash (z-lab v1 draft, fp8)
 label = "Qwen3.6 35B-A3B (NVFP4 + DFlash)"
 group = "MoE"
 path = "models--RedHatAI--Qwen3.6-35B-A3B-NVFP4/snapshots/*"
-flags = "--kv-cache-dtype fp8 --text-model-only --speculative-algorithm dflash --speculative-draft-model-path /home/basti/.cache/huggingface/hub/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd --speculative-draft-quant fp8"
+flags = "--kv-cache-dtype fp8 --text-model-only --speculative-algorithm dflash --speculative-draft-model-path /mnt/cephfs_Buero/ki_modelle/huggingface/hub/models--incoai--Qwen3.6-35B-A3B-DFlash2/snapshots/51ef7b6923ad6c14cb1bb41c37a9041446496ab6"
 
 [muse-glimmer-30b]
 label = "Muse Glimmer 30B (NVFP4)"
@@ -146,8 +147,9 @@ reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphase
 label = "Qwen3.8 27B (NVFP4 + DFlash, Denken medium)"
 group = "Groß (dicht)"
 path = "models--RadixArk--Qwen3.8-27B-NVFP4/snapshots/*"
+# since 2026-11-08 upstream DFlash 2 (#857, bf16 draft, no fp8 option); older results came from the fork DFlash (fp8 draft)
 # Draft-Modell braucht VRAM: nur mit nvfp4-KV, 1 Anfrage, kleinen Prefill-Blöcken ~81k Kontext (Prognose)
-flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.97 --embed-weights host --max-running-requests 1 --max-prefill-length 2048 --cuda-graph-max-bs 1 --speculative-algorithm dflash --speculative-draft-model-path /home/basti/.cache/huggingface/hub/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4 --speculative-draft-quant fp8"
+flags = "--kv-cache-dtype nvfp4 --text-model-only --memory-ratio 0.97 --embed-weights host --max-running-requests 1 --max-prefill-length 2048 --cuda-graph-max-bs 1 --speculative-algorithm dflash --speculative-draft-model-path /mnt/cephfs_Buero/ki_modelle/huggingface/hub/models--incoai--Qwen3.8-27B-DFlash2/snapshots/015e795645c74b1a0eeef3b570031fb62e769bc5"
 reasoning_effort = "medium"  # Template-Standard ist xhigh (sehr lange Denkphasen); low / medium / xhigh
 
 [glm4_5-air]
