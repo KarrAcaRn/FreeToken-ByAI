@@ -221,7 +221,7 @@ def _gemm(a: torch.Tensor, weight: torch.Tensor, weight_scale: torch.Tensor,
     out = torch.empty((M, N), dtype=compute, device=a.device)
     if M <= 32:
         # Weight streaming: narrow N tiles give enough programs to fill the SMs and a deep K
-        # tile keeps each one fed -- 400 -> 870-890 GB/s at M=8 on sm_89 (DFlash draft blocks).
+        # tile keeps each one fed -- 400 -> 870-890 GB/s at M=8 on sm_89 (speculative draft blocks).
         BLOCK_M = 16 if M <= 16 else 32
         BLOCK_N, BLOCK_K = (16 if N <= 2048 else 32), 256
     else:
@@ -279,7 +279,7 @@ def _static_quant(a: torch.Tensor, input_scale: torch.Tensor) -> torch.Tensor:
     return out
 
 
-# Small-M W8A8 (decode, DFlash verify): the activation is quantized in-kernel with
+# Small-M W8A8 (decode, speculative verify): the activation is quantized in-kernel with
 # _static_quant's exact rounding, and both e4m3 operands widen to bf16 losslessly, so the
 # products are exact and only the fp32 accumulation order differs from cuBLAS. One launch
 # covers every fused part (the per-row scale carries each part's scalar) and the activation

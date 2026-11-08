@@ -350,7 +350,8 @@
       "pi agent <pi@local>"
     ],
     "summary": "Adds opt-in NVMe disk tier (--moe-disk-tier) so expert banks larger than host RAM can run",
-    "fixup": "Windows mmap flags, empty-bank pin_prefix, and a stale family test fixed"
+    "fixup": "Windows mmap flags, empty-bank pin_prefix, and a stale family test fixed",
+    "upstream": "closed"
   },
   "563": {
     "number": 563,
@@ -1815,8 +1816,8 @@
     "title": "feat(dflash): support dflash",
     "head_sha": "9f0a136bdbf2",
     "reviewed_at": "2026-10-04",
-    "decision": "adopted-with-fixups",
-    "reason": "Speculative decoding with a DFlash block-diffusion draft. Rebased onto main and extended: the drafts that exist for our 27B are DFlash2 (dynamic convolutions + candidate selector, added after the z-lab reference), and as written the PR gave no speedup on an RTX 4090: verify graphs existed only for the FA3 backend (sm90), the GDN verify states (144 MiB each on the 27B) ran out of memory, the draft was loaded after the KV pool, every request leaked its KV pages (the integrity check had been switched off for it), each cycle ran two target forwards, and the PR forced the naive cache. With our work: Qwen3.8-27B-NVFP4 + z-lab/Qwen3.8-27B-DFlash2 decodes 190-200 tok/s on code/math and ~115 on prose vs 45, greedy output equal up to bf16 ties; prefix reuse stays on (a windowed draft context carried over between chat turns); the GDN commit replays the recurrence instead of storing a state per token, so the context is 64k tokens (naive cache) or 32k (radix) instead of 27k; logprobs per emitted token. On the Qwen3.6 MoE with expert offload the verify graphs now run too: code/math decode ~290-300 tok/s vs 140-150. The adaptive gate times real plain decode steps and switches speculation off per request where the draft loses (German prose here). Several decoding requests speculate together (batched draft and one batched verify graph): four concurrent prompts on the 27B decode ~240 tok/s in total instead of ~123 one at a time; an offloaded MoE keeps one request per verify, where batching would stream more experts.",
+    "decision": "superseded by #857",
+    "reason": "Upstream merged its own DFlash 2 (#857, spec/dflash on the SpecRunner) on 2026-11-07; the user chose it over this adaptation, which next dropped in the 2026-11-08 sync (with --speculative-dflash-block-size, --speculative-draft-quant, --disable-speculative-adaptive, DFlash v1 drafts and next-speed's DSpark drafter). A/B on the RTX 4090, Qwen3.6-35B-A3B NVFP4, fp8 KV, greedy, 512 tokens: ours (z-lab DFlash v1 draft, fp8) code 200 / math 156 / prose 142 tok/s, upstream (incoai/Qwen3.6-35B-A3B-DFlash2, bf16) 287 / 223 / 152, plain 144 /134 / 155; code and math text identical to plain. Earlier notes on this adaptation: Speculative decoding with a DFlash block-diffusion draft. Rebased onto main and extended: the drafts that exist for our 27B are DFlash2 (dynamic convolutions + candidate selector, added after the z-lab reference), and as written the PR gave no speedup on an RTX 4090: verify graphs existed only for the FA3 backend (sm90), the GDN verify states (144 MiB each on the 27B) ran out of memory, the draft was loaded after the KV pool, every request leaked its KV pages (the integrity check had been switched off for it), each cycle ran two target forwards, and the PR forced the naive cache. With our work: Qwen3.8-27B-NVFP4 + z-lab/Qwen3.8-27B-DFlash2 decodes 190-200 tok/s on code/math and ~115 on prose vs 45, greedy output equal up to bf16 ties; prefix reuse stays on (a windowed draft context carried over between chat turns); the GDN commit replays the recurrence instead of storing a state per token, so the context is 64k tokens (naive cache) or 32k (radix) instead of 27k; logprobs per emitted token. On the Qwen3.6 MoE with expert offload the verify graphs now run too: code/math decode ~290-300 tok/s vs 140-150. The adaptive gate times real plain decode steps and switches speculation off per request where the draft loses (German prose here). Several decoding requests speculate together (batched draft and one batched verify graph): four concurrent prompts on the 27B decode ~240 tok/s in total instead of ~123 one at a time; an offloaded MoE keeps one request per verify, where batching would stream more experts.",
     "commits": [
       "b68f10d",
       "99a2093",
@@ -1848,7 +1849,8 @@
       "Lancer <maruixiang6688@gmail.com>"
     ],
     "summary": "Speculative decoding with DFlash drafts; with our DFlash2 support and fixes the 27B decodes 2.5-4.4x faster (and batches concurrent requests), the offloaded Qwen3.6 MoE ~2x on code and math",
-    "fixup": "DFlash2 drafts and an fp8 draft option; triton and FlashInfer verify graphs (fp8 and bf16 KV); the per-request KV page leak fixed and the integrity check back on; one target forward per cycle instead of two; prefix reuse with a windowed draft context; the GDN commit replays the recurrence (no per-token verify states); verify graphs for an offloaded MoE; a gate that measures plain decode; logprobs on multi-token steps; ft info prices draft, context and verify buffers; batched speculation for several decoding requests"
+    "fixup": "DFlash2 drafts and an fp8 draft option; triton and FlashInfer verify graphs (fp8 and bf16 KV); the per-request KV page leak fixed and the integrity check back on; one target forward per cycle instead of two; prefix reuse with a windowed draft context; the GDN commit replays the recurrence (no per-token verify states); verify graphs for an offloaded MoE; a gate that measures plain decode; logprobs on multi-token steps; ft info prices draft, context and verify buffers; batched speculation for several decoding requests",
+    "superseded_at": "2026-11-08"
   },
   "254": {
     "number": 254,
@@ -3820,7 +3822,8 @@
     "reason": "next already clips max_tokens on a dataclasses.replace copy via #788 (7602430); this PR is the same fix.",
     "summary": "Already covered by #788, which clips max_tokens on a copy of shared SamplingParams",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "closed"
   },
   "850": {
     "number": 850,
@@ -3843,7 +3846,8 @@
     "commits": [
       "c57c547"
     ],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "merged"
   },
   "845": {
     "number": 845,

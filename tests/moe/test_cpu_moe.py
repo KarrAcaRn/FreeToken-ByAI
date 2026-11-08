@@ -1039,8 +1039,8 @@ def test_cpu_moe_executor_is_collectable():
 
 
 def test_cpu_moe_rejects_batch_above_max_tokens():
-    """A batch wider than max_tokens (e.g. a DFlash verify on an executor sized for one
-    row per request) must raise instead of overrunning the C++ scratch buffers."""
+    """A batch wider than max_tokens (e.g. a verify on an executor sized for one row per
+    request) must raise instead of overrunning the C++ scratch buffers."""
     from freetoken.moe.cpu_executor import CpuMoeExecutor
 
     dev = torch.device("cuda")

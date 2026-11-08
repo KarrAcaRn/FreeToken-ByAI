@@ -364,19 +364,12 @@ class CacheManager:
         if self.swa_pool is not None and len(indices) > 0:
             self.swa_pool.free_swa(indices)
 
-    def allocate_paged(self, reqs: List[Req], *, ahead: int = 0) -> None:
-        """Allocate KV pages through each request's device_len, or ``ahead`` tokens past it
-        (DFlash verify blocks). Allocating ahead records ``req.paged_len``, so the next call
-        starts after pages already held and a finish frees them (``_padded_tail``)."""
+    def allocate_paged(self, reqs: List[Req]) -> None:
         needed_pages = 0
         allocation_info: List[Tuple[int, int, int]] = []
         for req in reqs:
-            start = max(req.cached_len, req.paged_len) if ahead else req.cached_len
-            end = req.device_len + ahead
-            if ahead:
-                req.paged_len = max(req.paged_len, end)
-            first_page = div_ceil(start, self.page_size)
-            last_page = div_ceil(end, self.page_size)
+            first_page = div_ceil(req.cached_len, self.page_size)
+            last_page = div_ceil(req.device_len, self.page_size)
             if last_page > first_page:
                 needed_pages += last_page - first_page
                 allocation_info.append((req.table_idx, first_page, last_page))
@@ -482,13 +475,8 @@ class CacheManager:
             # remain as reuse points).
             insert_len = align_down(req.cached_len, self.page_size)
             keep_live = False
-            # DFlash verify pages held past cached_len belong to the request alone
-            self._free(self._ahead_tail(req))
             keys = self._keys(req.input_ids, insert_len)
-            if (
-                insert_len == req.cached_len and insert_len > 0 and len(keys) == insert_len
-                and not req.linear_state_ahead
-            ):
+            if insert_len == req.cached_len and insert_len > 0 and len(keys) == insert_len:
                 prefix_len, mamba_exist = self.prefix_cache.insert(
                     keys, page_indices[:insert_len], req.linear_slot_idx, host_freed)
                 self.unlock(old_handle)
@@ -630,14 +618,8 @@ class CacheManager:
         swa_paged, charges swa for) whole pages, so the padding [cached_len, page_ceil) belongs
         to the finishing request. ``start`` is page-aligned (a match/insert boundary), so the
         full-pool page bases derived via ``[::page_size]`` are identical to the unpadded slice."""
-        end = div_ceil(max(req.cached_len, req.paged_len), self.page_size) * self.page_size
+        end = div_ceil(req.cached_len, self.page_size) * self.page_size
         return self.page_table[req.table_idx, start:end]
-
-    def _ahead_tail(self, req: Req) -> torch.Tensor:
-        """The pages a DFlash request allocated past page_ceil(cached_len) for its verify blocks."""
-        start = div_ceil(req.cached_len, self.page_size) * self.page_size
-        end = div_ceil(max(req.cached_len, req.paged_len), self.page_size) * self.page_size
-        return self.page_table[req.table_idx, start:max(start, end)]
 
     def _free_req_slots(self, req: Req, keep_live: bool = False) -> None:
         """Return a finished request's GDN pool slots: both ping-pong slots, plus the live slot

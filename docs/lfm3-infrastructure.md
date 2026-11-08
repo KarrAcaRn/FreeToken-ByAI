@@ -30,8 +30,8 @@ This change prepares the engine for LFM3; it does not register or load the model
 - The model must pass `AttentionSpec(sliding_window=256)` only on its five sliding
   layers. The other six layers remain full attention. Triton applies the mask to
   the full indices when no separate SWA indices exist.
-- Speculation is rejected for short-conv groups before weights load, including
-  DFlash, which does not take the ordinary `spec_verify` validation path.
+- Speculation (MTP and DFlash 2) is rejected for short-conv groups before weights
+  load: short-conv state has no verify handler yet.
 - Host-bank byte reporting previously indexed a layer instead of a slot. It now
   reports all layers of one slot, matching device accounting. This corrects the
   startup memory log; it does not change GDN allocation or execution.

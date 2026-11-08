@@ -1496,7 +1496,7 @@ def test_triton_backend_prefixed_prefill_fast_path_matches_the_extend_kernel(mon
 @pytest.mark.parametrize("kv_quant", ["none", "fp8"])
 @pytest.mark.parametrize("q_len", [8, 16])
 def test_verify_paged_attention_matches_the_extend_kernel(kv_quant, q_len):
-    """DFlash verify blocks attend through split-k over the cache, one program per K/V slice
+    """Speculative verify blocks attend through split-k over the cache, one program per K/V slice
     for every (token, GQA head) row; the extend kernel reading the same cached rows is the
     reference (16 tokens x a group of 6 spans two row blocks)."""
     from freetoken.kernel.triton.attention import extend_paged_attention, verify_paged_attention

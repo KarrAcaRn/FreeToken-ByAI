@@ -150,14 +150,8 @@ def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dt
         dtype=dtype,
         num_req_slots=config.max_running_req + 1,  # + 1 for the dummy request row
         kv_quant=kv_quant,
-        num_speculative_tokens=_spec_tokens(config),
+        num_speculative_tokens=getattr(config, "decode_rows_per_req", 1) - 1,
     )
-
-
-def _spec_tokens(config) -> int:
-    from .qsa_pool import QSAKVCache
-
-    return QSAKVCache.spec_tokens_for(config)
 
 
 def create_kvcache_pool(
@@ -262,7 +256,6 @@ def create_kvcache_pool(
             num_index_layers=spec.num_index_layers,
             index_ratio=spec.index_ratio,
             num_req_slots=num_req_slots,
-            # a verify block keeps all its rows: the accepted ones are read back next forward
             ring_capacity=QSAKVCache.ring_capacity_for(spec.index_ratio, num_speculative_tokens),
             layer_ids=spec.layer_ids,
             mrope=model_config.model_is_mrope,

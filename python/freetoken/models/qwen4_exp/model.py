@@ -100,18 +100,13 @@ class Qwen4ExpDecoderLayer(BaseOP):
 
     @nvtx_annotate("Layer_{}", layer_id_field="_layer_id")
     def forward(
-        self, hidden: torch.Tensor, batch: Batch, normed: torch.Tensor | None = None,
-        taps: List[torch.Tensor] | None = None,
+        self, hidden: torch.Tensor, batch: Batch, normed: torch.Tensor | None = None
     ) -> Tuple[torch.Tensor, torch.Tensor | None]:
-        """``taps``: append this layer's attention block input, the previous layer's output
-        contracted to native width (the hidden state a DFlash drafter reads for it)."""
         if self.ple is not None:
             assert normed is None, "a PLE layer must norm R + ple(R) itself"
             hidden = hidden + self.ple.forward(hidden, batch)
         attn_hc, mlp_hc = self.attn_hyper_connection, self.mlp_hyper_connection
         block_input, inject = attn_hc.mix(hidden, normed)
-        if taps is not None:
-            taps.append(block_input)
         if self._is_linear:
             block_output = self.linear_attn.forward(block_input)
         else:
@@ -157,14 +152,7 @@ class Qwen4ExpModel(BaseOP):
         """The PLE layers in decoder order -- the seam the loader attaches table backends to."""
         return list(self._ple)
 
-    def forward(
-        self, input_ids: torch.Tensor, batch: Batch | None = None, *, return_hidden_layers: set[int] | None = None
-    ) -> torch.Tensor | Tuple[torch.Tensor, List[torch.Tensor]]:
-        """``return_hidden_layers``: also return the outputs of these layers, each contracted to
-        native width by the next mixer's gate (DFlash taps; the last layer's goes through the
-        final mixer)."""
-        if batch is None:
-            batch = get_global_ctx().batch
+    def forward(self, input_ids: torch.Tensor, batch: Batch) -> torch.Tensor:
         hidden = embed_input_ids(self.embed_tokens, input_ids, batch)
         hidden = hidden.repeat(1, self.hc_count)
         meta = None
@@ -174,11 +162,13 @@ class Qwen4ExpModel(BaseOP):
             meta = build_ple_metadata(batch, self._ple[0].args, input_ids.device)
             for ple in self._ple:  # gather the pinned-host PLE rows while the early layers run
                 ple.start_prefetch(batch, meta)
+        features = batch.features
+        wanted = features.wanted_layers if features is not None else ()
         normed = None
-        taps: List[torch.Tensor] | None = [] if return_hidden_layers else None
         for i, layer in enumerate(self.layers.op_list):
-            tap = taps if taps is not None and i - 1 in return_hidden_layers else None
-            hidden, normed = layer.forward(hidden, batch, normed, tap)
+            hidden, normed = layer.forward(hidden, batch, normed)
+            if i in wanted:
+                features.layer_output(i, hidden, num_streams=self.hc_count)
         if meta is not None and meta.is_verify:
             # the commit rolls the context by the accepted rows only
             get_global_ctx().linear_state_pool.verify_handler(PLE_NGRAM_STATE).stash(meta)
@@ -186,15 +176,10 @@ class Qwen4ExpModel(BaseOP):
             # single writer: the layers only read the context, so a second PLE layer's
             # prefetch sees the un-rolled window
             commit_ngram_context(meta, getattr(batch, "fla_metadata", None))
-        if (features := getattr(batch, "features", None)) is not None:
+        if features is not None:
             # a draft reads the residual streams before the final mix
             features.final_hidden(hidden)
-        out = self.hyper_connection_mixer.mix(hidden, normed)[0]
-        if taps is None:
-            return out
-        if len(self.layers.op_list) - 1 in return_hidden_layers:
-            taps.append(out)
-        return out, taps
+        return self.hyper_connection_mixer.mix(hidden, normed)[0]
 
     def forward_layer_major(self, chunk_batches: List[Batch]) -> torch.Tensor:
         """Run decoder layers outermost, retaining the normal chunk order within each layer."""
@@ -245,19 +230,6 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             prefix="lm_head",
         )
         super().__init__()
-
-    def prime_graph_replay(self) -> None:
-        table = getattr(self, "_ple_table", None)
-        if hasattr(table, "prime_graph_replay"):
-            table.prime_graph_replay()
-
-    def dflash_commit_slot_states(
-        self, slot: int, block_rows: int, rows: slice, commit_len: int, tokens: torch.Tensor
-    ) -> None:
-        """After a DFlash graph verify: advance the PLE slot states over the kept tokens
-        (the GDN states are committed by the engine)."""
-        for ple in self.model.ple_layers:
-            ple.dflash_commit(slot, block_rows, rows, commit_len, tokens)
 
     @staticmethod
     def _disk_ple_staging_tokens(engine_config) -> int:
@@ -336,16 +308,10 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
             )
         return table.bank.nbytes + (table.scale_bank.nbytes if table.scale_bank is not None else 0)
 
-    def forward(
-        self, *, return_hidden_layers: set[int] | None = None
-    ) -> torch.Tensor | Tuple[torch.Tensor, List[torch.Tensor]]:
+    def forward(self) -> torch.Tensor:
         batch = get_global_ctx().batch
         # the model hands its pre-mix streams to batch.features itself
-        output = self.model.forward(batch.input_ids, batch, return_hidden_layers=return_hidden_layers)
-        if isinstance(output, tuple):
-            hidden, hidden_states = output
-            return self.lm_head.forward(hidden, export_hidden=False), hidden_states
-        return self.lm_head.forward(output, export_hidden=False)
+        return self.lm_head.forward(self.model.forward(batch.input_ids, batch), export_hidden=False)
 
     def forward_layer_major(self, chunk_batches: List[Batch]) -> torch.Tensor:
         ctx = get_global_ctx()

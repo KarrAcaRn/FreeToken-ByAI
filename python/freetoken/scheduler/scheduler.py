@@ -96,34 +96,6 @@ def _row_logprobs(req, outputs, row: int) -> tuple[float | None, list[int] | Non
     return chosen, [], []
 
 
-def _drain_before_schedule(last_data: ForwardData | None) -> bool:
-    return last_data is not None and (
-        last_data[1].num_tokens > 1 or getattr(last_data[1], "force_drain", False)
-    )
-
-
-def _multi_token_next_input_pos(device_len: int, num_tokens: int) -> int:
-    return device_len + num_tokens - 2
-
-
-def _multi_token_last_token_index(req_index: int, stride: int, count: int) -> int:
-    return req_index * stride + count - 1
-
-
-def _req_token_count(output, req_index: int) -> int:
-    """Tokens request ``req_index`` emitted in a multi-token step (rows are ``num_tokens`` apart)."""
-    counts = getattr(output, "token_counts", None)
-    return counts[req_index] if counts is not None else output.num_tokens
-
-
-def _multi_token_emit_count(input_len: int, max_device_len: int, num_tokens: int) -> int:
-    return min(num_tokens, max(max_device_len - input_len, 0))
-
-
-def _multi_token_hit_length(input_len_after_append: int, max_device_len: int) -> bool:
-    return input_len_after_append >= max_device_len
-
-
 class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from freetoken.engine import Engine
@@ -373,12 +345,6 @@ class Scheduler(SchedulerIOMixin):
         for msg in self.receive_msg(blocking=blocking):
             self._process_one_msg(msg)
 
-        if _drain_before_schedule(last_data):
-            self.stream.wait_stream(self.engine.stream)
-            self._process_last_data(last_data)
-            last_data = None
-            self._last_data = None
-
         # Execute a queued cache rebuild once the scheduler is fully idle (the safe point):
         # no last batch to process, no pending prefill, no running decode. finished_reqs is
         # NOT a gate — those requests are already freed (no live GPU/page resources).
@@ -486,7 +452,6 @@ class Scheduler(SchedulerIOMixin):
 
         batch, output = last_data[0].batch, last_data[1]
         output.copy_done_event.synchronize()
-        num_tokens = getattr(output, "num_tokens", 1)
         # tokens are on the host from here: the per-request timings' token stamps
         now = time.perf_counter()
         reply: List[DetokenizeMsg] = []
@@ -526,11 +491,7 @@ class Scheduler(SchedulerIOMixin):
                         # are freed below/already; shipping this token would append past the
                         # client's terminal reply.
                         continue
-
-                    if num_tokens > 1:
-                        self._drain_multi_token(req, output, i, num_tokens, reply, new_finished_reqs, batch, now=now)
-                    else:
-                        self._drain_single_token(req, output, i, reply, new_finished_reqs, batch, now=now)
+                    self._drain_single_token(req, output, i, reply, new_finished_reqs, batch, now=now)
 
         self.finished_reqs = new_finished_reqs
         # Stamp each reply with the post-batch KV page occupancy so the frontend (shell
@@ -736,53 +697,6 @@ class Scheduler(SchedulerIOMixin):
             # rather than re-read the freed page-table row (and on hybrid, deref the
             # None'd GDN ping-pong slots).
             self.cache_manager.cache_req(req, finished=False)
-
-    def _drain_multi_token(self, req, outputs, i, num_tokens, reply, new_finished_reqs, batch, now=None):
-        first = i * num_tokens
-        tokens = outputs.next_tokens_cpu[first:first + _req_token_count(outputs, i)]
-        emit_count = _multi_token_emit_count(req.input_ids.numel(), req.max_device_len, tokens.numel())
-        appended = 0
-        finished = emit_count == 0
-        for j, t in enumerate(tokens[:emit_count]):
-            t_scalar = int(t.item())
-            req.append_host(t.unsqueeze(0))
-            appended += 1
-            hit_length = _multi_token_hit_length(req.input_ids.numel(), req.max_device_len)
-            hit_eos = not req.sampling_params.ignore_eos and t_scalar in self.eos_token_ids
-            matched_stop = self._match_stop_str(req) if not hit_eos and req.sampling_params.stop_strs else None
-            finished = hit_length or hit_eos or matched_stop is not None
-            finish_reason = ("stop" if (hit_eos or matched_stop is not None) else "length") if finished else None
-            if t_scalar == self.toolcall_anchor_id and req.toolcall_anchor_len is None and not finished:
-                req.toolcall_anchor_len = req.input_ids.numel()
-            chosen, top_ids, top_logprobs = _row_logprobs(req, outputs, first + j)
-            reply.append(DetokenizeMsg(
-                uid=req.uid, next_tokens=[t_scalar], finished=finished, finish_reason=finish_reason,
-                matched_stop=matched_stop, stop_strs=req.sampling_params.stop_strs or None,
-                chosen_logprob=chosen, top_ids=top_ids, top_logprobs=top_logprobs,
-            ))
-            if finished:
-                break
-        # Timings: the step's tokens land together. A DFlash step proposed draft_len drafts
-        # and emitted the accepted ones plus the bonus token; every committed token but the
-        # bonus is an accepted draft (all of them when a stop lands inside the block).
-        req.stats.stamp_token(time.perf_counter() if now is None else now)
-        draft_len = getattr(outputs, "draft_len", 0)
-        if isinstance(draft_len, int) and draft_len > 0:
-            req.stats.draft_n += draft_len
-            req.stats.draft_n_accepted += min(appended, tokens.numel() - 1)
-        if finished and reply and reply[-1].uid == req.uid:
-            reply[-1].timings = req.stats.finish(req.input_ids.numel() - req.prompt_len)
-        # The step wrote the KV of the anchor and the accepted drafts, i.e. of every emitted
-        # token but the last: advance past the ones the request keeps
-        if appended > 1:
-            req.device_len += appended - 1
-            req.cached_len += appended - 1
-        if finished and req not in self.finished_reqs:
-            # stopped inside the block: the GDN state already ran past the kept tokens
-            req.linear_state_ahead = appended < tokens.numel()
-            self.decode_manager.remove_req(req)
-            self._free_req_resources(req)
-            new_finished_reqs.add(req)
 
     def _kv_usage_pages(self) -> Tuple[int, int]:
         """(used_pages, total_pages) of the KV page pool.
@@ -1077,9 +991,6 @@ class Scheduler(SchedulerIOMixin):
         # Polymorphic free: the DSV4 manager returns the request's window pages + cmp/idx blocks
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).
-        # DFlash: the next request may continue this one's draft context (multi-turn chat)
-        if self.engine.dflash_worker is not None:
-            self.engine.dflash_finish_request(req)
         self.cache_manager.cache_req(req, finished=True)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1
@@ -1292,11 +1203,7 @@ class Scheduler(SchedulerIOMixin):
                 req.widen_pending(batch.rows_per_req - 1)
         # Polymorphic page allocation: DSV4 allocates window pages + cmp/idx blocks into its
         # slot maps; the generic manager allocates KV pages into the page table.
-        # DFlash: a decode step may verify a whole block, so hold its pages ahead of device_len
-        ahead = 0
-        if batch.is_decode and self.engine.dflash_worker is not None:
-            ahead = self.engine.dflash_worker.block_size
-        self.cache_manager.allocate_paged(batch.reqs, ahead=ahead)
+        self.cache_manager.allocate_paged(batch.reqs)
         if batch.phase == "verify":
             # the drafts run on the GPU while the host builds this batch's metadata below
             self.spec.propose_into(batch.reqs, self.token_pool)
@@ -1412,19 +1319,7 @@ class Scheduler(SchedulerIOMixin):
         if batch.phase == "verify":
             return self.spec.verify_step(batch, sample_args)
         forward_output = self.engine.forward_batch(batch, sample_args)
-
-        if forward_output.num_tokens <= 1:
-            self.token_pool[output_mapping] = forward_output.next_tokens_gpu
-        else:
-            for i, req in enumerate(batch.reqs):
-                count = _req_token_count(forward_output, i)
-                last_token_idx = _multi_token_last_token_index(i, forward_output.num_tokens, count)
-                last_token = forward_output.next_tokens_gpu[last_token_idx : last_token_idx + 1]
-                self.token_pool[
-                    req.table_idx,
-                    _multi_token_next_input_pos(req.device_len, count),
-                ] = last_token
-
+        self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

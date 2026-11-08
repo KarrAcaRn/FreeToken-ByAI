@@ -744,10 +744,10 @@ def decode_paged_attention(
 
 
 # ======================================================================================
-# Short uniform extends over a long cached prefix (DFlash target verify: Q tokens per
+# Short uniform extends over a long cached prefix (speculative target verify: Q tokens per
 # request, all already stored in the cache): flash-decoding with a (token, GQA head) row
 # tile. The extend kernel tiles queries, so Q = 8 left bs x heads programs each reading the
-# whole prefix (47% of a 15k-context Qwen3.8-27B DFlash step); here every program reads
+# whole prefix (47% of a 15k-context Qwen3.8-27B speculative step); here every program reads
 # its K/V slice once for all Q x GROUP rows and the splits fill the SMs.
 # ======================================================================================
 @triton.jit

@@ -11,6 +11,15 @@ Tool: `benchmarks/bench_offline.py` (in-process, no HTTP): fresh random-token pr
 decode as long-minus-short generation, `--natural` decodes chat prompts (needed for
 speculative decoding), `--profile[-prefill]` writes a torch trace.
 
+> **2026-11-08: the fork DFlash is gone.** With the switch to upstream's DFlash 2 (#857,
+> `freetoken/spec/dflash/`) the fork's `freetoken/speculative/` DFlash and everything built
+> only for it were dropped from next-speed: the `perf(dflash)` commits below (FlashInfer draft
+> attention, fused draft conv, greedy path selector, graph-replayed GDN commit, decode-loop
+> verify staging), the DSpark drafter for Flash-Next and its qwen4_exp taps / PLE verify
+> commit / QSA verify graphs / `moe_decode_path`. The DFlash numbers in this report were
+> measured on the fork DFlash and are history. Kept: the split-k verify attention, the small-M
+> fp8 tiles and all non-speculative work.
+
 ## Results (next -> next-speed, same flags, same machine)
 
 | Qwen3.8-27B-NVFP4 | next | next-speed | |

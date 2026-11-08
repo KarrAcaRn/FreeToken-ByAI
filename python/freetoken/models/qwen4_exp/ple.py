@@ -332,8 +332,6 @@ class PLEMetadata:
                      ``Req.table_idx``); keys every PLE slot state
       fresh_slots    [B] bool device or None -- request starts a new sequence, so read a zero state
       is_decode      one token per request (the batched 4-tap path)
-      verify         a DFlash verify block: the slot states stay as they are (the engine commits
-                     the accepted prefix afterwards, ``PLELayer.dflash_commit``)
       is_verify      the same number of rows per request over read-only state; the verify handlers stage what the commit rolls
     """
 
@@ -344,7 +342,6 @@ class PLEMetadata:
     state_slots: torch.Tensor
     fresh_slots: torch.Tensor | None
     is_decode: bool
-    verify: bool = False
     is_verify: bool = False
 
 
@@ -390,20 +387,6 @@ def build_ple_metadata(
     if args.image_token_id is not None:
         input_ids = restore_placeholder(input_ids, args.image_token_id)
 
-    if fla is not None and getattr(fla, "dflash_disable_state_update", False):
-        # DFlash graph verify (run in the decode phase): equal blocks, every slot continues
-        slots = fla.cache_indices.long()
-        bs = slots.numel()
-        return PLEMetadata(
-            input_ids=input_ids,
-            cu_seqlens=fla.cu_seqlens,
-            seq_lens=(input_ids.numel() // bs,) * bs,
-            ngram_context=context_pool.index_select(0, slots).long(),
-            state_slots=slots,
-            fresh_slots=None,
-            is_decode=False,
-            verify=True,
-        )
     if batch.is_decode and fla is not None:
         slots = fla.cache_indices.long()
         bs = slots.numel()
@@ -452,8 +435,6 @@ def commit_ngram_context(meta: PLEMetadata, fla, context_pool: torch.Tensor | No
     also writes the boundary-aligned window to the track slot so a donated snapshot restores
     the context together with the conv state. Pure device arithmetic, capture-safe.
     """
-    if meta.verify:
-        return
     if context_pool is None:
         context_pool = _ngram_context_pool()
     ids = meta.input_ids.long()
@@ -648,10 +629,6 @@ class PLELayer(BaseOP):
             f"PLE conv history {self.state_len} exceeds CHUNK_SIZE {CHUNK_SIZE}"
         )
         self._pending: Tuple[PLEMetadata, torch.Tensor] | None = None
-        # DFlash verify: the conv inputs of the block, kept for the commit (fixed address
-        # per row count, so a captured verify writes where the commit reads)
-        self._verify_x: dict[int, torch.Tensor] = {}
-        self._indices: dict[tuple[int, ...], tuple[torch.Tensor, ...]] = {}
 
     def start_prefetch(self, batch: Batch, meta: PLEMetadata | None = None) -> None:
         """Hash this forward's n-grams and start the table gather on the side stream."""
@@ -695,27 +672,7 @@ class PLELayer(BaseOP):
         fla = getattr(batch, "fla_metadata", None)
         if fla is not None and fla.track_boundary_row is not None:
             self._write_track_snapshot(states, x, fla)
-        if meta.verify:
-            stash = self._verify_x.get(x.shape[0])
-            if stash is None:
-                stash = self._verify_x[x.shape[0]] = torch.empty_like(x)
-            stash.copy_(x)
         return gated + self._short_conv(x, meta, states)
-
-    def dflash_commit(self, slot: int, block_rows: int, rows: slice, commit_len: int, tokens: torch.Tensor) -> None:
-        """Advance ``slot``'s conv history and n-gram context over the first ``commit_len``
-        tokens of the last verify block (``block_rows`` rows; this request's are ``rows``,
-        its input ids ``tokens``)."""
-        if commit_len <= 0:
-            return
-        states = self._conv_state_slab(tokens)
-        kept = self._verify_x[block_rows][rows][:commit_len].transpose(0, 1).to(states.dtype)
-        history = torch.cat([states[slot], kept], dim=-1)
-        states[slot].copy_(history[:, -self.state_len:])
-        if self.ple_index == 0:
-            context = _ngram_context_pool()
-            ids = torch.cat([context[slot], tokens[:commit_len].to(context.dtype)])
-            context[slot].copy_(ids[-context.shape[1]:])
 
     def _write_track_snapshot(self, states: torch.Tensor, x: torch.Tensor, fla) -> None:
         """Copy the conv history at the GDN track boundary into the same donatable slot, so a radix
@@ -751,7 +708,7 @@ class PLELayer(BaseOP):
             return self._decode_conv(x, meta, states)
         if meta.is_verify:
             return self._verify_conv(x, meta, states)
-        return self._prefill_conv(x, meta, states, update=not meta.verify)
+        return self._prefill_conv(x, meta, states)
 
     def _decode_conv(
         self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor
@@ -783,7 +740,7 @@ class PLELayer(BaseOP):
         return F.silu(out.to(x.dtype)).transpose(1, 2).reshape(x.shape)
 
     def _prefill_conv(
-        self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor, update: bool = True
+        self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor
     ) -> torch.Tensor:
         """One conv over every request packed as ``[state_0 | chunk_0 | state_1 | chunk_1 | ...]``.
 
@@ -802,20 +759,14 @@ class PLELayer(BaseOP):
         out = F.conv1d(
             history.unsqueeze(0), self.conv1d.weight, groups=width, dilation=self.dilation
         ).squeeze(0)
-        if update:
-            new_state = history.index_select(1, next_state_index).view(width, num_reqs, self.state_len)
-            states.index_copy_(
-                0, meta.state_slots, new_state.permute(1, 0, 2).to(states.dtype).contiguous()
-            )
+        new_state = history.index_select(1, next_state_index).view(width, num_reqs, self.state_len)
+        states.index_copy_(
+            0, meta.state_slots, new_state.permute(1, 0, 2).to(states.dtype).contiguous()
+        )
         return F.silu(out.index_select(1, out_index).transpose(0, 1))
 
     def _prefill_indices(self, lens: List[int], device: torch.device):
-        """Columns of the packed history: this forward's outputs, the state block, the next state block.
-        Kept per length tuple: the host-built index must outlive a captured verify graph."""
-        key = tuple(lens)
-        cached = self._indices.get(key)
-        if cached is not None:
-            return cached
+        """Columns of the packed history: this forward's outputs, the state block, the next state block."""
         state_len = self.state_len
         counts = torch.tensor(lens, dtype=torch.int64)
         cu = torch.cat([counts.new_zeros(1), counts.cumsum(0)])
@@ -834,10 +785,7 @@ class PLELayer(BaseOP):
             packed = packed.pin_memory()
         packed = packed.to(device, non_blocking=True)
         n_out, n_state = out_index.numel(), len(lens) * state_len
-        out = packed[:n_out], packed[n_out : n_out + n_state], packed[n_out + n_state :]
-        if len(self._indices) < 64:
-            self._indices[key] = out
-        return out
+        return packed[:n_out], packed[n_out : n_out + n_state], packed[n_out + n_state :]
 
 
 class PLEConvVerify:

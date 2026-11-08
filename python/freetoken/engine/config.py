@@ -15,6 +15,7 @@ from freetoken.utils import cached_load_hf_config, init_logger
 
 if TYPE_CHECKING:
     from freetoken.models import ModelConfig
+    from freetoken.models.config import SlotStateSpec
 
 logger = init_logger(__name__)
 
@@ -151,11 +152,12 @@ class EngineConfig:
     distributed_port: int = 2333
     use_dummy_weight: bool = False
     use_pynccl: bool = True
-    # speculative decoding: dflash runs its own engine path (DFlashWorker); any other
-    # algorithm is a freetoken.spec proposer verified on the target side (SpecRunner)
+    # speculative decoding
     speculative_algorithm: str | None = None
     speculative_num_steps: int = 0
     speculative_draft_model_path: str | None = None
+    # the proposer's states on the target's linear-state slots, resolved by _adjust_config
+    spec_slot_states: tuple[SlotStateSpec, ...] = ()
     max_seq_len_override: int | None = None
     num_page_override: int | None = None  # if not None, will override the number of pages
     # KV capacity in tokens; resolved into num_page_override by _adjust_config once page_size
@@ -163,13 +165,6 @@ class EngineConfig:
     num_token_override: int | None = None
     # Runtime knobs of the multimodal path; the architecture side (vision_config, mrope) lives in ModelConfig.
     mm: MultimodalConfig = field(default_factory=MultimodalConfig)
-
-    # DFlash speculative decoding (speculative_algorithm == "dflash")
-    speculative_dflash_block_size: int | None = None  # None: the draft checkpoint's block_size
-    # --speculative-draft-quant: "fp8" stores the draft's projections as e4m3 + per-row scales
-    speculative_draft_quant: str = "none"
-    # --speculative-adaptive: stop speculating for a request that measures slower than plain decode
-    speculative_adaptive: bool = True
 
     def __post_init__(self):
         if not (self.moe_locked_fetch == -1 or 0.0 <= self.moe_locked_fetch <= 1.0):
@@ -242,14 +237,14 @@ class EngineConfig:
         return self.max_seq_len
 
     @property
-    def spec_verify(self) -> bool:
-        """Speculative decoding through freetoken.spec (SpecRunner); DFlash verifies its blocks itself."""
-        return self.speculative_algorithm is not None and self.speculative_algorithm != "dflash"
-
-    @property
     def decode_rows_per_req(self) -> int:
         """Query rows each running request takes per decode step; every per-request decode allowance derives from it."""
-        return self.speculative_num_steps + 1 if self.spec_verify else 1
+        return self.speculative_num_steps + 1 if self.speculative_algorithm is not None else 1
+
+    @property
+    def slot_states(self) -> tuple[SlotStateSpec, ...]:
+        """Every per-request state the linear-state pool holds: the model's own, then the proposer's."""
+        return self.model_config.slot_states + self.spec_slot_states
 
     @property
     def distributed_addr(self) -> str:

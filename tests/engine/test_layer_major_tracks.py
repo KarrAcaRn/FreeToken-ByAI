@@ -91,7 +91,7 @@ def test_layer_major_flag_defaults_off():
         (True, "qwen4_exp", 1, "offload", "nvfp4", "auto", None, False),
         (True, "qwen4_exp", 1, "offload", "nvfp4", "disk", "draft", False),
     ],
-    ids=["eligible", "disk-ple", "flag-off", "other-model", "tp", "other-strategy", "other-format", "auto-ple", "dflash"],
+    ids=["eligible", "disk-ple", "flag-off", "other-model", "tp", "other-strategy", "other-format", "auto-ple", "spec-draft"],
 )
 def test_layer_major_runtime_gate_rejects_every_unsupported_mode(
     enabled, model_type, tp_size, strategy, expert_quant, ple_backend, draft, expected,
