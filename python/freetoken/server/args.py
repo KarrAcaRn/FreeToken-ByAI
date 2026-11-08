@@ -1217,46 +1217,23 @@ def parse_args(
         ),
     )
 
-    # DFlash speculative decoding
+    # speculative decoding
     parser.add_argument(
         "--speculative-algorithm",
         "--spec-algo",
         type=str,
         default=ServerArgs.speculative_algorithm,
-        help="Speculative decoding with this draft method: dflash (needs "
-             "--speculative-draft-model-path), mtp (the checkpoint's own MTP layers), or a "
-             "freetoken.spec proposer. Off by default.",
+        help=(
+            "Speculative decoding with this draft method (mtp: the checkpoint's own MTP layers; dflash: a DFlash 2 draft "
+            "checkpoint from --speculative-draft-model-path). Off by default."
+        ),
     )
     parser.add_argument(
         "--speculative-draft-model-path",
         "--spec-draft-model",
         type=str,
         default=ServerArgs.speculative_draft_model_path,
-        help="Draft weights; dflash needs them, other methods take them from the target "
-             "checkpoint by default.",
-    )
-    parser.add_argument(
-        "--speculative-dflash-block-size",
-        type=int,
-        default=ServerArgs.speculative_dflash_block_size,
-        help="Block size for DFlash: the base token plus block_size - 1 drafted tokens per "
-             "verification (default: the draft checkpoint's block_size).",
-    )
-    parser.add_argument(
-        "--speculative-draft-quant",
-        choices=["none", "fp8"],
-        default=ServerArgs.speculative_draft_quant,
-        help="Store the draft's projections as fp8 (e4m3, one scale per output row): half the "
-             "VRAM of a bf16 draft. Verification stays exact; only the acceptance rate can move.",
-    )
-    parser.add_argument(
-        "--disable-speculative-adaptive",
-        action="store_false",
-        dest="speculative_adaptive",
-        default=ServerArgs.speculative_adaptive,
-        help="Speculate on every decode step. By default a request stops speculating once its "
-             "cycles measure slower than plain decode (a draft that rarely matches, e.g. a "
-             "language it was not trained on).",
+        help="Draft weights; by default they come from the target checkpoint. Required for dflash, which reads a separate draft checkpoint.",
     )
 
     parser.add_argument(

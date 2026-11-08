@@ -93,10 +93,10 @@ def _wait_until_serving(base: str, proc: subprocess.Popen, deadline: float) -> N
     raise TimeoutError("server never reached the serving state")
 
 
-def _generate(base: str) -> int:
-    """Tokens the engine decoded -- the point is that it still runs, not what it says.
+def _generate(base: str) -> str:
+    """Everything the engine decoded, answer and reasoning; asserts that it decoded at all.
 
-    Counts rather than reads the reply. Which field the text lands in depends on the
+    Checks the token count rather than the reply text. Which field the text lands in depends on the
     checkpoint: ``enable_thinking`` is read by the qwen/glm/gemma/dsv4 templates and is
     inert for gpt-oss, whose Harmony channels are not gated by it, so its trace goes to
     ``reasoning_content`` and ``content`` can be empty on a perfectly healthy engine.
@@ -115,7 +115,9 @@ def _generate(base: str) -> int:
         },
     )
     assert code == 200, body
-    return int(body["usage"]["completion_tokens"])
+    assert int(body["usage"]["completion_tokens"]) > 0, body
+    message = body["choices"][0]["message"]
+    return (message.get("reasoning_content") or "") + "\x00" + (message.get("content") or "")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cache rebuild e2e needs CUDA")
@@ -155,7 +157,11 @@ def test_cache_rebuild_resizes_a_live_engine_and_keeps_serving(tmp_path):
 
         geometry = _get(base, "/v1/cache/status")["geometry"]
         assert geometry["num_pages"] == BOOT_PAGES
-        assert _generate(base) > 0  # a baseline generation, before anything is torn down
+        baseline = _generate(base)  # before anything is torn down; every rebuilt engine must repeat it
+        assert baseline
+        # hybrid MoE runs cache misses on the CPU and a rebuild empties the cache, so a near tie may flip
+        flags = [part for arg in shlex.split(os.environ.get("FREETOKEN_REBUILD_EXTRA_ARGS", "")) for part in arg.split("=", 1)]
+        exact = not any(flag in ("--moe-strategy", "--moe-backend") and value == "hybrid" for flag, value in zip(flags, flags[1:]))
 
         # 0. Flush the prefix cache. Long enough for a hybrid model to snapshot a reusable prefix.
         chat = {
@@ -186,8 +192,8 @@ def test_cache_rebuild_resizes_a_live_engine_and_keeps_serving(tmp_path):
         assert status["state"] == "serving"
         assert status["geometry"]["num_pages"] == GROWN_PAGES
         assert status["last_rebuild"]["status"] == "ok"
-        # Graphs were re-captured against the new pool: decoding still works.
-        assert _generate(base) > 0
+        # Graphs were re-captured against the new pool: greedy decoding repeats the pre-rebuild output.
+        assert (out := _generate(base)) and (out == baseline or not exact)
 
         # 2. The second axis, if this checkpoint has a GDN state pool. Resizing it moves a
         #    different pool through the same teardown/re-capture path.
@@ -200,7 +206,7 @@ def test_cache_rebuild_resizes_a_live_engine_and_keeps_serving(tmp_path):
             assert geometry["num_mamba_slots"] == grown_slots
             # A pool-only resize must not disturb the pool the previous rebuild grew.
             assert geometry["num_pages"] == GROWN_PAGES
-            assert _generate(base) > 0
+            assert (out := _generate(base)) and (out == baseline or not exact)
 
         # 3. An unfittable target is rejected BEFORE anything is freed, and the engine that was
         #    serving a moment ago keeps serving on its old cache.

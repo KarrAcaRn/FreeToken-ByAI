@@ -88,19 +88,18 @@ class Qwen3_5Model(BaseOP):
         )
         self.norm = GemmaPlusOneRMSNormFused(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(
-        self, input_ids: torch.Tensor, *, return_hidden_layers: set[int] | None = None
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        x = embed_input_ids(self.embed_tokens, input_ids, get_global_ctx().batch)
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        batch = get_global_ctx().batch
+        x = embed_input_ids(self.embed_tokens, input_ids, batch)
         residual: torch.Tensor | None = None
-        hidden_states: list[torch.Tensor] | None = [] if return_hidden_layers else None
+        features = batch.features
+        wanted = features.wanted_layers if features is not None else ()
         for i, layer in enumerate(self.layers.op_list):
             x, residual = layer.forward(x, residual)
-            if hidden_states is not None and i in return_hidden_layers:
-                hidden_states.append(x)
+            if i in wanted:
+                # the layer's output is the sum the next fused add forms
+                features.layer_output(i, x, residual)
         x, _ = self.norm.forward(x, residual)
-        if hidden_states is not None:
-            return x, hidden_states
         return x
 
 
@@ -117,11 +116,8 @@ class Qwen3_5ForCausalLM(BaseLLMModel):
         )
         super().__init__()
 
-    def forward(self, *, return_hidden_layers: set[int] | None = None) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        output = self.model.forward(get_global_ctx().batch.input_ids, return_hidden_layers=return_hidden_layers)
-        if isinstance(output, tuple):
-            hidden, hidden_states = output
-            return self.lm_head.forward(hidden), hidden_states
+    def forward(self) -> torch.Tensor:
+        output = self.model.forward(get_global_ctx().batch.input_ids)
         return self.lm_head.forward(output)
 
 
