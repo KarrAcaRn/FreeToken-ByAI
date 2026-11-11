@@ -143,14 +143,17 @@ def register_openai_routes(
         model_id = _served_model_name(state)
         ctx = _model_context_length(state)
         efforts, default_effort = await _effort_fields(state)
-        return ModelList(data=[ModelCard(
+        cards = [ModelCard(
             id=model_id,
             root=state.config.model_path,
             max_model_len=ctx,
             context_length=ctx,
             supported_reasoning_efforts=efforts,
             default_reasoning_effort=default_effort,
-        )])
+        )]
+        if (stt_model := getattr(state.config, "stt_model", None)) is not None:
+            cards.append(ModelCard(id=state.config.stt_served_name, root=stt_model))
+        return ModelList(data=cards)
 
 
 async def handle_chat_completion(

@@ -162,6 +162,29 @@ so a client can gate its attachment controls without reading the checkpoint conf
 | `--allowed-media-domains` | any | Comma-separated hostname allowlist for image URLs; requests for other domains are rejected with a 400. Empty allows any domain |
 | `--allowed-local-media-path` | off | Directory `file://` image refs may be read from; unset rejects local files |
 
+### Audio transcription
+
+Experimental. `--stt-model` loads a Whisper checkpoint (`WhisperForConditionalGeneration`) next to the LLM and serves
+OpenAI's `POST /v1/audio/transcriptions` and `POST /v1/audio/translations` (multipart: `file`, `model`, `language`,
+`prompt`, `temperature`, `response_format` = `json` | `text` | `verbose_json` | `srt` | `vtt`). Needs the `audio`
+extra (`uv sync --extra audio`: PyAV, which bundles ffmpeg, and python-multipart).
+
+The model runs in its own worker process through transformers (fp16), outside the paged LLM engine; requests are
+transcribed one at a time. The worker loads and warms up before the engine starts, so the engine sizes its caches
+around it (whisper-large-v3-turbo: about 1.8 GiB). Audio longer than 30 s uses Whisper's sequential long-form
+decoding. `GET /v1/models` lists the STT model as a second card.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--stt-model` | off | Local directory or Hugging Face id; a Hugging Face repo downloads its top-level files only |
+| `--stt-gpu` | the LLM's first GPU | GPU UUID or nvidia-smi index for the STT worker |
+| `--stt-no-timestamps` | off | For fine-tunes that no longer emit timestamp tokens (TheStageAI/thewhisper-*): long-form decoding seeks by them and drops text without, so this decodes fixed 30 s windows in batches instead. Segments are then whole windows and a word cut at a window edge may be garbled |
+
+```bash
+ft serve --model ~/models/Qwen3.6-35B-A3B --stt-model openai/whisper-large-v3-turbo
+curl -F file=@meeting.mp3 -F model=whisper -F response_format=srt localhost:1919/v1/audio/transcriptions
+```
+
 ## ft shell
 
 ```bash

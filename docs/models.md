@@ -67,6 +67,12 @@ A GGUF model takes image input from a separate llama.cpp mmproj file, found in t
 whatever the mmproj stores; a quantized mmproj is dequantized at load and keeps its quantization error. Image tokens and budgets are those of the
 family's row above.
 
+### Audio transcription
+
+Whisper checkpoints (`WhisperForConditionalGeneration`, e.g. `openai/whisper-large-v3-turbo`) serve speech-to-text next
+to the LLM through `--stt-model`, see the [CLI reference](cli.md#audio-transcription). They run on transformers in a
+side worker, not on the engine.
+
 ## MoE strategies
 
 `ft serve --moe-strategy {auto,fused,offload,cpu,hybrid}` (`--moe-backend` is the deprecated old spelling):

@@ -67,6 +67,7 @@ checkpoint is set:
 | `FREETOKEN_INLINE_QWEN_MODEL` | `tokenizer/test_tokenize.py` - local Qwen3.6 tokenizer/template; inline-system fold policy, prefix stability and reasoning retention (no weights loaded) |
 | `FREETOKEN_MUSE_MODEL`     | `models/test_muse_glimmer_vision.py`, `tokenizer/test_mm_tokenize.py`, `tokenizer/test_tokenize.py` - local Muse-Glimmer-30B checkpoint (vision tests; tokenizer-only inline-system regressions) |
 | `FREETOKEN_MINIMAX_M3_MODEL` | `tokenizer/test_mm_tokenize.py` — local MiniMax-M3 checkpoint (start/end expansion, token budget) |
+| `FREETOKEN_WHISPER_MODEL`, `FREETOKEN_WHISPER_CLIP` | `server/test_audio_api.py` - local Whisper checkpoint and an 11-30 s speech clip (long-form transcription keeps all text) |
 | `FREETOKEN_TEST_MOE_CACHE_SIZE` | `e2e/test_aime.py` — >0 switches to the offload MoE backend with this cache size |
 | `FREETOKEN_TEST_MEM_RATIO` | `e2e/test_aime.py` — offload-mode memory_ratio (default `0.9`) |
 | `FREETOKEN_TEST_SPEC_ALGORITHM` | `e2e/test_aime.py` — speculative decoding method (`mtp`, `dflash`); prints the accept len of each sample (tokens committed per verify step, the bonus token included) |
