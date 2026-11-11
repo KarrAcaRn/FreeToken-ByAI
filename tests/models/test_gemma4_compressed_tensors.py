@@ -62,6 +62,7 @@ def test_mixed_compressed_tensors_dense_weights(tmp_path, monkeypatch):
         num_layers=1,
         dense_quant="none",
         attention_group_for_layer=lambda _layer: None,
+        gemma4_e_args=None,
     )
     monkeypatch.setattr(weight, "cached_load_hf_config", lambda _path: object())
     monkeypatch.setattr(weight, "parse_config", lambda _hf: config)

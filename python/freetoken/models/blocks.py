@@ -80,9 +80,9 @@ class GatedMLP(BaseOP):
         self,
         config: ModelConfig,
         *,
+        intermediate_size: int | None = None,
         quant_config: QuantConfig | None = None,
         prefix: str = "",
-        intermediate_size: int | None = None,
     ):
         intermediate_size = intermediate_size or config.intermediate_size
         self.gate_up_proj = LinearColParallelMerged(

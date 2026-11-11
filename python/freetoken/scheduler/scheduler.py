@@ -544,7 +544,8 @@ class Scheduler(SchedulerIOMixin):
             req.stats.draft_n += k
             req.stats.draft_n_accepted += min(n, emitted)
             reply.append(msg)
-            if msg.finished:
+            # a timings_per_token request gets the snapshot on every reply, growing
+            if msg.finished or req.sampling_params.timings_per_token:
                 msg.timings = req.stats.finish(req.input_ids.numel() - req.prompt_len)
             req.commit_pending(n)
             self.cache_manager.rollback_tail(req, req.cached_len, cached + k + 1)
@@ -680,7 +681,8 @@ class Scheduler(SchedulerIOMixin):
             )
         )
         req.stats.stamp_token(time.perf_counter() if now is None else now)
-        if finished:
+        # a timings_per_token request gets the snapshot on every reply, growing
+        if finished or req.sampling_params.timings_per_token:
             reply[-1].timings = req.stats.finish(req.input_ids.numel() - req.prompt_len)
         # NOTE: overlap scheduling may make the request freed twice, skip second free
         if finished and req not in self.finished_reqs:

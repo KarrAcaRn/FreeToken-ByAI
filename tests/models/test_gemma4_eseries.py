@@ -40,8 +40,8 @@ def test_parse_config_maps_shared_layers_to_the_last_owner_of_their_type():
     # layers 3..5 share: 3, 4 are sliding (last sliding owner 1), 5 is full (owner 2)
     assert config.kv_sharing == ((3, 1), (4, 1), (5, 2))
     assert config.kv_source_layer(4) == 1 and config.kv_source_layer(1) is None
-    assert config.per_layer_input_size == 32 and config.per_layer_vocab_size == 64
-    assert config.double_wide_shared_mlp and config.pad_token_id == 0
+    e_args = config.gemma4_e_args
+    assert (e_args.per_layer_hidden_size, e_args.per_layer_vocab_size, e_args.kv_shared_intermediate_size) == (32, 64, 192)
     specs = {spec.name: spec.layer_ids for spec in config.kv_cache_group_specs()}
     assert specs == {"full": (2,), "swa": (0, 1)}
     # the attention groups still cover every layer: shared layers keep their attention type
@@ -50,7 +50,7 @@ def test_parse_config_maps_shared_layers_to_the_last_owner_of_their_type():
 
 def test_parse_config_without_eseries_fields_keeps_the_old_layout():
     config = parse_config(_hf_config(eseries=False))
-    assert config.kv_sharing == () and config.per_layer_input_size == 0 and not config.double_wide_shared_mlp
+    assert config.kv_sharing == () and config.gemma4_e_args is None
     specs = {spec.name: spec.layer_ids for spec in config.kv_cache_group_specs()}
     assert specs == {"full": (2, 5), "swa": (0, 1, 3, 4)}
 
@@ -118,8 +118,8 @@ def test_iter_weights_matches_the_model_state_dict(tmp_path, monkeypatch):
     assert loaded["model.layers.0.feed_forward.shared_mlp.gate_up_proj.weight"].shape == (2 * 96, 128)
     assert loaded["model.layers.3.feed_forward.shared_mlp.gate_up_proj.weight"].shape == (4 * 96, 128)
     attn = model.model.layers.op_list
-    assert attn[3].self_attn.attn_spec.kv_shared and attn[3].self_attn.kv_source == 1
-    assert attn[1].self_attn.publishes_kv and not attn[0].self_attn.publishes_kv
+    assert attn[3].self_attn.attn_spec.kv_shared and attn[3].self_attn.kv_shared
+    assert attn[1].self_attn.kv_source and not attn[0].self_attn.kv_source
 
 
 def _build_ft(fn):
@@ -155,13 +155,13 @@ def test_per_layer_inputs_match_the_reference(monkeypatch):
         expected = ref.project_per_layer_inputs(x[None], ref.get_per_layer_inputs(ids[None], None))[0]
     torch.testing.assert_close(ft._per_layer_inputs(ids, x), expected, atol=2e-2, rtol=2e-2)
 
-    # image rows read the pad row, the reference's multimodal rule
-    batch.mm_embeds, batch.mm_rows = torch.zeros(1, 128, device="cuda"), torch.tensor([2], device="cuda")
-    padded = ids.clone()
-    padded[2] = hf_cfg.pad_token_id
+    # image rows carry content pad ids above the vocab and read the pad row, the reference's multimodal rule
+    batch.mm_embeds = torch.zeros(1, 128, device="cuda")
+    image_ids, padded = ids.clone(), ids.clone()
+    image_ids[2], padded[2] = 1000, hf_cfg.pad_token_id
     with torch.no_grad():
         expected = ref.project_per_layer_inputs(x[None], ref.get_per_layer_inputs(padded[None], None))[0]
-    torch.testing.assert_close(ft._per_layer_inputs(ids, x), expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(ft._per_layer_inputs(image_ids, x), expected, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -197,10 +197,10 @@ def test_decoder_layer_matches_the_reference_around_attention(layer_idx):
 
     T, H = 5, hf_cfg.hidden_size
     attn_out = torch.randn(T, H, device="cuda", dtype=torch.bfloat16)
-    ft.self_attn.forward = lambda h: attn_out.clone()
+    ft.self_attn.forward = lambda h, shared_kv: attn_out.clone()
     ref.self_attn.forward = lambda *a, **k: (attn_out[None], None)
     x = torch.randn(T, H, device="cuda", dtype=torch.bfloat16)
     ple = torch.randn(T, hf_cfg.hidden_size_per_layer_input, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         expected = ref(x[None].clone(), ple[None], shared_kv_states={})[0]
-    torch.testing.assert_close(ft.forward(x.clone(), ple), expected, atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(ft.forward(x.clone(), ple, {}), expected, atol=5e-2, rtol=5e-2)

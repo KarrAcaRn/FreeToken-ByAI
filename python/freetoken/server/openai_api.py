@@ -105,6 +105,7 @@ def chat_request_to_genspec(
     model_sampling: dict[str, Any],
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     default_thinking_mode: str | None = None,
+    timings_per_token: bool = False,
 ) -> GenSpec:
     """OpenAI ChatCompletionRequest -> GenSpec (the OpenAI 'to_sampling_params')."""
     from .model_meta import effort_toggle_kwargs
@@ -114,7 +115,9 @@ def chat_request_to_genspec(
     if req.reasoning_effort or thinking_type:
         ctk = effort_toggle_kwargs(req.reasoning_effort, ctk, thinking_type=thinking_type)
     ctk = apply_default_thinking_mode(ctk, default_thinking_mode)
-    sampling_params = _resolve_sampling(req, model_sampling, default_max_tokens=default_max_tokens)
+    sampling_params = _resolve_sampling(
+        req, model_sampling, default_max_tokens=default_max_tokens, timings_per_token=timings_per_token
+    )
     sampling_params.logprobs = req.logprobs
     sampling_params.top_logprobs = req.top_logprobs or 0
     return GenSpec(
@@ -404,6 +407,13 @@ async def handle_chat_completion(
             model_sampling,
             default_max_tokens=default_max_tokens,
             default_thinking_mode=getattr(state.config, "default_thinking_mode", "auto"),
+            # stamp per-token only when the server opted into timings too; llama.cpp
+            # publishes partial timings on streams, so non-stream requests never pay
+            timings_per_token=bool(
+                req.stream
+                and req.timings_per_token
+                and getattr(state.config, "enable_timings_report", False)
+            ),
         )
     except ValueError as exc:
         return create_error_response(str(exc), param=_sampling_error_param(exc))
@@ -505,6 +515,10 @@ async def stream_chat_completion_chunks(
     def emit(chunk: dict[str, Any]) -> bytes:
         if continuous_usage:
             chunk["usage"] = _reported_usage(state, usage)
+        # per-token: post-ack chunks carry the ack's snapshot. Request-side gate: the
+        # terminal snapshot rides every request, so post-terminal residue must stay clean.
+        if req.timings_per_token and (t := timings_block(state, usage.timings)) is not None:
+            chunk["timings"] = t
         return _sse(chunk)
 
     tool_calls_sent = 0
@@ -663,6 +677,13 @@ async def handle_completion(
     except ValueError as exc:
         return create_error_response(str(exc), param=_sampling_error_param(exc))
 
+    # stamp per-token only when the server opted into timings too; llama.cpp publishes
+    # partial timings on streams, so non-stream requests never pay for the snapshots
+    timings_pt = bool(
+        req.stream
+        and req.timings_per_token
+        and getattr(state.config, "enable_timings_report", False)
+    )
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     assert isinstance(prompts, list)
     if not prompts:
@@ -675,7 +696,9 @@ async def handle_completion(
             return create_error_response(bad, param="prompt")
 
     def _tokenize_msg(uid: int, prompt: Any) -> TokenizeMsg:
-        sampling = _resolve_sampling(req, model_sampling, default_max_tokens=default_max_tokens)
+        sampling = _resolve_sampling(
+            req, model_sampling, default_max_tokens=default_max_tokens, timings_per_token=timings_pt
+        )
         if isinstance(prompt, str):
             return TokenizeMsg(uid=uid, text=prompt, sampling_params=sampling)
         return TokenizeMsg(uid=uid, text="", sampling_params=sampling, input_ids=list(prompt))
@@ -812,6 +835,10 @@ async def stream_completion_chunks(
     def emit(payload: dict[str, Any]) -> bytes:
         if continuous_usage:
             payload["usage"] = _reported_usage(state, usage)
+        # per-token: same request-side check as the chat stream - the terminal ack carries
+        # timings for every request, only the flag decides who gets a block on each chunk
+        if req.timings_per_token and (t := timings_block(state, raw_timings)) is not None:
+            payload["timings"] = t
         return _sse(payload)
 
     try:
@@ -885,6 +912,7 @@ def _resolve_sampling(
     req: ChatCompletionRequest | CompletionRequest,
     model_sampling: dict[str, Any],
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    timings_per_token: bool = False,
 ) -> SamplingParams:
     sampling_params = resolve_sampling(
         temperature=req.temperature,
@@ -897,6 +925,7 @@ def _resolve_sampling(
         default_max_tokens=default_max_tokens,
         presence_penalty=req.presence_penalty,
         frequency_penalty=req.frequency_penalty,
+        timings_per_token=timings_per_token,
     )
     if isinstance(req, CompletionRequest) and req.logprobs is not None:
         sampling_params.logprobs = True

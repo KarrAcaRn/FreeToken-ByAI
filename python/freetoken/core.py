@@ -30,6 +30,9 @@ class SamplingParams:
     # request's generated tokens only (the prompt is not penalized).
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    # Stamp the ReqStats snapshot on every reply, not just the terminal one (llama.cpp's
+    # timings_per_token; the API layer has already ANDed it with --enable-timings-report).
+    timings_per_token: bool = False
 
     def __post_init__(self) -> None:
         for name in ("presence_penalty", "frequency_penalty"):

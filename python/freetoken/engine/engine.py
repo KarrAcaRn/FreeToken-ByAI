@@ -472,19 +472,20 @@ def _host_embedding_keys(model, config: EngineConfig) -> frozenset[str]:
     """State-dict keys of the tables --embed-weights host keeps in pinned host RAM."""
     if config.embed_weights != "host":
         return frozenset()
+    # a tied LM head reads its whole table every step, so that table stays on the GPU
     tables = {id(op.weight) for op in host_movable_embeddings(model)}
     keys = frozenset(key for key, t in model.state_dict().items() if id(t) in tables)
-    if keys:
-        return keys
-    if config.model_config.tie_word_embeddings:
+    if not keys and config.model_config.tie_word_embeddings:
         raise ValueError(
             "--embed-weights host: this model's embedding table is tied to its LM head, which reads the whole table "
             "every step; serve it with --embed-weights gpu"
         )
-    raise ValueError(
-        f"--embed-weights host: {type(model).__name__} has no plain embedding table to move (a DF11 table stays "
-        "on the GPU); serve it with --embed-weights gpu"
-    )
+    if not keys:
+        raise ValueError(
+            f"--embed-weights host: {type(model).__name__} has no plain embedding table to move (a DF11 table stays "
+            "on the GPU); serve it with --embed-weights gpu"
+        )
+    return keys
 
 
 def _pinned_copy(key: str, t: torch.Tensor) -> torch.Tensor:

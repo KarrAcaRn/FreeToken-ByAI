@@ -59,8 +59,9 @@ class DetokenizeMsg(BaseTokenizerMsg):
     # only, 0.0 on every later one -- it is the one span a client cannot derive from HTTP
     # timestamps, which is why it rides the wire instead of being re-estimated frontend-side.
     prefill_ms: float = 0.0
-    # Scheduler-measured per-request timings (ReqStats.finish) on the terminal reply
-    # only; None on intermediate replies, errors and aborts.
+    # Scheduler-measured per-request timings (ReqStats.finish): on the terminal reply,
+    # plus every intermediate reply when sampling_params.timings_per_token was set;
+    # None on other intermediate replies, errors and aborts.
     timings: dict | None = None
 
 

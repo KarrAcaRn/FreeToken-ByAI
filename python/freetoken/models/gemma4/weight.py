@@ -52,8 +52,10 @@ _NVFP4_BANK_KINDS = {
     "weight_global": "weight_scale_2",
 }
 _LAYER_INDEX_PATTERN = re.compile(r"layers\.(\d+)\.")
+# the attention leaves that change on a KV-shared layer; the vision tower's layers never match
+_KV_SHARED_LEAF_PATTERN = re.compile(r"^model\.layers\.(?P<layer>\d+)\.self_attn\.(?P<leaf>[qkv]_proj|[kv]_norm)\b")
+_PER_LAYER_TABLE = "model.embed_tokens_per_layer.weight"
 _LAYER_FF_PREFIX_PATTERN = re.compile(r"^(model\.layers\.\d+)\.")
-_SELF_ATTN_KEY_PATTERN = re.compile(r"^model\.layers\.(\d+)\.self_attn\.(\w+?)\.")
 _MERGE_RULES = {
     ".q_proj": MergeRule(".qkv_proj", "q", ("q", "k", "v")),
     ".k_proj": MergeRule(".qkv_proj", "k", ("q", "k", "v")),
@@ -211,7 +213,13 @@ def iter_weights(
         if isinstance(config.attention_group_for_layer(layer_id), FullAttentionGroupConfig)
         and config.attention_group_for_layer(layer_id).k_eq_v
     }
-    kv_shared_layers = {layer for layer, _ in getattr(config, "kv_sharing", ())}
+    e_args = config.gemma4_e_args
+
+    def kv_shared_leaf(name: str) -> str | None:
+        """The attention leaf of a KV-shared layer's key, or None for any other key."""
+        m = _KV_SHARED_LEAF_PATTERN.match(name) if e_args is not None else None
+        return m["leaf"] if m is not None and e_args.is_kv_shared(int(m["layer"])) else None
+
     merge_buf: dict[str, dict[str, torch.Tensor]] = {}
     gateup_buf: dict[str, dict[str, tuple]] = {}
     reader = ShardReader(model_path, device)
@@ -258,15 +266,6 @@ def iter_weights(
                     if not is_expert and not include_non_moe:
                         continue
 
-                    # KV-sharing layers keep a standalone q_proj; the checkpoint's k/v for them are unused
-                    attn_key = _SELF_ATTN_KEY_PATTERN.match(name) if kv_shared_layers else None
-                    if attn_key is not None and int(attn_key.group(1)) in kv_shared_layers:
-                        if attn_key.group(2) in ("k_proj", "v_proj", "k_norm", "v_norm"):
-                            continue
-                        if attn_key.group(2) == "q_proj":
-                            yield name, f.get_tensor(raw_name)
-                            continue
-
                     # llm-compressor / compressed-tensors NVFP4.  The stored names
                     # differ from ModelOpt but map to the same FreeToken buffers.
                     if raw_name.endswith(".weight_packed"):
@@ -300,6 +299,17 @@ def iter_weights(
                         )
                         continue
 
+                    # a KV-shared layer reuses another layer's k and v: the checkpoint still ships its own, which nothing reads
+                    leaf = kv_shared_leaf(name)
+                    if leaf not in (None, "q_proj"):
+                        continue
+
+                    # the largest tensor in the file; read to host so --embed-weights host never touches VRAM for it
+                    if name == _PER_LAYER_TABLE:
+                        with safetensors.safe_open(file, framework="pt", device="cpu") as host_file:
+                            yield name, host_file.get_tensor(raw_name)
+                        continue
+
                     tensor = f.get_tensor(raw_name)
                     # compressed-tensors stores FP8 per-channel scales as
                     # ``[out_features, 1]`` (often bf16); FreeToken's FP8 linear
@@ -310,7 +320,7 @@ def iter_weights(
                         and tensor.shape[1] == 1
                     ):
                         tensor = tensor.reshape(-1).to(torch.float32)
-                    if is_vision or is_expert:
+                    if is_vision or is_expert or leaf == "q_proj":
                         yield name, tensor
                         continue
 

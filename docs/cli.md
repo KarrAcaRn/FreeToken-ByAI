@@ -87,7 +87,7 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--vram-reserve-mb` | 0 | VRAM (MiB) left free for the rest of the machine at the largest prefill: startup runs one max-length chunk and shrinks the MoE expert cache until the reserve stays free; 0 skips the check |
 | `--skip-preflight` | off | Load the weights even when the pre-load memory forecast says the configuration cannot fit; see [ft info](#ft-info) |
 | `--num-pages` / `--num-tokens` | auto | KV capacity override in pages / tokens (mutually exclusive; auto sizes from VRAM left after weights and MoE cache) |
-| `--embed-weights` | gpu | Where the input token embedding tables live. `host` pins them in host RAM as they load (they never occupy VRAM) and each lookup reads its rows over PCIe, so their VRAM goes to the expert cache and KV (2.37 GiB on Qwen3.8-27B). Decode reads one row per token, so speed is unchanged. A table tied to the LM head stays on the GPU; a model whose only table is tied is refused. `ft info` suggests it |
+| `--embed-weights` | gpu | Where the input token embedding tables live. `host` pins them in host RAM as they load (they never occupy VRAM) and each lookup reads its rows over PCIe, so their VRAM goes to the expert cache and KV (2.37 GiB on Qwen3.8-27B). Decode reads one row per token, so speed is unchanged. A table tied to the LM head stays on the GPU; a model whose only table is tied is refused. `ft info` suggests it; Gemma-4 E2B / E4B's per-layer table is the one that moves, the way those models fit an 8 GB GPU |
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
 | `--dense-offload-layers` | 0 | `N` or `auto`: dense models keep N decoder layers in pinned host RAM and stream them over PCIe every forward; the freed VRAM goes to the KV cache. `auto` offloads the fewest layers that reach `--kv-reserve-tokens`. Costs decode speed (each offloaded layer crosses PCIe once per token); long prefills hide most of the copies. Single GPU, dense models only |
 | `--embed-device` | gpu | Deprecated alias: `cpu` is `--embed-weights host` (logs a warning), `gpu` the default |
@@ -186,6 +186,11 @@ final chunk (the usage chunk when one is asked for, else the finish chunk; on `/
 the `response.completed` / `response.incomplete` event's data); a multi-prompt or `n > 1`
 `/v1/completions` request reports the first prompt's first choice, as llama.cpp does.
 `/v1/messages` never carries it (llama.cpp emits no timings there either).
+
+A streaming chat completion, completion or Responses request may set the llama.cpp top-level
+body field `"timings_per_token": true` to carry the block with growing values on every chunk
+that follows an ack: text and reasoning deltas, tool-argument fragments, and the finish chunk
+(or the usage chunk with `include_usage`). With `--no-enable-timings-report` the field is ignored.
 
 It is on by default (upstream FreeToken defaults it off); `--no-enable-timings-report` drops it.
 `cache_n` reveals the prefix-cache hit whatever `--enable-cache-report` says, which controls
