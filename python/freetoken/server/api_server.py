@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 from .args import ServerArgs
 from .anthropic_api import register_anthropic_routes
 from .accounting import AdmissionClosedError, register_accounting_routes
+from .audio_api import register_audio_routes
 from .control_api import build_runtime_identity_snapshot, register_control_routes
 from .maintenance import maintenance_gate
 from .openai_api import register_openai_routes
@@ -591,6 +592,14 @@ register_anthropic_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_responses_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_control_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_accounting_routes(app, get_global_state)
+register_audio_routes(app, get_global_state, lambda: _stt_client())
+
+
+def _stt_client():
+    # lazy: freetoken.stt pulls in transformers
+    from freetoken.stt.client import get_stt_client
+
+    return get_stt_client()
 
 
 # Paths the HTTP middleware logs into the request ring. The three chat protocols funnel through

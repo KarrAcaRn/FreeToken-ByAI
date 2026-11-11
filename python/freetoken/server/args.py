@@ -100,6 +100,13 @@ class ServerArgs(SchedulerConfig):
     gpu: tuple[str, ...] = ()
     # full UUIDs resolved from --gpu, entry i = TP rank i; None = NVML unavailable, each worker then resolves its raw entry against CUDA's own enumeration
     gpu_assigned: "tuple[str, ...] | None" = None
+    # Whisper checkpoint served next to the LLM on /v1/audio/*; None = no speech-to-text
+    stt_model: str | None = None
+    stt_served_name: str | None = None
+    # one --gpu style entry; None = the LLM's first GPU
+    stt_gpu: str | None = None
+    # False for checkpoints that lost Whisper's timestamp tokens (decoded as fixed windows)
+    stt_timestamps: bool = True
 
     @property
     def share_tokenizer(self) -> bool:
@@ -138,6 +145,42 @@ def _json_object(text: str) -> dict:
     if not isinstance(value, dict):
         raise argparse.ArgumentTypeError("expected a JSON object")
     return value
+
+
+# the top-level files of a Whisper repo; skips per-runtime artifacts some repos ship (TheStage: GBs)
+_STT_ALLOW_PATTERNS = [
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "tokenizer*.json",
+    "vocab.json",
+    "merges.txt",
+    "normalizer.json",
+    "added_tokens.json",
+    "special_tokens_map.json",
+    "model*.safetensors",
+    "model.safetensors.index.json",
+]
+
+
+def _resolve_stt_model(parser: argparse.ArgumentParser, spec: str) -> tuple[str, str]:
+    """(local dir, served name) for --stt-model; downloads a Hugging Face id on first use."""
+    try:
+        import av  # noqa: F401
+        import multipart  # noqa: F401
+    except ImportError:
+        parser.error("--stt-model needs the audio extra: uv sync --extra audio")
+    path = os.path.expanduser(spec)
+    if not os.path.isdir(path):
+        from huggingface_hub import snapshot_download
+
+        path = snapshot_download(spec, allow_patterns=_STT_ALLOW_PATTERNS)
+    from freetoken.utils import cached_load_hf_config
+
+    arch = (cached_load_hf_config(path).to_dict().get("architectures") or [None])[0]
+    if arch != "WhisperForConditionalGeneration":
+        parser.error(f"--stt-model {spec}: architecture {arch} is not a Whisper checkpoint")
+    return path, os.path.basename(os.path.normpath(spec))
 
 
 def parse_args(
@@ -240,6 +283,11 @@ def parse_args(
         if not 0.0 < r <= 1.0:
             raise argparse.ArgumentTypeError("must be in (0, 1]")
         return r
+
+    def _lazy_single_gpu_arg(value: str) -> str:
+        from freetoken.gpu_select import single_gpu_arg
+
+        return single_gpu_arg(value)
 
     def _infer_tool_call_parser(model_path: str) -> str:
         try:
@@ -776,6 +824,27 @@ def parse_args(
         default=ServerArgs.allowed_local_media_path,
         help="Directory that file:// image refs may be read from. "
         "Unset (default) rejects local files.",
+    )
+
+    parser.add_argument(
+        "--stt-model",
+        type=str,
+        default=ServerArgs.stt_model,
+        help="Whisper checkpoint (local dir or Hugging Face id) served next to the LLM on "
+        "/v1/audio/transcriptions and /v1/audio/translations. Needs the `audio` extra.",
+    )
+    parser.add_argument(
+        "--stt-gpu",
+        type=_lazy_single_gpu_arg,
+        default=ServerArgs.stt_gpu,
+        help="GPU for the speech-to-text model (UUID or nvidia-smi index); default the LLM's first GPU.",
+    )
+    parser.add_argument(
+        "--stt-no-timestamps",
+        dest="stt_timestamps",
+        action="store_false",
+        help="Decode the STT model in fixed 30 s windows without timestamp tokens, for "
+        "fine-tunes that no longer emit them (TheStageAI/thewhisper-*). Segments are then whole windows.",
     )
 
     parser.add_argument(
@@ -1379,6 +1448,9 @@ def parse_args(
         if not os.path.isdir(media_root):
             parser.error(f"--allowed-local-media-path {media_root} is not a directory")
         kwargs["allowed_local_media_path"] = media_root
+
+    if kwargs["stt_model"] is not None:
+        kwargs["stt_model"], kwargs["stt_served_name"] = _resolve_stt_model(parser, kwargs["stt_model"])
 
     if kwargs["served_model_name"] is None:
         kwargs["served_model_name"] = (

@@ -171,6 +171,16 @@ def launch_server(
             f"{', '.join(server_args.gpu_assigned) if server_args.gpu_assigned else 'resolved at CUDA init (no NVML)'}"
         )
 
+    if server_args.stt_gpu:
+        from freetoken.gpu_select import resolve_gpu_uuids
+
+        try:
+            resolved = resolve_gpu_uuids((server_args.stt_gpu,))
+        except ValueError as exc:
+            raise SystemExit(f"{prog or 'ft serve'}: error: --stt-gpu: {exc}") from exc
+        if resolved:
+            server_args = replace(server_args, stt_gpu=resolved[0])
+
     def start_subprocess() -> "BackendHandle":
         import multiprocessing as mp
 
@@ -182,6 +192,12 @@ def launch_server(
         world_size = server_args.tp_info.size
         ack_queue: mp.Queue = mp.Queue()
         processes: list[mp.Process] = []
+
+        if server_args.stt_model is not None:
+            from freetoken.stt.client import start_stt_worker
+
+            # first and blocking: the schedulers then size their caches around it
+            processes.append(start_stt_worker(server_args))
 
         for i in range(world_size):
             new_args = replace(server_args, tp_info=DistributedInfo(i, world_size))
