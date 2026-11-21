@@ -288,21 +288,28 @@ def test_layer_major_calls_offload_begin_once_before_model(monkeypatch):
 
 
 def test_moe_child_does_not_restart_prefill_stream():
-    from freetoken.layers.moe import OffloadMoELayer
+    from freetoken.layers.moe import OffloadMoELayer, _start_prefill_call
 
     events = []
     cache = SimpleNamespace(
-        begin_prefill=lambda: events.append("begin"),
-        prefetch_prefill_layer=lambda layer: events.append(("prefetch", layer)),
-        wait_prefill_layer=lambda layer: (layer,),
+        start_prefill_call=lambda layer: events.append(("begin", layer)),
+        prefill_step=lambda layer: layer,
+        next_prefill_layer=lambda layer: layer + 1,
+        prefetch_prefill_layer=lambda layer, step: events.append(("prefetch", layer)),
+        wait_prefill_layer=lambda layer, step: (layer,),
     )
     _ctx()
     import freetoken.core as core
     core.get_global_ctx()._batch = SimpleNamespace(skip_begin_prefill=True)
     layer = SimpleNamespace(layer_id=0)
 
+    _start_prefill_call(cache, 0)
     assert OffloadMoELayer._wait_prefill_overlap(layer, cache) == (0,)
     assert events == [("prefetch", 0), ("prefetch", 1)]
+
+    core.get_global_ctx()._batch = SimpleNamespace(skip_begin_prefill=False)
+    _start_prefill_call(cache, 0)
+    assert events[-1] == ("begin", 0)
 
 
 def test_ple_checkpoint_copies_incoming_ngram_context_before_chunk_commit():

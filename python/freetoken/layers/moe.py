@@ -140,6 +140,13 @@ class MoELayer(BaseOP):
         return self._maybe_all_reduce(self._resident_gemm(hidden_states, topk_weights, topk_ids))
 
 
+def _start_prefill_call(cache, layer_id: int) -> None:
+    """The offload cache's per-call prefill hook, skipped on a layer-major chunk: that chunk runs
+    every layer once per chunk, and the engine already began its prefill."""
+    if not _layer_major_chunk():
+        cache.start_prefill_call(layer_id)
+
+
 def _layer_major_chunk() -> bool:
     """A layer-major prefill chunk, whose prefill the engine already began. The layer also runs
     without an engine context (unit tests drive it directly), so a missing one means no."""
@@ -366,9 +373,7 @@ class OffloadMoELayer(MoELayer):
         pass through unmapped."""
         cache = self.offload_cache
         assert cache is not None
-        if not _layer_major_chunk():
-            # a layer-major chunk runs every layer once per chunk; the engine began its prefill
-            cache.start_prefill_call(self.layer_id)
+        _start_prefill_call(cache, self.layer_id)
         if cache.prefill_overlap:
             views = self._wait_prefill_overlap(cache)
             out = self._expert_gemm(
