@@ -316,6 +316,8 @@ def parse_args(
         # off the checkpoint only: the HF org name ricursiveAI would match other models' paths
         if "ricursive" in " ".join(candidates[1:]).lower():
             return "ricursive"
+        if "inkling2" in " ".join(candidates[1:]).lower():
+            return "inkling2"
         if "flint" in marker:
             return "glm47"
         if "gpt_oss" in marker or "gpt-oss" in marker or "gptoss" in marker:
@@ -371,6 +373,8 @@ def parse_args(
         marker = " ".join(candidates).lower()
         if "ricursive" in " ".join(candidates[1:]).lower():
             return "ricursive"
+        if "inkling2" in " ".join(candidates[1:]).lower():
+            return "inkling2"
         if "flint" in marker:
             return "flint"
         # Qwen3 Instruct checkpoints (Instruct-2507, Qwen3-VL-*-Instruct, Qwen3-Coder-*-Instruct)
