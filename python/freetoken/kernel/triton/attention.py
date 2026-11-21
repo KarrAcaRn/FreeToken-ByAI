@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from freetoken.kernel.triton.e4m3_compat import FORCE_EMU
-from freetoken.kernel.triton.kv_rows import kv_row_scale, kv_scale_args, kv_tile, kv_tile_rows, kv_tile_staged
+from freetoken.kernel.triton.kv_rows import kv_row_scale, kv_scale_args, kv_tile, kv_tile_nvfp4, kv_tile_rows, kv_tile_staged
 from freetoken.kvcache.format import NONE, KVFormat
 from freetoken.utils.arch import get_rocm_gfx_arch, is_rocm
 
@@ -224,14 +224,20 @@ def _paged_attention_kernel(
         skip_tile = tl.max(mask_n.to(tl.int32), axis=0) == 0
         if not skip_tile:
             slots = tl.load(indices_ptr + kv_start + offs_n, mask=offs_n < kv_len, other=0).to(KV_OFFSET_DTYPE)
-            k = kv_tile(
-                k_ptr
-                + slots[:, None] * stride_ks
-                + kv_head * stride_kh
-                + offs_d[None, :],
-                (offs_n[:, None] < kv_len) & mask_d[None, :],
-                KV_FMT,
-            ).to(tl.float32)
+            if KV_FMT == "nvfp4":
+                k = kv_tile_nvfp4(
+                    k_ptr + slots[:, None] * stride_ks + kv_head * stride_kh, offs_d[None, :],
+                    (offs_n[:, None] < kv_len) & mask_d[None, :], D, False,
+                ).to(tl.float32)
+            else:
+                k = kv_tile(
+                    k_ptr
+                    + slots[:, None] * stride_ks
+                    + kv_head * stride_kh
+                    + offs_d[None, :],
+                    (offs_n[:, None] < kv_len) & mask_d[None, :],
+                    KV_FMT,
+                ).to(tl.float32)
             scale_k = kv_row_scale(k_scale_ptr + slots * stride_kss + kv_head, offs_n < kv_len, KV_FMT)
             scores = tl.sum(q[None, :] * k, axis=1) * sm_scale * scale_k
             scores = tl.where(mask_n, scores, -float("inf"))
@@ -242,14 +248,20 @@ def _paged_attention_kernel(
             alpha = tl.exp(m_i - m_new)
             p = tl.exp(scores - m_new)
 
-            v = kv_tile(
-                v_ptr
-                + slots[:, None] * stride_vs
-                + kv_head * stride_vh
-                + offs_d[None, :],
-                (offs_n[:, None] < kv_len) & mask_d[None, :],
-                KV_FMT,
-            ).to(tl.float32)
+            if KV_FMT == "nvfp4":
+                v = kv_tile_nvfp4(
+                    v_ptr + slots[:, None] * stride_vs + kv_head * stride_vh, offs_d[None, :],
+                    (offs_n[:, None] < kv_len) & mask_d[None, :], D, False,
+                ).to(tl.float32)
+            else:
+                v = kv_tile(
+                    v_ptr
+                    + slots[:, None] * stride_vs
+                    + kv_head * stride_vh
+                    + offs_d[None, :],
+                    (offs_n[:, None] < kv_len) & mask_d[None, :],
+                    KV_FMT,
+                ).to(tl.float32)
             scale_v = kv_row_scale(v_scale_ptr + slots * stride_vss + kv_head, offs_n < kv_len, KV_FMT)
             acc = acc * alpha + tl.sum((p * scale_v)[:, None] * v, axis=0)
             l_i = l_i * alpha + tl.sum(p, axis=0)
@@ -398,6 +410,9 @@ def _decode_grouped_stage1_kernel(
             if KV_PACK == 4:
                 k = kv_tile_rows(k_ptr, slots, kv_head, stride_ks, stride_kh, mask_n,
                                  D, BLOCK_D, True)
+            elif KV_FMT == "nvfp4":
+                k = kv_tile_nvfp4(k_ptr + slots[None, :] * stride_ks + kv_head * stride_kh, offs_d[:, None],
+                                  mask_n[None, :] & mask_d[:, None], D, False)
             else:
                 k = kv_tile(k_ptr + slots[None, :] * stride_ks + k_base_offsets, mask_n[None, :] & mask_d[:, None], KV_FMT)
             scale_k = kv_row_scale(k_scale_ptr + slots * stride_kss + kv_head, mask_n, KV_FMT)
@@ -413,6 +428,9 @@ def _decode_grouped_stage1_kernel(
             if KV_PACK == 4:
                 v = kv_tile_rows(v_ptr, slots, kv_head, stride_vs, stride_vh, mask_n,
                                  DV, BLOCK_DV, False)
+            elif KV_FMT == "nvfp4":
+                v = kv_tile_nvfp4(v_ptr + slots[:, None] * stride_vs + kv_head * stride_vh, offs_dv[None, :],
+                                  mask_n[:, None] & mask_dv[None, :], DV, False)
             else:
                 v = kv_tile(v_ptr + slots[:, None] * stride_vs + v_base_offsets, mask_n[:, None] & mask_dv[None, :], KV_FMT)
             scale_v = kv_row_scale(v_scale_ptr + slots * stride_vss + kv_head, mask_n, KV_FMT)
@@ -584,7 +602,7 @@ def decode_paged_attention(
         assert qo_indptr.numel() == batch + 1
     assert 1 <= max_q_len <= MAX_DECODE_ROWS
     assert v_cache.shape[1] == num_kv_heads
-    assert k_cache.shape[-1] == head_dim and v_cache.shape[-1] == head_dim
+    assert k_cache.shape[-1] == kv_format.elem_dim(head_dim) and v_cache.shape[-1] == kv_format.elem_dim(head_dim)
     assert num_q_heads % num_kv_heads == 0
     assert attn_logits.shape[0] >= num_rows
     assert attn_logits.shape[1] >= num_q_heads
@@ -832,14 +850,18 @@ def _extend_attention_kernel(
         skip_tile = tl.max(tl.max(final_mask.to(tl.int32), axis=1), axis=0) == 0
         if not skip_tile:
             slots = tl.load(kv_indices_ptr + kv_start + kv_offsets, mask=mask_n, other=0).to(KV_OFFSET_DTYPE)
-            k = kv_tile(
-                k_ptr
-                + slots[None, :] * stride_ks
-                + kv_head * stride_kh
-                + offs_d[:, None],
-                mask_n[None, :] & mask_d[:, None],
-                KV_FMT,
-            )
+            if KV_FMT == "nvfp4":
+                k = kv_tile_nvfp4(k_ptr + slots[None, :] * stride_ks + kv_head * stride_kh, offs_d[:, None],
+                                  mask_n[None, :] & mask_d[:, None], D, False)
+            else:
+                k = kv_tile(
+                    k_ptr
+                    + slots[None, :] * stride_ks
+                    + kv_head * stride_kh
+                    + offs_d[:, None],
+                    mask_n[None, :] & mask_d[:, None],
+                    KV_FMT,
+                )
             scale_k = kv_row_scale(k_scale_ptr + slots * stride_kss + kv_head, mask_n, KV_FMT)
             scores = tl.dot(q.to(k.dtype), k) * sm_scale * scale_k[None, :]
             scores = tl.where(final_mask, scores, -float("inf"))
@@ -850,14 +872,18 @@ def _extend_attention_kernel(
             alpha = tl.exp(m_i - m_new)
             p = tl.exp(scores - m_new[:, None])
 
-            v = kv_tile(
-                v_ptr
-                + slots[:, None] * stride_vs
-                + kv_head * stride_vh
-                + offs_dv[None, :],
-                mask_n[:, None] & mask_dv[None, :],
-                KV_FMT,
-            )
+            if KV_FMT == "nvfp4":
+                v = kv_tile_nvfp4(v_ptr + slots[:, None] * stride_vs + kv_head * stride_vh, offs_dv[None, :],
+                                  mask_n[:, None] & mask_dv[None, :], D, False)
+            else:
+                v = kv_tile(
+                    v_ptr
+                    + slots[:, None] * stride_vs
+                    + kv_head * stride_vh
+                    + offs_dv[None, :],
+                    mask_n[:, None] & mask_dv[None, :],
+                    KV_FMT,
+                )
             scale_v = kv_row_scale(v_scale_ptr + slots * stride_vss + kv_head, mask_n, KV_FMT)
             acc = acc * alpha[:, None] + tl.dot((p * scale_v[None, :]).to(v.dtype), v)
             l_i = l_i * alpha + tl.sum(p, axis=1)
@@ -879,6 +905,7 @@ def _extend_attend_tile(
     q, m_i, l_i, acc, qk_scale, k_base, v_base, k_rows, v_rows, k_scales, v_scales, offs_d, offs_dv, mask_d, mask_dv, mask_n, mask,
     MASKED: tl.constexpr,
     KV_FMT: tl.constexpr,
+    D: tl.constexpr,
 ):
     if MASKED:
         k_mask = mask_n[None, :] & mask_d[:, None]
@@ -890,7 +917,10 @@ def _extend_attend_tile(
         scale_mask = tl.full(k_rows.shape, 1, tl.int1)
     # scales first: loading them after the staged decode ran slower at head_dim 128
     scale_k = kv_row_scale(k_scales, scale_mask, KV_FMT)
-    k = kv_tile_staged(k_base + k_rows[None, :] + offs_d[:, None], k_mask, KV_FMT)
+    if KV_FMT == "nvfp4":
+        k = kv_tile_nvfp4(k_base + k_rows[None, :], offs_d[:, None], k_mask, D, True)
+    else:
+        k = kv_tile_staged(k_base + k_rows[None, :] + offs_d[:, None], k_mask, KV_FMT)
     scores = tl.dot(q.to(k.dtype), k) * scale_k[None, :]
     if MASKED:
         scores = tl.where(mask, scores, -float("inf"))
@@ -900,7 +930,10 @@ def _extend_attend_tile(
     alpha = tl.math.exp2(m_i - m_new)
     p = tl.math.exp2(scores * qk_scale - m_new[:, None])
     scale_v = kv_row_scale(v_scales, scale_mask, KV_FMT)
-    v = kv_tile_staged(v_base + v_rows[:, None] + offs_dv[None, :], v_mask, KV_FMT)
+    if KV_FMT == "nvfp4":
+        v = kv_tile_nvfp4(v_base + v_rows[:, None], offs_dv[None, :], v_mask, D, True)
+    else:
+        v = kv_tile_staged(v_base + v_rows[:, None] + offs_dv[None, :], v_mask, KV_FMT)
     acc = acc * alpha[:, None] + tl.dot((p * scale_v[None, :]).to(v.dtype), v)
     l_i = l_i * alpha + tl.sum(p, axis=1)
     return m_new, l_i, acc
@@ -1018,7 +1051,7 @@ def _extend_attention_split_kernel(
         m_i, l_i, acc = _extend_attend_tile(
             q, m_i, l_i, acc, qk_scale, kc_base, vc_base, slots * stride_kcs, slots * stride_vcs,
             ks_base + slots * stride_kss, vs_base + slots * stride_vss,
-            offs_d, offs_dv, mask_d, mask_dv, None, None, False, KV_FMT,
+            offs_d, offs_dv, mask_d, mask_dv, None, None, False, KV_FMT, D,
         )
     n_left = (u0 - lo) // BLOCK_N
     for i in tl.range(0, n_left + tl.cdiv(prefix_end - u1, BLOCK_N)):
@@ -1031,7 +1064,7 @@ def _extend_attention_split_kernel(
         m_i, l_i, acc = _extend_attend_tile(
             q, m_i, l_i, acc, qk_scale, kc_base, vc_base, slots * stride_kcs, slots * stride_vcs,
             ks_base + slots * stride_kss, vs_base + slots * stride_vss,
-            offs_d, offs_dv, mask_d, mask_dv, mask_n, final_mask, True, KV_FMT,
+            offs_d, offs_dv, mask_d, mask_dv, mask_n, final_mask, True, KV_FMT, D,
         )
 
     # this chunk's K and V are raw compute-dtype tensors, not pool rows
@@ -1053,7 +1086,7 @@ def _extend_attention_split_kernel(
         rows = q_start + start_n + offs_n
         m_i, l_i, acc = _extend_attend_tile(
             q, m_i, l_i, acc, qk_scale, ke_base, ve_base, rows * stride_ket, rows * stride_vet, None, None,
-            offs_d, offs_dv, mask_d, mask_dv, None, None, False, "none",
+            offs_d, offs_dv, mask_d, mask_dv, None, None, False, "none", D,
         )
     n_left = (u0 - lo) // BLOCK_N
     for i in tl.range(0, n_left + tl.cdiv(current_end - u1, BLOCK_N)):
@@ -1071,7 +1104,7 @@ def _extend_attention_split_kernel(
         rows = q_start + local_kv_offsets
         m_i, l_i, acc = _extend_attend_tile(
             q, m_i, l_i, acc, qk_scale, ke_base, ve_base, rows * stride_ket, rows * stride_vet, None, None,
-            offs_d, offs_dv, mask_d, mask_dv, mask_n, final_mask, True, "none",
+            offs_d, offs_dv, mask_d, mask_dv, mask_n, final_mask, True, "none", D,
         )
 
     out = tl.where(l_i[:, None] == 0.0, 0.0, acc / l_i[:, None])
@@ -1114,7 +1147,7 @@ def extend_paged_attention(
     assert qo_indptr.numel() == kv_indptr.numel()
     assert prefix_lens.numel() == qo_indptr.numel() - 1
     assert v_cache.shape[1] == num_kv_heads
-    assert k_cache.shape[-1] == head_dim and v_cache.shape[-1] == head_dim
+    assert k_cache.shape[-1] == kv_format.elem_dim(head_dim) and v_cache.shape[-1] == kv_format.elem_dim(head_dim)
     assert num_q_heads % num_kv_heads == 0
     if sinks is not None:
         assert sinks.is_cuda
@@ -1263,7 +1296,7 @@ def paged_attention(
     num_tokens, num_q_heads, head_dim = q.shape
     num_kv_heads = k_cache.shape[1]
     assert v_cache.shape[1] == num_kv_heads
-    assert k_cache.shape[-1] == head_dim and v_cache.shape[-1] == head_dim
+    assert k_cache.shape[-1] == kv_format.elem_dim(head_dim) and v_cache.shape[-1] == kv_format.elem_dim(head_dim)
     assert num_q_heads % num_kv_heads == 0
     if sinks is not None:
         assert sinks.is_cuda

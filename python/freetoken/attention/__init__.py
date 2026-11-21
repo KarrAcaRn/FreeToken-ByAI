@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from freetoken.kvcache.format import FP8_DS_MLA, NVFP4_DS_MLA, ROW_SCALE_FORMATS
+from freetoken.kvcache.format import FP8_DS_MLA, NVFP4_DS_MLA, PACKED_ROW_SCALE_FORMATS, ROW_SCALE_FORMATS
 from freetoken.utils import Registry, init_logger
 
 from .base import AttentionSpec, AttnType, BaseAttnBackend, BaseAttnMetadata, HybridBackend
@@ -92,7 +92,7 @@ def create_fa_backend(config: ModelConfig):
         supported_types=frozenset({AttnType.FULL, AttnType.SWA}),
         consumes_attn_spec=True,
         uniform_extend_graph="device",
-        kv_formats=ROW_SCALE_FORMATS,
+        kv_formats=PACKED_ROW_SCALE_FORMATS,
     ),
 )
 def create_triton_backend(config: ModelConfig):
@@ -123,7 +123,7 @@ def create_dsv41_sparse_backend(config: ModelConfig):
 
 @SUPPORTED_ATTENTION_BACKENDS.register(
     "dsa",
-    BackendInfo(supported_types=frozenset({AttnType.MLA, AttnType.DSA}), kv_formats=ROW_SCALE_FORMATS),
+    BackendInfo(supported_types=frozenset({AttnType.MLA, AttnType.DSA}), kv_formats=PACKED_ROW_SCALE_FORMATS),
 )
 def create_dsa_backend(config: ModelConfig):
     # MLA with a grouped index (index_ratio > 1) is the kpool indexer layout.
@@ -161,7 +161,7 @@ def create_m3_sparse_backend(config: ModelConfig):
         # compressed row of a group is page_base // 4 + block-in-page.
         page_sizes=(64,),
         uniform_extend_graph="device",
-        kv_formats=ROW_SCALE_FORMATS,
+        kv_formats=PACKED_ROW_SCALE_FORMATS,
     ),
 )
 def create_qsa_sparse_backend(config: ModelConfig):

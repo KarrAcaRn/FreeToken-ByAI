@@ -745,7 +745,9 @@ def parse_args(
         "attention backends read "
         "them. They need --dtype bfloat16 and no tensor parallelism. An mtp draft stores its KV in the same format. "
         "DeepSeek-V4 stores only fp8_ds_mla and DeepSeek-V4.1 only nvfp4_ds_mla (their own packed fp8 / fp4 layouts, "
-        "named as in vLLM); 'auto' picks them there. 'fp8' is an alias of fp8_per_token_head and 'bf16' of 'auto'.",
+        "named as in vLLM); 'auto' picks them there. 'nvfp4' stores packed e2m1 codes with one e4m3 scale per 16 elements and one fp32 scale "
+        "per token and head (about 0.3x the bf16 bytes) on the triton, qsa_sparse and dsa backends; it needs head_dim "
+        "divisible by 16. 'fp8' is an alias of fp8_per_token_head and 'bf16' of 'auto'.",
     )
 
     parser.add_argument(

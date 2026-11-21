@@ -6,6 +6,7 @@ import triton.language as tl
 from triton.language import target_info
 
 from freetoken.kernel.triton.e4m3_compat import (
+    e2m1_code_f32,
     e4m3_f32_to_u8,
     e4m3_native_cx,
     e4m3_u8_to_f32,
@@ -110,6 +111,56 @@ def kv_row_scale(ptrs, mask, FMT: tl.constexpr):
     return scale
 
 
+@triton.jit
+def kv_tile_nvfp4(rows, dims, mask, D: tl.constexpr, STAGED: tl.constexpr = False):
+    """An nvfp4 K or V tile in bf16 without its row scale. ``rows`` point at each row's
+    start and broadcast against the channels ``dims``; the D-wide row holds D / 2 code
+    bytes (even channel in the low nibble) and then one e4m3 scale byte per 16 channels."""
+    packed = tl.load(rows + dims // 2, mask=mask, other=0).to(tl.int32)
+    codes = tl.where((dims & 1) == 0, packed & 15, packed >> 4)
+    block = tl.load(rows + (D // 2 + dims // 16), mask=mask, other=0)
+    # e2m1 x e4m3 has at most six significant bits, so the bf16 tile is exact
+    x = e2m1_code_f32(codes) * e4m3_u8_to_f32(block)
+    if STAGED:
+        x = stage_tile(x)
+    return x.to(tl.bfloat16)
+
+
+@triton.jit
+def _encode_e2m1(x):
+    # round to nearest, ties to the even code
+    a = tl.abs(x)
+    code = tl.full(x.shape, 0, tl.int32)
+    code = tl.where(a > 0.25, 1, code)
+    code = tl.where(a >= 0.75, 2, code)
+    code = tl.where(a > 1.25, 3, code)
+    code = tl.where(a >= 1.75, 4, code)
+    code = tl.where(a > 2.5, 5, code)
+    code = tl.where(a >= 3.5, 6, code)
+    code = tl.where(a > 5.0, 7, code)
+    return code | tl.where(x < 0, 8, 0)
+
+
+@triton.jit
+def _store_nvfp4_segment(src, stride_src, dst, START: tl.constexpr, WIDTH: tl.constexpr, D: tl.constexpr, BLOCKS: tl.constexpr):
+    """Encode the WIDTH channels ``src[c * stride_src]`` as channels START.. of the D-wide nvfp4 row at ``dst``; returns the segment's row scale."""
+    blocks = tl.arange(0, BLOCKS)
+    dims = blocks[:, None] * 16 + tl.arange(0, 16)[None, :]
+    x = tl.load(src + dims * stride_src, mask=dims < WIDTH, other=0.0).to(tl.float32)
+    amax = tl.max(tl.abs(x), axis=1)
+    # 6 * 448: the largest e2m1 code times the largest e4m3 block scale
+    row_scale = tl.maximum(tl.max(amax, axis=0), 1e-10) / 2688.0
+    block_scale = round_e4m3(tl.minimum(tl.div_rn(amax, 6.0 * row_scale), 448.0))
+    # quantize against the block scale as stored, e4m3 rounding and underflow included
+    denom = tl.where(block_scale > 0, block_scale * row_scale, 1.0)
+    normalized = tl.where(block_scale[:, None] > 0, tl.div_rn(x, denom[:, None]), 0.0)
+    lo, hi = tl.split(_encode_e2m1(normalized).reshape(BLOCKS, 8, 2))
+    byte_dims = blocks[:, None] * 8 + tl.arange(0, 8)[None, :]
+    tl.store(dst + START // 2 + byte_dims, (lo | (hi << 4)).to(tl.uint8), mask=byte_dims < WIDTH // 2)
+    tl.store(dst + D // 2 + START // 16 + blocks, e4m3_f32_to_u8(block_scale), mask=blocks < WIDTH // 16)
+    return row_scale
+
+
 def kv_scale_args(
     kv_format: KVFormat,
     k_cache: torch.Tensor,
@@ -186,6 +237,43 @@ def _kv_store_kernel(
     tl.store(v_scale_dst + slot * stride_vs + head, v_scale)
 
 
+@triton.jit
+def _kv_store_nvfp4_kernel(
+    k_src, v_src, k_dst, v_dst, k_scale_dst, v_scale_dst, slots,
+    stride_kt, stride_vt, stride_kd, stride_vd, stride_ks, stride_vs,
+    D: tl.constexpr,
+    E: tl.constexpr,
+    BLOCKS: tl.constexpr,
+):
+    token = tl.program_id(0)
+    head = tl.program_id(1)
+    slot = tl.load(slots + token).to(tl.int64)
+    k_scale = _store_nvfp4_segment(k_src + token * stride_kt + head * D, 1, k_dst + slot * stride_kd + head * E, 0, D, D, BLOCKS)
+    v_scale = _store_nvfp4_segment(v_src + token * stride_vt + head * D, 1, v_dst + slot * stride_vd + head * E, 0, D, D, BLOCKS)
+    tl.store(k_scale_dst + slot * stride_ks + head, k_scale)
+    tl.store(v_scale_dst + slot * stride_vs + head, v_scale)
+
+
+@triton.jit
+def _latent_store_nvfp4_kernel(
+    c_src, r_src, dst, scale_dst, slots,
+    stride_ct, stride_cd, stride_rt, stride_rd, stride_d, stride_s,
+    D_V: tl.constexpr,
+    D_R: tl.constexpr,
+    BLOCKS_V: tl.constexpr,
+    BLOCKS_R: tl.constexpr,
+):
+    token = tl.program_id(0)
+    slot = tl.load(slots + token).to(tl.int64)
+    row = dst + slot * stride_d
+    tl.store(scale_dst + slot * stride_s, _store_nvfp4_segment(c_src + token * stride_ct, stride_cd, row, 0, D_V, D_V + D_R, BLOCKS_V))
+    if D_R > 0:
+        tl.store(
+            scale_dst + slot * stride_s + 1,
+            _store_nvfp4_segment(r_src + token * stride_rt, stride_rd, row, D_V, D_R, D_V + D_R, BLOCKS_R),
+        )
+
+
 def store_kv_rows(
     fmt: KVFormat,
     k: torch.Tensor,
@@ -200,13 +288,24 @@ def store_kv_rows(
     tokens = k.shape[0]
     if tokens == 0:
         return
-    _, heads, head_dim = k_cache.shape
+    _, heads, elem_dim = k_cache.shape
+    head_dim = k.shape[1] // heads
+    assert elem_dim == fmt.elem_dim(head_dim), (elem_dim, head_dim, fmt.name)
     assert k.shape == v.shape == (tokens, heads * head_dim), (k.shape, v.shape, heads, head_dim)
-    assert k.stride(1) == v.stride(1) == 1 and k_cache.stride(1) == v_cache.stride(1) == head_dim
+    assert k.stride(1) == v.stride(1) == 1 and k_cache.stride(1) == v_cache.stride(1) == elem_dim
     assert k_cache.dtype == v_cache.dtype == fmt.elem_store_dtype
     assert k_scale.dtype == v_scale.dtype == fmt.scale_store_dtype
     assert k_scale.shape[:2] == k_cache.shape[:2] and v_scale.shape[:2] == v_cache.shape[:2]
     assert k_scale.stride(1) == v_scale.stride(1) == 1
+    if fmt.name == "nvfp4":
+        _kv_store_nvfp4_kernel[(tokens, heads)](
+            k, v, k_cache, v_cache, k_scale, v_scale, out_loc,
+            k.stride(0), v.stride(0), k_cache.stride(0), v_cache.stride(0), k_scale.stride(0), v_scale.stride(0),
+            D=head_dim, E=elem_dim, BLOCKS=triton.next_power_of_2(max(head_dim // 16, 1)),
+            # the encoder divides by the scale it stores; a fused multiply-add would round differently
+            num_warps=1, enable_fp_fusion=False,
+        )
+        return
     _kv_store_kernel[(tokens, heads)](
         k,
         v,
@@ -278,9 +377,18 @@ def store_latent_rows(
     if tokens == 0:
         return
     d_v, d_r = c_kv.shape[-1], k_rope.shape[-1]
-    assert k_rope.shape[0] == tokens and rows.shape[1] == d_v + d_r and rows.stride(1) == 1
+    assert k_rope.shape[0] == tokens and rows.shape[1] == fmt.elem_dim(d_v + d_r) and rows.stride(1) == 1
     assert rows.dtype == fmt.elem_store_dtype and scale.dtype == fmt.scale_store_dtype
     assert scale.shape == (rows.shape[0], 2) and scale.stride(1) == 1
+    if fmt.name == "nvfp4":
+        assert d_v % 16 == 0 and d_r % 16 == 0, (d_v, d_r)
+        _latent_store_nvfp4_kernel[(tokens,)](
+            c_kv, k_rope, rows, scale, out_loc,
+            c_kv.stride(0), c_kv.stride(1), k_rope.stride(0), k_rope.stride(1), rows.stride(0), scale.stride(0),
+            D_V=d_v, D_R=d_r, BLOCKS_V=triton.next_power_of_2(max(d_v // 16, 1)), BLOCKS_R=triton.next_power_of_2(max(d_r // 16, 1)),
+            num_warps=1, enable_fp_fusion=False,
+        )
+        return
     _latent_store_kernel[(tokens,)](
         c_kv,
         k_rope,

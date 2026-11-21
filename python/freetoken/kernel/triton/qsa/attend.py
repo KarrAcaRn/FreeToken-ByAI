@@ -11,7 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
-from freetoken.kernel.triton.kv_rows import kv_row_scale, kv_scale_args, kv_tile
+from freetoken.kernel.triton.kv_rows import kv_row_scale, kv_scale_args, kv_tile, kv_tile_nvfp4
 from freetoken.kvcache.format import NONE, KVFormat
 from freetoken.utils.arch import is_rocm
 
@@ -131,6 +131,27 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
                 + dim_offsets[None, :],
                 mask=valid[:, None],
                 other=0.0,
+            )
+        elif KV_FMT == "nvfp4":
+            keys = kv_tile_nvfp4(
+                k_cache_ptr
+                + safe_page[None, :] * stride_k_block
+                + page_offset[None, :] * stride_k_token
+                + kv_head * stride_k_head,
+                dim_offsets[:, None],
+                valid[None, :],
+                HEAD_DIM,
+                False,
+            )
+            values = kv_tile_nvfp4(
+                v_cache_ptr
+                + safe_page[:, None] * stride_v_block
+                + page_offset[:, None] * stride_v_token
+                + kv_head * stride_v_head,
+                dim_offsets[None, :],
+                valid[:, None],
+                HEAD_DIM,
+                False,
             )
         else:
             keys = kv_tile(
@@ -306,7 +327,7 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention metadata has invalid shapes")
     if logical_indices.shape[1] <= 0:
         raise ValueError("QSA sparse attention requires a positive selection width")
-    if q.shape[2] != k_cache.shape[3] or q.shape[1] % k_cache.shape[2]:
+    if kv_format.elem_dim(q.shape[2]) != k_cache.shape[3] or q.shape[1] % k_cache.shape[2]:
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0

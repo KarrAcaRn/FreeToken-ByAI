@@ -140,10 +140,11 @@ class TritonAttentionBackend(BaseAttnBackend):
 
         k_raw = self.kvcache.k_cache(layer_id)
         v_raw = self.kvcache.v_cache(layer_id)
-        kv_heads, head_dim = k_raw.shape[-2], k_raw.shape[-1]
-        assert head_dim == q.shape[-1]
-        k_cache = k_raw.view(-1, kv_heads, head_dim)
-        v_cache = v_raw.view(-1, kv_heads, head_dim)
+        kv_heads, elem_dim = k_raw.shape[-2], k_raw.shape[-1]
+        head_dim = q.shape[-1]
+        assert elem_dim == self.kvcache.kv_format.elem_dim(head_dim)
+        k_cache = k_raw.view(-1, kv_heads, elem_dim)
+        v_cache = v_raw.view(-1, kv_heads, elem_dim)
 
         kv_args = {
             "kv_format": self.kvcache.kv_format,

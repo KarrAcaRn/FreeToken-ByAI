@@ -413,6 +413,10 @@ def _latent_values(pool, dv: int, layer_id: int = 0) -> torch.Tensor:
     fmt = pool.kv_format
     if not fmt.quantized:
         return rows
+    if fmt.name == "nvfp4":
+        from tests.kernels.test_kv_nvfp4 import _decode_latent
+
+        return _decode_latent(pool, dv, layer_id)
     scale = pool.latent_scale(layer_id)
     return torch.cat([
         _dequantize(fmt.name, rows[:, :dv], scale[:, :1]),
@@ -426,7 +430,7 @@ def _ref_attend(q_cat, pool_rows, live_rows, scale, dv):
     return s.softmax(-1) @ k[:, :dv]
 
 
-@pytest.mark.parametrize("kv_format", ["none", "fp8_per_token_head"])
+@pytest.mark.parametrize("kv_format", ["none", "fp8_per_token_head", "nvfp4"])
 def test_backend_ragged_prefill_identity_and_selection(kv_format):
     """Two-request ragged prefill through the BACKEND (page-table slicing,
     counts = positions + 1, per-request segmentation, leader/follower reuse):

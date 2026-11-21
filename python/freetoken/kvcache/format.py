@@ -17,6 +17,8 @@ class KVFormat:
     scale_dtype: torch.dtype | None = None  # logical scale type; None means no scale tensor
     scale_store_dtype: torch.dtype | None = None  # dtype of the scale tensor
     scale_group: int = ROW  # channels per scale
+    pack: int = 1  # logical elements per element-tensor entry
+    row_group: int = 0  # channels per e4m3 scale byte stored in the row after its elements; 0 = none
 
     def __post_init__(self) -> None:
         if (self.elem_dtype is None) != (self.elem_store_dtype is None):
@@ -37,7 +39,12 @@ class KVFormat:
         """Elements of the element tensor per row."""
         if self.elem_dtype is None:
             return head_dim
-        row_bytes = head_dim * self.elem_dtype.itemsize
+        group = max(self.pack, self.row_group)
+        if head_dim % group:
+            raise ValueError(f"{self.name} needs head_dim divisible by {group}, got {head_dim}")
+        row_bytes = head_dim * self.elem_dtype.itemsize // self.pack
+        if self.row_group:
+            row_bytes += head_dim // self.row_group
         if row_bytes % self.elem_store_dtype.itemsize:
             raise ValueError(f"{self.name} cannot store a {head_dim}-wide row")
         return row_bytes // self.elem_store_dtype.itemsize
@@ -75,16 +82,28 @@ INT8_PER_TOKEN_HEAD = KVFormat(
     scale_dtype=torch.float32,
     scale_store_dtype=torch.float32,
 )
+# two e2m1 codes per byte (even channel low), then one e4m3 scale per 16 channels, then an fp32 row scale
+NVFP4 = KVFormat(
+    "nvfp4",
+    elem_dtype=torch.uint8,
+    elem_store_dtype=torch.uint8,
+    scale_dtype=torch.float32,
+    scale_store_dtype=torch.float32,
+    pack=2,
+    row_group=16,
+)
 
 # DeepSeek-V4 / V4.1 layouts, encoded by their own pools (per-tier formats in kvcache/dsv4/row_format.py); names follow vLLM
 FP8_DS_MLA = KVFormat("fp8_ds_mla", elem_dtype=None, elem_store_dtype=None)
 NVFP4_DS_MLA = KVFormat("nvfp4_ds_mla", elem_dtype=None, elem_store_dtype=None)
 
 KV_FORMATS: dict[str, KVFormat] = {
-    fmt.name: fmt for fmt in (NONE, FP8_PER_TOKEN_HEAD, INT8_PER_TOKEN_HEAD, FP8_DS_MLA, NVFP4_DS_MLA)
+    fmt.name: fmt for fmt in (NONE, FP8_PER_TOKEN_HEAD, INT8_PER_TOKEN_HEAD, NVFP4, FP8_DS_MLA, NVFP4_DS_MLA)
 }
 # what a pool with per-row scale tensors and a reader built on kv_rows.py can declare
 ROW_SCALE_FORMATS = frozenset({NONE.name, FP8_PER_TOKEN_HEAD.name, INT8_PER_TOKEN_HEAD.name})
+# ... plus nvfp4, for the pools and readers that also decode its packed rows
+PACKED_ROW_SCALE_FORMATS = ROW_SCALE_FORMATS | {NVFP4.name}
 
 
 # older --kv-cache-dtype spellings, kept for existing launch scripts

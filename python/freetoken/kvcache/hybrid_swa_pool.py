@@ -9,7 +9,7 @@ from freetoken.models.config import KVCacheGroupSpec
 from freetoken.utils import align_ceil, div_even
 
 from .base import BaseKVCachePool, WindowPoolSpec
-from .format import NONE, ROW_SCALE_FORMATS, KVFormat
+from .format import NONE, PACKED_ROW_SCALE_FORMATS, KVFormat
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ class _KVGroupStorage:
 class HybridSWAKVCache(BaseKVCachePool):
     """SGLang-style wrapper for hybrid full/SWA attention KV storage."""
 
-    kv_formats: ClassVar[frozenset[str]] = ROW_SCALE_FORMATS
+    kv_formats: ClassVar[frozenset[str]] = PACKED_ROW_SCALE_FORMATS
 
     def __init__(
         self,

@@ -303,6 +303,11 @@ def kv_format_unsupported_reason(config, model_config, kv_format: KVFormat) -> s
         return f"--kv-cache-dtype {kv_format.name} needs --dtype bfloat16, got {config.dtype}"
     if config.tp_info.size != 1:
         return f"--kv-cache-dtype {kv_format.name} does not support tensor parallelism yet"
+    for spec in getattr(model_config, "kv_cache_group_specs", lambda: ())():  # duck-typed test configs omit it
+        try:
+            kv_format.elem_dim(spec.head_dim)
+        except ValueError as e:
+            return f"--kv-cache-dtype {kv_format.name}: {e}"
     return None
 
 

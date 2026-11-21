@@ -17,11 +17,11 @@ never hand out a row one slab has and the other lacks (DSAKVCache precedent).
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import ClassVar, Sequence
 
 import torch
 
-from .format import NONE, KVFormat
+from .format import NONE, ROW_SCALE_FORMATS, KVFormat
 from .mha_pool import MHAKVCache
 
 
@@ -34,6 +34,9 @@ class BSAKVCache(MHAKVCache):
     block addressing -- base row of block ``b`` = ``page_table[t, b *
     page_size]`` -- serves K/V and index keys alike.
     """
+
+    # the m3_sparse reader has no nvfp4 arm
+    kv_formats: ClassVar[frozenset[str]] = ROW_SCALE_FORMATS
 
     def __init__(
         self,

@@ -19,7 +19,7 @@ from freetoken.kvcache.mha_pool import MHAKVCache
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--formats", default="auto,fp8_per_token_head,int8_per_token_head")
+    parser.add_argument("--formats", default="auto,fp8_per_token_head,int8_per_token_head,nvfp4")
     parser.add_argument("--lengths", default="1024,8192,32768")
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--heads", type=int, default=4)

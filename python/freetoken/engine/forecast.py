@@ -741,6 +741,7 @@ def _tips_kv_dtype(inp: ForecastInputs) -> Iterable[Change]:
     current = inp.config.kv_format.name
     options = (
         ("fp8_per_token_head", 1, "e4m3 codes with per-row scales; decode within a few percent of bf16"),
+        ("nvfp4", 2, "packed 4-bit codes; slower decode at long context"),
     )
     order = [name for name, _, _ in options]
     for name, cost, note in options:

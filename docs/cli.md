@@ -95,7 +95,7 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--embed-device` | gpu | Deprecated alias: `cpu` is `--embed-weights host` (logs a warning), `gpu` the default |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
 | `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU |
-| `--kv-cache-dtype` | auto | How K and V are stored. `auto` (alias `bf16`) keeps the compute dtype. `fp8_per_token_head` (e4m3, alias `fp8`) and `int8_per_token_head` store 8 bits per element plus one fp32 scale per token and head (two per MLA latent row, for ckv and kpe), about half the KV memory; see [Quantized KV cache](#quantized-kv-cache). The `triton`, `qsa_sparse`, `m3_sparse` and `dsa` backends read them; `auto` picks one of these. They need `--dtype bfloat16` and no tensor parallelism. An `mtp` draft stores its KV in the same format. DeepSeek-V4 stores only `fp8_ds_mla` (window and compressed KV as e4m3 with one ue8m0 scale per 64 channels and bf16 rope, 584 B per row; indexer keys as MXFP4, 68 B) and DeepSeek-V4.1 only `nvfp4_ds_mla` (window KV as MXFP8, compressed KV as NVFP4, indexer keys as MXFP4); the names follow vLLM, and `auto` picks them on those models |
+| `--kv-cache-dtype` | auto | How K and V are stored. `auto` (alias `bf16`) keeps the compute dtype. `fp8_per_token_head` (e4m3, alias `fp8`) and `int8_per_token_head` store 8 bits per element plus one fp32 scale per token and head (two per MLA latent row, for ckv and kpe), about half the KV memory; `nvfp4` stores 4-bit codes with block and row scales, about 0.3x (see [NVFP4 KV cache](#nvfp4-kv-cache)); see [Quantized KV cache](#quantized-kv-cache). The `triton`, `qsa_sparse`, `m3_sparse` and `dsa` backends read them; `auto` picks one of these. They need `--dtype bfloat16` and no tensor parallelism. An `mtp` draft stores its KV in the same format. DeepSeek-V4 stores only `fp8_ds_mla` (window and compressed KV as e4m3 with one ue8m0 scale per 64 channels and bf16 rope, 584 B per row; indexer keys as MXFP4, 68 B) and DeepSeek-V4.1 only `nvfp4_ds_mla` (window KV as MXFP8, compressed KV as NVFP4, indexer keys as MXFP4); the names follow vLLM, and `auto` picks them on those models |
 
 ### Quantized KV cache
 
@@ -458,29 +458,26 @@ for `FREETOKEN_H2D_BLOCKS_PER_BANK` if `PCIe-gather` sits well below the linear 
 
 ### NVFP4 KV cache
 
-`ft serve --model <checkpoint> --kv-cache-dtype nvfp4 --attention-backend triton`
-opts into packed E2M1 KV storage. The initial implementation supports plain paged
-FULL attention (MHA/GQA), hybrid-SWA, and the full-attention portion of hybrid-linear
-models, QSA, and MLA/DSA (including GLM-5.3-Flash). Head dimensions must be
-divisible by 16. DSV4 and BSA pools are rejected at startup. `auto` selects
-Triton, QSA sparse, or DSA attention for supported models. For MLA/DSA use
-`--attention-backend auto` or `--attention-backend dsa`. Only the latent slab is
-quantized; indexer keys, kpool tails/gates, and recurrent states retain their
-existing precision. A 512-element latent row occupies 292 bytes instead of 1024
-bytes in BF16, excluding those other tiers.
+`ft serve --kv-cache-dtype nvfp4` stores each K or V row as packed E2M1 codes
+(`head_dim / 2` bytes, even channel in the low nibble), then one E4M3 scale byte
+per 16 channels, plus one fp32 scale per (token, kv head) in the pool's scale
+tensor. At head_dim 128 a row costs 76 bytes, versus 256 for bf16 and 132 for
+`fp8_per_token_head`. Head dimensions must be divisible by 16, and it needs
+`--dtype bfloat16` and `--tp 1` like the 8-bit formats.
 
-Each K or V row stores `head_dim / 2` packed bytes, `head_dim / 16` E4M3 block-scale
-bytes, and one FP32 row scale. At head_dim 128 this is 76 bytes, versus 256 for
-BF16 and 132 for the existing FP8 format. Pool management, recurrent states,
-attention workspace and model weights consume additional memory.
+It works on the plain paged, hybrid-SWA (and the full-attention part of
+hybrid-linear models), QSA sparse and MLA/DSA pools, read by the `triton`,
+`qsa_sparse` and `dsa` backends; `auto` picks one of these. MiniMax-M3's
+block-sparse pool and DeepSeek-V4 / V4.1 refuse it at startup. On MLA/DSA only
+the latent rows are quantized, ckv and kpe each with their own fp32 scale
+(a 512 + 64 latent row takes 332 bytes instead of 1152); indexer keys, kpool
+tails and recurrent states keep their precision.
 
-The second-level scale is dynamic per token/head, so appending a token never
+The fp32 scale is dynamic per token and head, so appending a token never
 rescales an existing prefix. This is a FreeToken KV layout, not an external
 NVFP4 checkpoint or attention-library ABI. K/V are restored inside attention;
-Q and attention arithmetic retain their compute precision. The MoE weight option
-`--nvfp4-backend` is independent. Paged MHA prefill uses fresh compute-dtype K/V
-while cached prefixes are restored, as in the FP8 path. MLA/DSA stores fresh
-latent rows first and reads the quantized cache in both prefill and decode.
+Q and the attention arithmetic keep the compute precision. The MoE weight
+option `--nvfp4-backend` is independent.
 
 NVFP4 is opt-in: assess quality on your checkpoint and workload before using it
 for long-context inference. Capacity savings do not guarantee faster decode;

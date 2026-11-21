@@ -23,7 +23,7 @@ from typing import ClassVar
 import torch
 
 from .base import BaseKVCachePool
-from .format import NONE, ROW_SCALE_FORMATS, KVFormat
+from .format import NONE, PACKED_ROW_SCALE_FORMATS, KVFormat
 
 
 class MLAKVCache(BaseKVCachePool):
@@ -39,7 +39,7 @@ class MLAKVCache(BaseKVCachePool):
     A quantized row keeps two scales: ckv and kpe have their own ranges.
     """
 
-    kv_formats: ClassVar[frozenset[str]] = ROW_SCALE_FORMATS
+    kv_formats: ClassVar[frozenset[str]] = PACKED_ROW_SCALE_FORMATS
 
     def __init__(
         self,
@@ -97,8 +97,8 @@ class MLAKVCache(BaseKVCachePool):
         return self.k_cache(layer_id)
 
     def latent_rows(self, layer_id: int) -> torch.Tensor:
-        """Row-flat latent view ``[num_pages * page_size, latent_dim]``."""
-        return self._kv_buffer[0, self._local_layer(layer_id)].view(-1, self._latent_dim)
+        """Row-flat latent view ``[num_pages * page_size, kv_format.elem_dim(latent_dim)]``."""
+        return self._kv_buffer[0, self._local_layer(layer_id)].view(-1, self._kv_buffer.shape[-1])
 
     def latent_scale(self, layer_id: int) -> torch.Tensor | None:
         """Row scales ``[num_pages * page_size, 2]`` (ckv, kpe), or None when rows are not quantized."""

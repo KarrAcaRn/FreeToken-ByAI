@@ -346,10 +346,11 @@ def test_kv_dtype_tips_shrink_bytes_per_token_and_pick_a_code_decoding_backend(t
 
     r = _analyze(tiny_qwen3)
     changes = {c.flag: c for c in _tips_kv_dtype(r.inputs)}
-    assert set(changes) == {"--kv-cache-dtype fp8_per_token_head"}
+    assert set(changes) == {"--kv-cache-dtype fp8_per_token_head", "--kv-cache-dtype nvfp4"}
     base = r.forecast
     fp8 = _evaluate(r.inputs, (changes["--kv-cache-dtype fp8_per_token_head"],))
-    assert base.kv_tokens < fp8.kv_tokens
+    nvfp4 = _evaluate(r.inputs, (changes["--kv-cache-dtype nvfp4"],))
+    assert base.kv_tokens < fp8.kv_tokens < nvfp4.kv_tokens
     config = copy.copy(r.inputs.config)
     changes["--kv-cache-dtype fp8_per_token_head"].apply(config)
     assert _backend_parts_serve(config.attention_backend, _required_attn_types(config.model_config), config.kv_format)

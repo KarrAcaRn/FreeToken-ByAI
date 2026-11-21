@@ -7,7 +7,7 @@ from freetoken.distributed import get_tp_info
 from freetoken.utils import div_even
 
 from .base import BaseKVCachePool
-from .format import NONE, ROW_SCALE_FORMATS, KVFormat
+from .format import NONE, PACKED_ROW_SCALE_FORMATS, KVFormat
 
 
 class MHAKVCache(BaseKVCachePool):
@@ -23,7 +23,7 @@ class MHAKVCache(BaseKVCachePool):
     dense slot, avoiding a multiple-x over-allocation of unused slabs.
     """
 
-    kv_formats: ClassVar[frozenset[str]] = ROW_SCALE_FORMATS
+    kv_formats: ClassVar[frozenset[str]] = PACKED_ROW_SCALE_FORMATS
 
     def __init__(
         self,
