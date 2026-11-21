@@ -14,6 +14,8 @@ THINK_FORMATS = {
     "think": ("<think>\n", "\n</think>\n\n"),  # Qwen3.x, GLM
     "harmony": ("<|channel|>analysis<|message|>", "<|end|><|start|>assistant<|channel|>final<|message|>"),  # gpt-oss
     "gemma4": ("<|channel>thought\n", "<channel|>"),
+    # Inkling 2 (TMLv0): a thinking message, then the answer as a text message of the same turn
+    "inkling2": ("<|message_model|><|content_thinking|>", "<|end_message|><|message_model|><|content_text|>"),
 }
 STOP_THINKING = "\n\nTime is up. I must stop thinking now and write the final answer immediately."
 

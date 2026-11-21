@@ -2,7 +2,7 @@
 # caps = Fähigkeiten (vision = Bildeingabe), think_format = wie das Modell sein Denken schreibt (think = <think>,
 # harmony = gpt-oss, gemma4; nötig, um das Denken nach Ablauf der Denkzeit abzubrechen), tempo = "langsam" / "schnell"
 # legt die Zeitklasse fest statt sie zu messen (README: Zeitlimits), worktree = welcher FreeToken-Stand den Server stellt
-# (Standard ~/claude/ft-speed-wt = Branch next-speed), reasoning_effort = Denkstufe, die jede Anfrage mitschickt.
+# (Standard: ft-speed-wt neben diesem Checkout = Branch next-speed), reasoning_effort = Denkstufe, die jede Anfrage mitschickt.
 # "--model all" lässt alle Einträge mit skip = true aus. removed = "Grund" streicht ein Modell ganz (kein Lauf, nicht
 # auf der Seite). Jedes Modell braucht mindestens 80k Kontext, langsame (< 35 tok/s) 40k (MIN_CONTEXT in run.py), sonst bricht der Lauf ab.
 
@@ -197,3 +197,12 @@ path = "models--nvidia--Qwen3.8-Flash-Next-FP4-Local/snapshots/*"
 flags = "--kv-cache-dtype fp8 --text-model-only --ple-backend disk --cuda-graph-max-bs 1"
 # PLE als gepackte NVFP4-Zeilen von Platte (26,9 GiB), Experten 61 GiB im RAM; ~100k Kontext
 reasoning_effort = "medium"
+
+[inkling-2-mini]
+label = "Inkling 2 Mini (NVFP4)"
+group = "MoE (Offload)"
+path = "/mnt/cephfs_Buero/ki_modelle/huggingface/hub/models--thinkingmachines--Inkling-2-Mini/snapshots/*"
+# upstream #942 (2026-11-21); 3 passes over layers 6-17 per token, no prefix cache (naive), KV only bf16.
+# 0.85: prefill activations sit outside the memory budget (0.9 OOMs at ~7k tokens); 82k KV from the expert cache
+flags = "--max-running-requests 1 --memory-ratio 0.85 --kv-reserve-tokens 82000"
+think_format = "inkling2"

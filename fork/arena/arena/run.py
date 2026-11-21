@@ -230,8 +230,10 @@ def serve(model_id: str, m: dict, port: int, log: Path):
     paths = sorted(glob.glob(os.path.join(hub, m["path"])))
     if not paths:
         raise SystemExit(f"{model_id}: kein Checkpoint für {m['path']} unter {hub}")
-    tree = os.path.expanduser(m.get("worktree", "~/claude/ft-speed-wt"))
-    venv = os.path.expanduser("~/claude/FreeToken-ByAI/.venv/bin")
+    # the FreeToken checkouts sit next to the one holding this file (<dir>/ft-next-wt/fork/arena/arena/run.py)
+    repos = Path(__file__).resolve().parents[4]
+    tree = os.path.expanduser(m.get("worktree", str(repos / "ft-speed-wt")))
+    venv = str(repos / "FreeToken-ByAI" / ".venv" / "bin")
     env = dict(os.environ, PATH=f"{venv}:/usr/local/cuda/bin:" + os.environ["PATH"], CUDA_HOME="/usr/local/cuda",
                PYTHONPATH=f"{tree}/python")
     cmd = [f"{venv}/ft", "serve", "--model-path", paths[0], "--port", str(port), "--served-model-name", model_id] + shlex.split(m.get("flags", ""))
