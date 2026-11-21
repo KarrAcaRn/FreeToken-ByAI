@@ -394,24 +394,46 @@ def split_tool_lists(
 # --------------------------------------------------------------------------- #
 # The primitive: submit + generate (consume a GenSpec, drive the engine waist).
 # --------------------------------------------------------------------------- #
+def _drop_unadmitted_user(state: Any, uid: int) -> None:
+    drop = getattr(state, "drop_user", None)
+    if drop is not None:
+        drop(uid)
+        return
+    getattr(state, "ack_map", {}).pop(uid, None)
+    getattr(state, "event_map", {}).pop(uid, None)
+    stats = getattr(state, "stats", None)
+    if stats is not None and hasattr(stats, "on_drop_user"):
+        stats.on_drop_user(uid)
+
+
+async def enqueue_tokenize(state: Any, **fields: Any) -> int:
+    # A failed pack/send never reaches the tokenizer, so no terminal ack will ever clear uid.
+    uid = state.new_user()
+    try:
+        await state.send_one(TokenizeMsg(uid=uid, **fields))
+    except (OverflowError, TypeError, ValueError) as exc:
+        _drop_unadmitted_user(state, uid)
+        raise GenerationError(f"could not encode request: {exc}") from exc
+    except BaseException:
+        _drop_unadmitted_user(state, uid)
+        raise
+    return uid
+
+
 async def submit_generation(spec: GenSpec, state: Any) -> int:
     """Enqueue one generation from a GenSpec; return its uid. Every protocol adapter
     calls this — it takes the neutral spec, not a wire request type."""
     refs = collect_image_refs(spec.messages)
     images = await _resolve_images(refs, state) if refs else None
-    uid = state.new_user()
-    await state.send_one(
-        TokenizeMsg(
-            uid=uid,
-            text=spec.messages,
-            sampling_params=spec.sampling_params,
-            chat_template_kwargs=spec.chat_template_kwargs,
-            tools=spec.template_tools,
-            images=images,
-            inline_system_policy=spec.inline_system_policy,
-        )
+    return await enqueue_tokenize(
+        state,
+        text=spec.messages,
+        sampling_params=spec.sampling_params,
+        chat_template_kwargs=spec.chat_template_kwargs,
+        tools=spec.template_tools,
+        images=images,
+        inline_system_policy=spec.inline_system_policy,
     )
-    return uid
 
 
 async def count_prompt_tokens(
@@ -754,9 +776,17 @@ class ChoiceFanOut:
                 uid = self._state.new_user()
                 self._uids.append(uid)
                 self._live.add(uid)
-            await self._submit(self._uids[0])
         except BaseException:
             self.abort_live()
+            raise
+        try:
+            await self._submit(self._uids[0])
+        except BaseException:
+            # nothing reached the scheduler yet, so no terminal ack would ever clear an abort
+            self._closed = True
+            for uid in self._uids:
+                self._live.discard(uid)
+                _drop_unadmitted_user(self._state, uid)
             raise
 
     def take_live_uids(self) -> list[int]:

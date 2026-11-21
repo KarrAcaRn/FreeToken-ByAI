@@ -49,6 +49,7 @@ from .generation import (
     ToolCallsDelta,
     ToolCallStart,
     build_metrics,
+    enqueue_tokenize,
     prompt_token_ids,
     generate_events,
     generate_full,
@@ -710,7 +711,10 @@ async def handle_completion(
         if len(prompts) != 1:
             return create_error_response("Streaming completions only support a single prompt")
         fan_out = _completion_fan_out(req.n, prompts[0], _tokenize_msg, state)
-        await fan_out.start()
+        try:
+            await fan_out.start()
+        except GenerationError as exc:
+            return create_error_response(str(exc), code=exc.code)
         chunks = stream_completion_chunks(fan_out, req, state)
         if request is not None:
             chunks = state.stream_with_cancellation(chunks, request, fan_out.take_live_uids)
@@ -733,7 +737,10 @@ async def handle_completion(
     first_timings: dict[str, Any] | None = None
     for prompt_index, prompt in enumerate(prompts):
         fan_out = _completion_fan_out(req.n, prompt, _tokenize_msg, state)
-        await fan_out.start()
+        try:
+            await fan_out.start()
+        except GenerationError as exc:
+            return create_error_response(str(exc), code=exc.code)
 
         async def _drain_one(fan_out: ChoiceFanOut = fan_out, prompt_index: int = prompt_index):
             nonlocal prompt_tokens, completion_tokens, cached_tokens, first_timings
@@ -795,7 +802,11 @@ def _completion_fan_out(
     n: int, prompt: Any, tokenize_msg: Callable[[int, Any], TokenizeMsg], state: Any
 ) -> ChoiceFanOut:
     async def submit(uid: int) -> None:
-        await state.send_one(tokenize_msg(uid, prompt))
+        try:
+            await state.send_one(tokenize_msg(uid, prompt))
+        except (OverflowError, TypeError, ValueError) as exc:
+            # msgpack refused the message: the tokenizer never saw uid (same as enqueue_tokenize)
+            raise GenerationError(f"could not encode request: {exc}") from exc
 
     async def consume(uid: int) -> AsyncIterator[Any]:
         async for ack in state.wait_for_ack(uid):

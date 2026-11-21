@@ -63,6 +63,10 @@ class StatsTracker:
         self._aborting.discard(uid)
         self._admitted_at[uid] = time.monotonic() if now is None else now
 
+    def on_drop_user(self, uid: int) -> None:
+        self._inflight.discard(uid)
+        self._aborting.discard(uid)
+
     def on_abort(self, uid: int) -> None:
         if uid in self._inflight:
             self._aborting.add(uid)
