@@ -5,7 +5,14 @@ from typing import TYPE_CHECKING, List
 
 import torch
 from freetoken.core import Batch, get_global_ctx
-from freetoken.kernel.triton.attention import decode_kv_split_cap
+from freetoken.kernel.triton.attention import MAX_DECODE_ROWS, decode_kv_split_cap
+from freetoken.kvcache.format import (
+    FP8_PER_TOKEN_HEAD,
+    INT8_PER_TOKEN_HEAD,
+    PACKED_ROW_SCALE_FORMATS,
+    ROW_SCALE_FORMATS,
+    KVFormat,
+)
 
 from .base import AttentionSpec, BaseAttnBackend, BaseAttnMetadata
 from .utils import BaseCaptureData
@@ -71,8 +78,8 @@ class TritonMetadata(BaseAttnMetadata):
 # Prefill attention runs on FlashInfer's FA2 prefill, which reaches ~2.4x the triton extend
 # kernel on sm_89 at head_dim 256 (those tiles shrink to fit 99 KiB of shared memory). The
 # chunk's own K/V are bf16 as in the extend kernel; a cached prefix is gathered from the
-# pool (an fp8 one dequantized to the compute dtype) ahead of them, and the causal mask
-# aligns the queries to the end of the keys.
+# pool (a per-row-scaled one dequantized to the compute dtype) ahead of them, and the causal
+# mask aligns the queries to the end of the keys.
 _FI_PREFILL_MIN_Q = 256
 
 
@@ -87,19 +94,22 @@ def _fi_prefill_ok(q: torch.Tensor, kv_heads: int, max_q_len: int) -> bool:
 
 
 def _gather_prefix(cache: torch.Tensor, scale: torch.Tensor | None, slots: torch.Tensor,
-                   dtype: torch.dtype) -> torch.Tensor:
+                   kv_format: KVFormat, dtype: torch.dtype) -> torch.Tensor:
     rows = cache.index_select(0, slots)
-    if scale is None:
+    if not kv_format.quantized:
         return rows
-    from freetoken.kernel.triton.kv_quant import codes_to_f32
-
-    return (codes_to_f32(rows) * scale.index_select(0, slots)[..., None]).to(dtype)
+    if kv_format.name == FP8_PER_TOKEN_HEAD.name:
+        values = rows.view(torch.float8_e4m3fn).float()
+    else:
+        assert kv_format.name == INT8_PER_TOKEN_HEAD.name, kv_format.name
+        values = rows.float()
+    return (values * scale.index_select(0, slots).view(*rows.shape[:2], 1)).to(dtype)
 
 
 def _fi_prefill_attention(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     seqlens_q: List[int], cached_lens: List[int], indices: torch.Tensor,
-    k_cache: torch.Tensor, v_cache: torch.Tensor,
+    k_cache: torch.Tensor, v_cache: torch.Tensor, kv_format: KVFormat,
     k_scale: torch.Tensor | None, v_scale: torch.Tensor | None, scale: float,
 ) -> torch.Tensor:
     from flashinfer import single_prefill_with_kv_cache
@@ -110,8 +120,8 @@ def _fi_prefill_attention(
         qs, ks, vs = q[q_start : q_start + n], k[q_start : q_start + n], v[q_start : q_start + n]
         if prefix:
             slots = indices[kv_start : kv_start + prefix].to(torch.long)
-            ks = torch.cat([_gather_prefix(k_cache, k_scale, slots, q.dtype), ks])
-            vs = torch.cat([_gather_prefix(v_cache, v_scale, slots, q.dtype), vs])
+            ks = torch.cat([_gather_prefix(k_cache, k_scale, slots, kv_format, q.dtype), ks])
+            vs = torch.cat([_gather_prefix(v_cache, v_scale, slots, kv_format, q.dtype), vs])
         if n:
             o = single_prefill_with_kv_cache(qs, ks, vs, causal=True, sm_scale=scale)
             if out is None:
@@ -174,6 +184,7 @@ class TritonAttentionBackend(BaseAttnBackend):
         self,
         metadata: TritonMetadata,
         bs: int,
+        rows: int,
         num_q_heads: int,
         head_dim: int,
     ) -> None:
@@ -181,7 +192,7 @@ class TritonAttentionBackend(BaseAttnBackend):
         if (
             metadata.attn_logits is not None
             and metadata.attn_lse is not None
-            and metadata.attn_logits.shape[0] >= bs
+            and metadata.attn_logits.shape[0] >= rows
             and metadata.attn_logits.shape[1] >= num_q_heads
             and metadata.attn_logits.shape[2] >= splits
             and metadata.attn_logits.shape[3] >= head_dim
@@ -189,12 +200,12 @@ class TritonAttentionBackend(BaseAttnBackend):
             return
         scratch_head_dim = max(self.max_head_dim, head_dim)
         metadata.attn_logits = torch.empty(
-            (bs, num_q_heads, splits, scratch_head_dim),
+            (rows, num_q_heads, splits, scratch_head_dim),
             dtype=torch.float32,
             device=self.device,
         )
         metadata.attn_lse = torch.empty(
-            (bs, num_q_heads, splits),
+            (rows, num_q_heads, splits),
             dtype=torch.float32,
             device=self.device,
         )
@@ -217,34 +228,32 @@ class TritonAttentionBackend(BaseAttnBackend):
 
         metadata = batch.attn_metadata
         assert isinstance(metadata, TritonMetadata)
-        spec = attn_spec or AttentionSpec()
-        if not spec.kv_shared:
+        if k is not None:
             self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
 
         k_raw = self.kvcache.k_cache(layer_id)
         v_raw = self.kvcache.v_cache(layer_id)
-        kv_heads, stored_dim = k_raw.shape[-2], k_raw.shape[-1]
+        kv_heads, elem_dim = k_raw.shape[-2], k_raw.shape[-1]
         head_dim = q.shape[-1]
-        kv_quant = getattr(self.kvcache, "kv_quant", "none")
-        assert stored_dim == (head_dim // 2 if kv_quant == "nvfp4" else head_dim)
-        k_cache = k_raw.view(-1, kv_heads, stored_dim)
-        v_cache = v_raw.view(-1, kv_heads, stored_dim)
-        k_block_scale = self.kvcache.k_block_scale(layer_id) if kv_quant == "nvfp4" else None
-        v_block_scale = self.kvcache.v_block_scale(layer_id) if kv_quant == "nvfp4" else None
-        # An fp8 KV pool hands us its per-(token, head) scales; a 16-bit pool returns
-        # None and every kernel below keeps its original (scale-free) code path.
-        k_scale = self.kvcache.k_scale(layer_id)
-        v_scale = self.kvcache.v_scale(layer_id)
-        assert (k_scale is None) == (v_scale is None), "K and V scales come as a pair"
+        assert elem_dim == self.kvcache.kv_format.elem_dim(head_dim)
+        k_cache = k_raw.view(-1, kv_heads, elem_dim)
+        v_cache = v_raw.view(-1, kv_heads, elem_dim)
 
+        kv_args = {
+            "kv_format": self.kvcache.kv_format,
+            "k_scale": self.kvcache.k_scale(layer_id),
+            "v_scale": self.kvcache.v_scale(layer_id),
+        }
+        spec = attn_spec or AttentionSpec()
         block_ends = batch.mm_block_ends if spec.bidirectional_mm_blocks else None
         indices = metadata.indices
         if spec.sliding_window is not None and metadata.swa_indices is not None:
             indices = metadata.swa_indices
         scale = spec.sm_scale if spec.sm_scale is not None else q.shape[-1] ** -0.5
-        if metadata.is_decode and q.dtype in (torch.float16, torch.bfloat16):
+        if metadata.max_q_len <= MAX_DECODE_ROWS and block_ends is None and q.dtype in (torch.float16, torch.bfloat16):
             bs = metadata.indptr.numel() - 1
-            self._ensure_decode_scratch(metadata, bs, q.shape[1], q.shape[-1])
+            rows = q.shape[0]
+            self._ensure_decode_scratch(metadata, bs, rows, q.shape[1], q.shape[-1])
             assert metadata.attn_logits is not None
             assert metadata.attn_lse is not None
             return decode_paged_attention(
@@ -254,22 +263,21 @@ class TritonAttentionBackend(BaseAttnBackend):
                 indptr=metadata.indptr,
                 indices=indices,
                 q_positions=metadata.q_positions,
-                attn_logits=metadata.attn_logits[:bs],
-                attn_lse=metadata.attn_lse[:bs],
+                attn_logits=metadata.attn_logits[:rows],
+                attn_lse=metadata.attn_lse[:rows],
                 sm_scale=scale,
                 sliding_window=spec.sliding_window,
                 sinks=spec.sinks,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                kv_quant=kv_quant,
-                k_block_scale=k_block_scale,
-                v_block_scale=v_block_scale,
+                qo_indptr=metadata.cu_seqlens_q_gpu,
+                max_q_len=metadata.max_q_len,
+                **kv_args,
             )
+        fmt = self.kvcache.kv_format
         if (
             not metadata.is_decode
             and metadata.max_q_len <= _VERIFY_MAX_Q
             and q.shape[0] == (metadata.indptr.numel() - 1) * metadata.max_q_len
-            and kv_quant in ("none", "fp8")
+            and fmt.name in PACKED_ROW_SCALE_FORMATS
             and q.dtype in (torch.float16, torch.bfloat16)
             and spec.sliding_window is None
             and spec.sinks is None
@@ -278,11 +286,12 @@ class TritonAttentionBackend(BaseAttnBackend):
             # every token of a short uniform extend (a verify block) is already stored
             return verify_paged_attention(
                 q, k_cache, v_cache, metadata.indptr, indices,
-                metadata.max_q_len, scale, self.max_kv_splits, k_scale=k_scale, v_scale=v_scale,
+                metadata.max_q_len, scale, self.max_kv_splits, **kv_args,
             )
         if (
             metadata.prefill_host is not None
-            and kv_quant in ("none", "fp8")
+            # the chunk's own K/V are bf16, so only a cached prefix needs a torch-side decode
+            and (fmt.name in ROW_SCALE_FORMATS or not any(metadata.prefill_host[1]))
             and spec.sliding_window is None
             and spec.sinks is None
             and block_ends is None
@@ -290,7 +299,7 @@ class TritonAttentionBackend(BaseAttnBackend):
         ):
             return _fi_prefill_attention(
                 q, k.view(q.shape[0], kv_heads, head_dim), v.view(q.shape[0], kv_heads, head_dim),
-                *metadata.prefill_host, indices, k_cache, v_cache, k_scale, v_scale, scale,
+                *metadata.prefill_host, indices, k_cache, v_cache, fmt, kv_args["k_scale"], kv_args["v_scale"], scale,
             )
         if (
             (not metadata.is_decode)
@@ -312,11 +321,7 @@ class TritonAttentionBackend(BaseAttnBackend):
                 k_extend=k.view(q.shape[0], kv_heads, head_dim),
                 v_extend=v.view(q.shape[0], kv_heads, head_dim),
                 block_ends=block_ends,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                kv_quant=kv_quant,
-                k_block_scale=k_block_scale,
-                v_block_scale=v_block_scale,
+                **kv_args,
             )
         if block_ends is not None:
             raise NotImplementedError("bidirectional multimodal blocks need the extend kernel path")
@@ -331,11 +336,7 @@ class TritonAttentionBackend(BaseAttnBackend):
             sm_scale=scale,
             sliding_window=spec.sliding_window,
             sinks=spec.sinks,
-            k_scale=k_scale,
-            v_scale=v_scale,
-            kv_quant=kv_quant,
-            k_block_scale=k_block_scale,
-            v_block_scale=v_block_scale,
+            **kv_args,
         )
 
     def prepare_metadata(self, batch: Batch) -> None:
@@ -406,7 +407,7 @@ class TritonAttentionBackend(BaseAttnBackend):
             self.device,
             num_q_heads=max(1, self.num_q_heads),
             max_head_dim=max(1, self.max_head_dim),
-            scratch_rows=max(bs * self._split_cap(bs) for bs in bs_list),
+            scratch_rows=max(bs * rows_per_req * self._split_cap(bs) for bs in bs_list),
             rows_per_req=rows_per_req,
         )
         self.capture_rows_per_req = rows_per_req
@@ -461,8 +462,9 @@ class TritonAttentionBackend(BaseAttnBackend):
     def _capture_scratch(self, bs: int) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.capture is not None
         splits, heads, dim = self._split_cap(bs), max(1, self.num_q_heads), max(1, self.max_head_dim)
-        logits = self.capture.attn_logits[: bs * heads * splits * dim].view(bs, heads, splits, dim)
-        lse = self.capture.attn_lse[: bs * heads * splits].view(bs, heads, splits)
+        rows = bs * self.capture_rows_per_req
+        logits = self.capture.attn_logits[: rows * heads * splits * dim].view(rows, heads, splits, dim)
+        lse = self.capture.attn_lse[: rows * heads * splits].view(rows, heads, splits)
         return logits, lse
 
     def prepare_for_capture(self, batch: Batch) -> None:
@@ -470,6 +472,7 @@ class TritonAttentionBackend(BaseAttnBackend):
         assert bs in self.capture_bs and self.capture is not None
         capture = self.capture
         rows_per_req = self.capture_rows_per_req
+        attn_logits, attn_lse = self._capture_scratch(bs)
         if rows_per_req > 1:
             n = bs * rows_per_req
             # placeholders for a fresh request (kv rows == query rows, no prefix); replay overwrites both
@@ -484,10 +487,11 @@ class TritonAttentionBackend(BaseAttnBackend):
                 is_decode=False,
                 prefix_lens=capture.seq_lens[:bs],
                 max_q_len=rows_per_req,
+                attn_logits=attn_logits,
+                attn_lse=attn_lse,
                 swa_indices=self._capture_swa_indices(),
             )
             return
-        attn_logits, attn_lse = self._capture_scratch(bs)
         batch.attn_metadata = TritonMetadata(
             cu_seqlens_q_gpu=capture.cu_seqlens_q[: bs + 1],
             indptr=capture.cu_seqlens_k[: bs + 1],

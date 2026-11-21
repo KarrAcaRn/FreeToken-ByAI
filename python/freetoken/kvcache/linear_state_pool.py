@@ -37,8 +37,9 @@ def _linear_local_dims(
 class LinearStatePool:
     """Per-request conv history and optional GDN recurrent state.
 
-    ShortConv groups allocate only conv history. Hybrid-radix requests use independent
-    live, track and cached snapshot slots; naive requests use ``Req.table_idx``.
+    ShortConv groups allocate only conv history. A model without linear-attention layers
+    (``group`` None) gets a pool of its ``slot_states`` alone. Hybrid-radix requests use
+    independent live, track and cached snapshot slots; naive requests use ``Req.table_idx``.
 
     A model (``ModelConfig.slot_states``) or a proposer (``Proposer.slot_states``) can declare
     extra per-request tensors on the same slots; the pool gets both as ``EngineConfig.slot_states``
@@ -48,7 +49,7 @@ class LinearStatePool:
 
     def __init__(
         self,
-        group: LinearGatedDeltaGroupConfig | ShortConvGroupConfig,
+        group: LinearGatedDeltaGroupConfig | ShortConvGroupConfig | None,
         num_slots: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -64,23 +65,31 @@ class LinearStatePool:
         self._device = device
         self._conv_dtype = dtype
 
-        n_layers, local_conv_dim, local_v_heads, self._local_k_heads = _linear_local_dims(group, tp_size)
+        if group is not None:
+            n_layers, local_conv_dim, local_v_heads, self._local_k_heads = _linear_local_dims(group, tp_size)
+            km1 = group.conv_kernel_dim - 1
+            k_dim, v_dim = (group.key_head_dim, group.value_head_dim) if isinstance(group, LinearGatedDeltaGroupConfig) else (0, 0)
+        else:
+            # zero-layer GDN tensors: every whole-pool op below stays valid and moves no bytes
+            n_layers = local_conv_dim = local_v_heads = self._local_k_heads = km1 = k_dim = v_dim = 0
 
         # conv left-context: the last (kernel-1) timesteps of the conv input stream.
         self.conv_states = torch.zeros(
-            (n_layers, num_slots, local_conv_dim, group.conv_kernel_dim - 1),
+            (n_layers, num_slots, local_conv_dim, km1),
             dtype=dtype,
             device=device,
         )
         # SSM recurrent state. fp32 by default (matches HF mamba_ssm_dtype); the dtype is
         # overridable via FREETOKEN_MAMBA_SSM_DTYPE (see ssm_state_dtype).
+        # ShortConv keeps no recurrent state; no group at all keeps zero-layer tensors
         self.recurrent_states = None
-        if isinstance(group, LinearGatedDeltaGroupConfig):
+        if not isinstance(group, ShortConvGroupConfig):
             self.recurrent_states = torch.zeros(
-                (n_layers, num_slots, local_v_heads, group.key_head_dim, group.value_head_dim),
-                dtype=ssm_state_dtype(), device=device,
+                (n_layers, num_slots, local_v_heads, k_dim, v_dim),
+                dtype=ssm_state_dtype(),
+                device=device,
             )
-        self._local_index = {layer_id: i for i, layer_id in enumerate(group.layer_ids)}
+        self._local_index = {} if group is None else {layer_id: i for i, layer_id in enumerate(group.layer_ids)}
 
         self._slot_specs = tuple(slot_states)
         names = [spec.name for spec in self._slot_specs]
@@ -336,12 +345,17 @@ class LinearStatePool:
         """Build the scratch for verify batches of up to ``max_bs`` requests with ``rows_per_req`` rows each, and the verify handler of every slot state; build_fla_metadata hands the GDN scratch to the GDN layers."""
         if isinstance(self._group, ShortConvGroupConfig):
             raise ValueError("short-conv state has no verify handler")
-        self.verify_scratch = LinearVerifyScratch(self, max_bs, rows_per_req)
+        self.verify_scratch = LinearVerifyScratch(self, max_bs, rows_per_req) if self._group is not None else None
         self._verify_handlers = {
             spec.name: spec.verify(spec, max_bs, rows_per_req, self._device, self._state_dtype(spec))
             for spec in self._slot_specs
             if spec.verify is not None
         }
+
+    @property
+    def verifies(self) -> bool:
+        """Whether verify batches leave state for ``commit_verify`` to roll forward (set by ``attach_verify_scratch``)."""
+        return self.verify_scratch is not None or bool(self._verify_handlers)
 
     def verify_handler(self, name: str) -> SlotVerify:
         """The verify handler of slot state ``name``, for its owner's verify forward."""
@@ -349,7 +363,8 @@ class LinearStatePool:
 
     def commit_verify(self, slots: List[int], counts: List[int]) -> None:
         """Advance live slot slots[i] over verify row i's first counts[i] tokens."""
-        self.verify_scratch.commit(self, slots, counts)
+        if self.verify_scratch is not None:
+            self.verify_scratch.commit(self, slots, counts)
         if slots and self._verify_handlers:
             index = torch.tensor([slots, counts], dtype=torch.int64, pin_memory=self._device.type == "cuda")
             index = index.to(self._device, non_blocking=True)
@@ -407,23 +422,24 @@ class LinearVerifyScratch:
 
 
 def linear_state_bytes_per_req(
-    group: LinearGatedDeltaGroupConfig | ShortConvGroupConfig,
+    group: LinearGatedDeltaGroupConfig | ShortConvGroupConfig | None,
     tp_size: int,
     dtype: torch.dtype,
     slot_states: tuple[SlotStateSpec, ...] = (),
 ) -> int:
     """Linear-state bytes for one request across all linear layers (TP-local), plus any
     declared slot_states."""
-    n_layers, local_conv_dim, local_v_heads, _ = _linear_local_dims(group, tp_size)
-
-    conv_elems = local_conv_dim * (group.conv_kernel_dim - 1)
-    rec_elems = (
-        local_v_heads * group.key_head_dim * group.value_head_dim
-        if isinstance(group, LinearGatedDeltaGroupConfig) else 0
-    )
-    conv_bytes = conv_elems * dtype.itemsize  # conv state in model dtype
-    rec_bytes = rec_elems * ssm_state_dtype().itemsize  # recurrent state (default fp32)
-    total = n_layers * (conv_bytes + rec_bytes)
+    total = 0
+    if group is not None:
+        n_layers, local_conv_dim, local_v_heads, _ = _linear_local_dims(group, tp_size)
+        conv_elems = local_conv_dim * (group.conv_kernel_dim - 1)
+        rec_elems = (
+            local_v_heads * group.key_head_dim * group.value_head_dim
+            if isinstance(group, LinearGatedDeltaGroupConfig) else 0
+        )
+        conv_bytes = conv_elems * dtype.itemsize  # conv state in model dtype
+        rec_bytes = rec_elems * ssm_state_dtype().itemsize  # recurrent state (default fp32)
+        total = n_layers * (conv_bytes + rec_bytes)
 
     for spec in slot_states:
         item = (spec.dtype if spec.dtype is not None else dtype).itemsize
@@ -440,9 +456,7 @@ def state_pool_bytes(config, num_slots: int | None = None) -> int:
     the state pool is a sibling pool, not a KV tier."""
     linear_group = config.model_config.linear_attention_group()
     slot_states = getattr(config, "slot_states", ())
-    if linear_group is None:
-        if slot_states:
-            raise ValueError("slot_states ride the linear-state slots; model has no linear group")
+    if linear_group is None and not slot_states:
         return 0
     slots = num_slots if num_slots is not None else _linear_pool_num_slots(config)
     per_req = linear_state_bytes_per_req(
@@ -454,14 +468,16 @@ def state_pool_bytes(config, num_slots: int | None = None) -> int:
 def verify_scratch_bytes(config, rows_per_req: int) -> int:
     """Bytes of the LinearVerifyScratch the engine builds for verify batches of ``rows_per_req`` rows per request (0 when it is 1)."""
     group = config.model_config.linear_attention_group()
-    if group is None or rows_per_req <= 1:
+    if rows_per_req <= 1 or (group is None and not getattr(config, "slot_states", ())):
         return 0
     if isinstance(group, ShortConvGroupConfig):
         raise ValueError("short-conv state has no verify handler")
-    n_layers, conv_dim, hv, hk = _linear_local_dims(group, config.tp_info.size)
-    rows = n_layers * config.max_running_req * rows_per_req
-    stash = rows * (hk * group.key_head_dim + hv * group.value_head_dim + 2 * hv) * 4
-    window = rows * conv_dim * (group.conv_kernel_dim - 1) * config.dtype.itemsize
+    stash = window = 0
+    if group is not None:
+        n_layers, conv_dim, hv, hk = _linear_local_dims(group, config.tp_info.size)
+        rows = n_layers * config.max_running_req * rows_per_req
+        stash = rows * (hk * group.key_head_dim + hv * group.value_head_dim + 2 * hv) * 4
+        window = rows * conv_dim * (group.conv_kernel_dim - 1) * config.dtype.itemsize
     handlers = sum(
         spec.verify.nbytes(spec, config.max_running_req, rows_per_req, spec.dtype if spec.dtype is not None else config.dtype)
         for spec in getattr(config, "slot_states", ())

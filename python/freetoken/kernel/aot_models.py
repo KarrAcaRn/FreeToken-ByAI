@@ -11,11 +11,9 @@ Derivations, which must be kept in lockstep with the runtime call sites by hand
 (a drifted derivation misses the prebuilt cache by spec name and falls back to
 JIT, which needs nvcc):
 
-- store: ``element_size = num_kv_heads * head_dim * dtype_bytes``, one per
-  paged-KV attention group (kvcache/mha_pool.py, kvcache/hybrid_swa_pool.py) and
-  per KV width: 2 for the 16-bit cache, 1 for an fp8 one (``--kv-cache-dtype
-  fp8``, kvcache/mha_pool.py). DSV4 writes its MLA latent via torch scatter and
-  contributes nothing.
+- store: ``element_size = num_kv_heads * head_dim * 2`` (bf16 KV row), one per
+  paged-KV attention group (kvcache/mha_pool.py, kvcache/hybrid_swa_pool.py).
+  DSV4 writes its KV pools as packed byte rows via the dsv4 pack kernel and contributes nothing.
 - index: ``element_size = hidden_size * 2`` (bf16 embedding row) paired with
   the runtime ``num_splits_for`` rule (layers/embedding.py -> kernel/index.py).
   DSV4 (plain nn.Embedding) and GGUF embeddings (ggml get_rows) bypass it.
@@ -337,17 +335,19 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         # llama.cpp deepseek4 GGUF (unsloth 0731 GGUF; text only)
         arch_aliases=("DeepseekV4GGUFForCausalLM",),
         hidden_size=4096,
-        kv_groups=(),  # MLA latent pool writes via torch scatter, not store_cache
+        kv_groups=(),  # packed byte rows written by the dsv4 pack kernel, not store_cache
         top_k=6,
         moe_intermediate_size=2048,
         expert_formats=("ds_fp4",),
         embed_indexing=False,  # plain nn.Embedding
     ),
     AotModel(
-        # DSV41 pools are packed byte rows written by the dsv41 pack kernel, not store_cache;
+        # DSV41 pools are packed byte rows written by the dsv4 pack kernel, not store_cache;
         # the routed experts share DSV4's ds_fp4 bank layout (hidden 5120, intermediate 2304).
         name="deepseek-ai/DeepSeek-V4.1-Flash",
         architecture="DeepseekV41ForCausalLM",
+        # llama.cpp deepseek41 GGUF (unsloth 1017 GGUF; text only)
+        arch_aliases=("DeepseekV41GGUFForCausalLM",),
         hidden_size=5120,
         kv_groups=(),
         top_k=6,
@@ -401,6 +401,16 @@ SUPPORTED_MODELS: tuple[AotModel, ...] = (
         hidden_size=2048,
         kv_groups=((4, 128),),
         aliases=("LiquidAI/LFM3-1.7B-Base",),
+    ),
+    AotModel(
+        name="thinkingmachines/Inkling-2-Mini",
+        architecture="Inkling2LoopForConditionalGeneration",
+        hidden_size=2304,
+        kv_groups=((8, 128),),  # sliding and global layers share the same geometry
+        top_k=8,
+        moe_intermediate_size=1152,
+        # NVFP4 experts on layers 0-19; the MXFP8 layers 20-23 are served dequantized to bf16
+        expert_formats=_NVFP4_FORMATS + ("bf16",),
     ),
     AotModel(
         name="ricursiveAI/Ripple-65B-Preview",

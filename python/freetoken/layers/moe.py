@@ -140,6 +140,13 @@ class MoELayer(BaseOP):
         return self._maybe_all_reduce(self._resident_gemm(hidden_states, topk_weights, topk_ids))
 
 
+def _start_prefill_call(cache, layer_id: int) -> None:
+    """The offload cache's per-call prefill hook, skipped on a layer-major chunk: that chunk runs
+    every layer once per chunk, and the engine already began its prefill."""
+    if not _layer_major_chunk():
+        cache.start_prefill_call(layer_id)
+
+
 def _layer_major_chunk() -> bool:
     """A layer-major prefill chunk, whose prefill the engine already began. The layer also runs
     without an engine context (unit tests drive it directly), so a missing one means no."""
@@ -370,6 +377,7 @@ class OffloadMoELayer(MoELayer):
         cache = self.offload_cache
         assert cache is not None
         topk_ids = cache.remap_expert_ids(self.layer_id, topk_ids)
+        _start_prefill_call(cache, self.layer_id)
         if cache.prefill_overlap:
             views = self._wait_prefill_overlap(cache)
             out = self._expert_gemm(
@@ -410,11 +418,10 @@ class OffloadMoELayer(MoELayer):
         bank registration order; buffer position == expert id, so routing ids pass
         through unmapped). The caller runs ``release_prefill_layer`` after its GEMMs.
         """
-        if self.layer_id == 0 and not _layer_major_chunk():
-            cache.begin_prefill()
-        cache.prefetch_prefill_layer(self.layer_id)
-        cache.prefetch_prefill_layer(self.layer_id + 1)
-        return cache.wait_prefill_layer(self.layer_id)
+        step = cache.prefill_step(self.layer_id)
+        cache.prefetch_prefill_layer(self.layer_id, step)
+        cache.prefetch_prefill_layer(cache.next_prefill_layer(self.layer_id), step + 1)
+        return cache.wait_prefill_layer(self.layer_id, step)
 
     # ------------------------------------------------------------------
     # Kernel dispatch: ``views`` are the bank tensors the movement step produced (in bank registration order) and ``topk_ids`` already index their rows.

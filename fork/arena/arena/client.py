@@ -122,7 +122,9 @@ def _stream(url: str, body: dict, api_key: str | None, think_limit: float | None
     t_end = time.perf_counter()
     t_first = t_first or t_end
     usage = usage or {}
-    # An aborted stream sends no usage; one streamed chunk is about one token.
+    # continuous_usage_stats puts the running usage on every chunk, so an aborted stream keeps its
+    # count; the chunk count is only the fallback for a server without it (a speculative decode
+    # streams several tokens per chunk)
     out_tok = usage.get("completion_tokens") or chunks
     decode_s = t_end - t_first
     return {
@@ -146,7 +148,7 @@ def chat(base_url: str, model: str, messages: list, max_tokens: int, api_key: st
          write_limit: float | None = None) -> dict:
     body = {
         "model": model, "messages": messages, "max_tokens": max_tokens,
-        "stream": True, "stream_options": {"include_usage": True}, **(extra or {}),
+        "stream": True, "stream_options": {"include_usage": True, "continuous_usage_stats": True}, **(extra or {}),
     }
     # None: no temperature in the request, so ft serve fills the model's recommended sampling (generation_config)
     if temperature is not None:
@@ -193,7 +195,7 @@ def ask(base_url: str, model: str, messages: list, *, ctx: int | None, max_token
     prompt += _token_ids(base, {"input": r["reasoning"].rstrip() + STOP_THINKING + closer,
                                 "add_special_tokens": False}, api_key)
     body = {"model": model, "prompt": prompt, "max_tokens": max(256, mt - r["completion_tokens"]),
-            "stream": True, "stream_options": {"include_usage": True}}
+            "stream": True, "stream_options": {"include_usage": True, "continuous_usage_stats": True}}
     if temperature is not None:
         body["temperature"] = temperature
     # sampling values from models.toml must also reach the continuation

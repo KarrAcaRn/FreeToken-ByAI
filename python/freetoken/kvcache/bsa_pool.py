@@ -17,10 +17,11 @@ never hand out a row one slab has and the other lacks (DSAKVCache precedent).
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import ClassVar, Sequence
 
 import torch
 
+from .format import NONE, ROW_SCALE_FORMATS, KVFormat
 from .mha_pool import MHAKVCache
 
 
@@ -34,6 +35,9 @@ class BSAKVCache(MHAKVCache):
     page_size]`` -- serves K/V and index keys alike.
     """
 
+    # the m3_sparse reader has no nvfp4 arm
+    kv_formats: ClassVar[frozenset[str]] = ROW_SCALE_FORMATS
+
     def __init__(
         self,
         num_kv_heads: int,
@@ -46,6 +50,7 @@ class BSAKVCache(MHAKVCache):
         index_head_dim: int,
         num_index_layers: int,
         layer_ids: Sequence[int] | None = None,
+        kv_format: KVFormat = NONE,
     ) -> None:
         self._index_head_dim = index_head_dim
         self._num_index_layers = num_index_layers
@@ -67,6 +72,7 @@ class BSAKVCache(MHAKVCache):
             dtype=dtype,
             device=device,
             layer_ids=layer_ids,
+            kv_format=kv_format,
         )
         self._zero_kv_slabs()
         self._alloc_index_slab(num_pages)
@@ -105,6 +111,7 @@ class BSAKVCache(MHAKVCache):
             self._kv_buffer = None
             self._k_buffer = None
             self._v_buffer = None
+            self._scale_buffer = None
             raise
 
     def unit_bytes(self) -> tuple[int, int]:

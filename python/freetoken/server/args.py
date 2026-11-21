@@ -100,6 +100,13 @@ class ServerArgs(SchedulerConfig):
     gpu: tuple[str, ...] = ()
     # full UUIDs resolved from --gpu, entry i = TP rank i; None = NVML unavailable, each worker then resolves its raw entry against CUDA's own enumeration
     gpu_assigned: "tuple[str, ...] | None" = None
+    # Whisper checkpoint served next to the LLM on /v1/audio/*; None = no speech-to-text
+    stt_model: str | None = None
+    stt_served_name: str | None = None
+    # one --gpu style entry; None = the LLM's first GPU
+    stt_gpu: str | None = None
+    # False for checkpoints that lost Whisper's timestamp tokens (decoded as fixed windows)
+    stt_timestamps: bool = True
 
     @property
     def share_tokenizer(self) -> bool:
@@ -140,6 +147,42 @@ def _json_object(text: str) -> dict:
     return value
 
 
+# the top-level files of a Whisper repo; skips per-runtime artifacts some repos ship (TheStage: GBs)
+_STT_ALLOW_PATTERNS = [
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "tokenizer*.json",
+    "vocab.json",
+    "merges.txt",
+    "normalizer.json",
+    "added_tokens.json",
+    "special_tokens_map.json",
+    "model*.safetensors",
+    "model.safetensors.index.json",
+]
+
+
+def _resolve_stt_model(parser: argparse.ArgumentParser, spec: str) -> tuple[str, str]:
+    """(local dir, served name) for --stt-model; downloads a Hugging Face id on first use."""
+    try:
+        import av  # noqa: F401
+        import multipart  # noqa: F401
+    except ImportError:
+        parser.error("--stt-model needs the audio extra: uv sync --extra audio")
+    path = os.path.expanduser(spec)
+    if not os.path.isdir(path):
+        from huggingface_hub import snapshot_download
+
+        path = snapshot_download(spec, allow_patterns=_STT_ALLOW_PATTERNS)
+    from freetoken.utils import cached_load_hf_config
+
+    arch = (cached_load_hf_config(path).to_dict().get("architectures") or [None])[0]
+    if arch != "WhisperForConditionalGeneration":
+        parser.error(f"--stt-model {spec}: architecture {arch} is not a Whisper checkpoint")
+    return path, os.path.basename(os.path.normpath(spec))
+
+
 def parse_args(
     args: List[str],
     run_shell: bool = False,
@@ -156,6 +199,7 @@ def parse_args(
     """
     from freetoken.attention import validate_attn_backend
     from freetoken.kvcache import SUPPORTED_CACHE_MANAGER
+    from freetoken.kvcache.format import KV_CACHE_DTYPE_ALIASES, KV_FORMATS, NONE
     from freetoken.moe import MOE_STRATEGIES
     from freetoken.moe.pool_policy import SCOPES
 
@@ -167,6 +211,12 @@ def parse_args(
         except ValueError as exc:
             raise argparse.ArgumentTypeError(str(exc)) from None
         return value
+
+    def _parse_module_list(value: str) -> tuple[str, ...]:
+        names = tuple(p.strip() for p in value.split(",") if p.strip())
+        if not names:
+            raise argparse.ArgumentTypeError("expected comma-separated module names or glob patterns")
+        return names
 
     def _parse_moe_cache_rate(value: str) -> float:
         try:
@@ -241,6 +291,11 @@ def parse_args(
             raise argparse.ArgumentTypeError("must be in (0, 1]")
         return r
 
+    def _lazy_single_gpu_arg(value: str) -> str:
+        from freetoken.gpu_select import single_gpu_arg
+
+        return single_gpu_arg(value)
+
     def _infer_tool_call_parser(model_path: str) -> str:
         try:
             from freetoken.utils import cached_load_hf_config
@@ -263,6 +318,8 @@ def parse_args(
             return "ricursive"
         if "lfm3" in marker:
             return "qwen3_coder"
+        if "inkling2" in " ".join(candidates[1:]).lower():
+            return "inkling2"
         if "flint" in marker:
             return "glm47"
         if "gpt_oss" in marker or "gpt-oss" in marker or "gptoss" in marker:
@@ -320,6 +377,8 @@ def parse_args(
             return "ricursive"
         if "lfm3" in marker:
             return "qwen3"
+        if "inkling2" in " ".join(candidates[1:]).lower():
+            return "inkling2"
         if "flint" in marker:
             return "flint"
         # Qwen3 Instruct checkpoints (Instruct-2507, Qwen3-VL-*-Instruct, Qwen3-Coder-*-Instruct)
@@ -649,24 +708,6 @@ def parse_args(
     )
 
     parser.add_argument(
-        "--kv-cache-dtype",
-        dest="kv_quant",
-        type=str,
-        default=ServerArgs.kv_quant,
-        choices=["auto", "bf16", "fp8", "nvfp4"],
-        help=(
-            "KV-cache storage format. 'bf16' (default) stores the compute dtype; 'fp8'"
-            " stores e4m3 codes plus one fp32 scale per (token, kv head), roughly "
-            "doubling the tokens that fit in the same VRAM. Needs an attention backend"
-            " that decodes the codes (--attn auto picks triton, qsa_sparse or dsa) and a"
-            " plain paged, hybrid-SWA, QSA sparse or MLA/DSA KV pool (not DSV4 or"
-            " MiniMax-M3 block-sparse models)."
-            " 'nvfp4' stores packed E2M1 with block/row scales on the same pools; it"
-            " needs head_dim divisible by 16."
-        ),
-    )
-
-    parser.add_argument(
         "--attention-backend",
         "--attn",
         type=validate_attn_backend,
@@ -700,6 +741,21 @@ def parse_args(
         "(one slot = one whole GDN state, ~110 MB on a Qwen3-Coder-Next-class model) so a long "
         "prompt stays resumable from a boundary in the middle of it, not just from its end. "
         "0 (default) keeps today's behavior and costs no host RAM.",
+    )
+
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        default=ServerArgs.kv_cache_dtype,
+        choices=["auto", *(name for name in KV_FORMATS if name != NONE.name), *KV_CACHE_DTYPE_ALIASES],
+        help="How K and V are stored. 'auto' keeps the compute dtype. The per_token_head formats store 8 bits per "
+        "element plus one scale per token and head (two per MLA latent row); the triton, qsa_sparse, m3_sparse and dsa "
+        "attention backends read "
+        "them. They need --dtype bfloat16 and no tensor parallelism. An mtp draft stores its KV in the same format. "
+        "DeepSeek-V4 stores only fp8_ds_mla and DeepSeek-V4.1 only nvfp4_ds_mla (their own packed fp8 / fp4 layouts, "
+        "named as in vLLM); 'auto' picks them there. 'nvfp4' stores packed e2m1 codes with one e4m3 scale per 16 elements and one fp32 scale "
+        "per token and head (about 0.3x the bf16 bytes) on the triton, qsa_sparse and dsa backends; it needs head_dim "
+        "divisible by 16. 'fp8' is an alias of fp8_per_token_head and 'bf16' of 'auto'.",
     )
 
     parser.add_argument(
@@ -780,6 +836,27 @@ def parse_args(
         default=ServerArgs.allowed_local_media_path,
         help="Directory that file:// image refs may be read from. "
         "Unset (default) rejects local files.",
+    )
+
+    parser.add_argument(
+        "--stt-model",
+        type=str,
+        default=ServerArgs.stt_model,
+        help="Whisper checkpoint (local dir or Hugging Face id) served next to the LLM on "
+        "/v1/audio/transcriptions and /v1/audio/translations. Needs the `audio` extra.",
+    )
+    parser.add_argument(
+        "--stt-gpu",
+        type=_lazy_single_gpu_arg,
+        default=ServerArgs.stt_gpu,
+        help="GPU for the speech-to-text model (UUID or nvidia-smi index); default the LLM's first GPU.",
+    )
+    parser.add_argument(
+        "--stt-no-timestamps",
+        dest="stt_timestamps",
+        action="store_false",
+        help="Decode the STT model in fixed 30 s windows without timestamp tokens, for "
+        "fine-tunes that no longer emit them (TheStageAI/thewhisper-*). Segments are then whole windows.",
     )
 
     parser.add_argument(
@@ -987,9 +1064,33 @@ def parse_args(
         default=ServerArgs.embed_weights,
         choices=["gpu", "host"],
         help=(
-            "Where the input token embedding table lives. 'gpu' (default) keeps it in VRAM; 'host' keeps it in "
-            "pinned host RAM and each lookup reads its rows over PCIe, so its VRAM goes to the expert cache and KV. "
-            "Not for a table tied to the LM head."
+            "Where the input token embedding tables live. 'gpu' (default) keeps them in VRAM; 'host' keeps them in "
+            "pinned host RAM and each lookup reads its rows over PCIe, so their VRAM goes to the expert cache and KV. "
+            "A table tied to the LM head stays on the GPU; Gemma-4 E2B / E4B's per-layer table is the one that moves."
+        ),
+    )
+
+    parser.add_argument(
+        "--online-quant",
+        default=ServerArgs.online_quant,
+        choices=["df11"],
+        help=(
+            "Convert the Linear layers and input embedding tables that the checkpoint stores in bf16 at load. 'df11' "
+            "compresses them losslessly to ~11 bits per weight and decodes them bit-for-bit on use: about 30%% less "
+            "VRAM for those weights, at the cost of a decode per use. The LM head, a table tied to it, vision encoders and "
+            "layers whose weight the model reads directly stay bf16; refused when no layer qualifies."
+        ),
+    )
+
+    parser.add_argument(
+        "--online-quant-modules",
+        default=ServerArgs.online_quant_modules,
+        type=_parse_module_list,
+        help=(
+            "Limit --online-quant to these modules: comma-separated checkpoint module names or glob patterns, "
+            "e.g. 'model.layers.*.self_attn,model.embed_tokens' ('model.language_model.layers.*' where the checkpoint "
+            "nests the text model). A name also covers the modules under it; one that selects no convertible layer is "
+            "refused. Default: every layer --online-quant can convert."
         ),
     )
 
@@ -1328,6 +1429,14 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative-token-map",
+        "--spec-token-map",
+        type=str,
+        default=ServerArgs.speculative_token_map,
+        help="File of little-endian int32 token ids the draft may propose (mtp only). The draft computes logits over those LM head rows alone; the target still verifies over the whole vocabulary. Off by default.",
+    )
+
+    parser.add_argument(
         "--shell-mode",
         action="store_true",
         help="Run the server in shell mode.",
@@ -1426,6 +1535,9 @@ def parse_args(
         if not os.path.isdir(media_root):
             parser.error(f"--allowed-local-media-path {media_root} is not a directory")
         kwargs["allowed_local_media_path"] = media_root
+
+    if kwargs["stt_model"] is not None:
+        kwargs["stt_model"], kwargs["stt_served_name"] = _resolve_stt_model(parser, kwargs["stt_model"])
 
     if kwargs["served_model_name"] is None:
         kwargs["served_model_name"] = (

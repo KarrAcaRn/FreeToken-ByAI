@@ -153,11 +153,12 @@ GenEvent = ReasoningDelta | ContentDelta | ToolCallStart | ToolCallArgsDelta | T
 
 @dataclass
 class GenUsage:
-    """Token counts of a streaming generation so far. generate_events() updates it from each engine reply before it yields that reply's events."""
+    """Token counts of a streaming generation so far. generate_events() updates it from each engine reply before it yields that reply's events. `timings` carries that reply's raw scheduler snapshot (the terminal one on requests that did not ask for per-token timings); streamers attach it per chunk only for requests that did."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    timings: dict[str, Any] | None = None
 
 
 @dataclass
@@ -183,7 +184,8 @@ class GenResult:
 def timings_block(state: Any, timings: dict[str, Any] | None) -> dict[str, Any] | None:
     """llama.cpp's per-request timings object (server_slot_stats::to_json, b10408+) as
     frontends like llama-swap read it, plus queue_ms as a FreeToken extension. The spans
-    and counts are measured in the scheduler (ReqStats) and arrive on the terminal ack:
+    and counts are measured in the scheduler (ReqStats) and arrive on the terminal ack
+    (on every ack of a timings_per_token request):
     queue_ms covers waiting-queue admission to the first prefill chunk, prompt_ms the
     first chunk to the first sampled token on the host, predicted_ms the first to the
     last committed token. prompt_n counts only the evaluated tokens and the decode rates
@@ -258,6 +260,7 @@ def resolve_sampling(
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     presence_penalty: float | None = None,
     frequency_penalty: float | None = None,
+    timings_per_token: bool = False,
 ) -> SamplingParams:
     """Map a protocol's sampling fields onto the engine's neutral SamplingParams,
     filling unspecified fields from the checkpoint's recommended defaults."""
@@ -290,6 +293,7 @@ def resolve_sampling(
         stop_strs=[s for s in stop_list if s],  # drop empty strings (would match everything)
         presence_penalty=presence_penalty or 0.0,
         frequency_penalty=frequency_penalty or 0.0,
+        timings_per_token=timings_per_token,
     )
 
 
@@ -390,24 +394,46 @@ def split_tool_lists(
 # --------------------------------------------------------------------------- #
 # The primitive: submit + generate (consume a GenSpec, drive the engine waist).
 # --------------------------------------------------------------------------- #
+def _drop_unadmitted_user(state: Any, uid: int) -> None:
+    drop = getattr(state, "drop_user", None)
+    if drop is not None:
+        drop(uid)
+        return
+    getattr(state, "ack_map", {}).pop(uid, None)
+    getattr(state, "event_map", {}).pop(uid, None)
+    stats = getattr(state, "stats", None)
+    if stats is not None and hasattr(stats, "on_drop_user"):
+        stats.on_drop_user(uid)
+
+
+async def enqueue_tokenize(state: Any, **fields: Any) -> int:
+    # A failed pack/send never reaches the tokenizer, so no terminal ack will ever clear uid.
+    uid = state.new_user()
+    try:
+        await state.send_one(TokenizeMsg(uid=uid, **fields))
+    except (OverflowError, TypeError, ValueError) as exc:
+        _drop_unadmitted_user(state, uid)
+        raise GenerationError(f"could not encode request: {exc}") from exc
+    except BaseException:
+        _drop_unadmitted_user(state, uid)
+        raise
+    return uid
+
+
 async def submit_generation(spec: GenSpec, state: Any) -> int:
     """Enqueue one generation from a GenSpec; return its uid. Every protocol adapter
     calls this — it takes the neutral spec, not a wire request type."""
     refs = collect_image_refs(spec.messages)
     images = await _resolve_images(refs, state) if refs else None
-    uid = state.new_user()
-    await state.send_one(
-        TokenizeMsg(
-            uid=uid,
-            text=spec.messages,
-            sampling_params=spec.sampling_params,
-            chat_template_kwargs=spec.chat_template_kwargs,
-            tools=spec.template_tools,
-            images=images,
-            inline_system_policy=spec.inline_system_policy,
-        )
+    return await enqueue_tokenize(
+        state,
+        text=spec.messages,
+        sampling_params=spec.sampling_params,
+        chat_template_kwargs=spec.chat_template_kwargs,
+        tools=spec.template_tools,
+        images=images,
+        inline_system_policy=spec.inline_system_policy,
     )
-    return uid
 
 
 async def count_prompt_tokens(
@@ -520,7 +546,7 @@ def _make_reasoning_parser(spec: GenSpec, state: Any) -> ReasoningParser | None:
             or bool(ctk.get("enable_thinking"))
             or bool(ctk.get("thinking"))
         )
-    elif parser_name in ("flint", "ricursive"):
+    elif parser_name in ("flint", "ricursive", "inkling2"):
         # These families open their own optional think block, including when tools are present.
         force_reasoning = False
     elif parser_name == "minimax_m3":
@@ -750,9 +776,17 @@ class ChoiceFanOut:
                 uid = self._state.new_user()
                 self._uids.append(uid)
                 self._live.add(uid)
-            await self._submit(self._uids[0])
         except BaseException:
             self.abort_live()
+            raise
+        try:
+            await self._submit(self._uids[0])
+        except BaseException:
+            # nothing reached the scheduler yet, so no terminal ack would ever clear an abort
+            self._closed = True
+            for uid in self._uids:
+                self._live.discard(uid)
+                _drop_unadmitted_user(self._state, uid)
             raise
 
     def take_live_uids(self) -> list[int]:
@@ -824,6 +858,7 @@ def _record_generation(
     completion_tokens: int,
     error: str | None,
     first_token_at: float | None = None,
+    cached_tokens: int = 0,
 ) -> None:
     """Log one generation request into the request ring. Every protocol adapter converges here,
     so token totals are captured whatever endpoint served the request — unlike the HTTP
@@ -844,6 +879,7 @@ def _record_generation(
             ttft_ms=int((first_token_at - start) * 1000) if first_token_at is not None else None,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
             stream=stream,
             error=error,
         )
@@ -859,6 +895,7 @@ async def generate_events(
     timer = GenTimer()
     prompt_tokens = 0
     completion_tokens = 0
+    cached_tokens = 0
     error: str | None = None
     try:
         async for ev in _generate_events_impl(
@@ -867,6 +904,7 @@ async def generate_events(
             if isinstance(ev, GenDone):
                 prompt_tokens = ev.prompt_tokens
                 completion_tokens = ev.completion_tokens
+                cached_tokens = ev.cached_tokens
             yield ev
     except GenerationError as exc:
         error = str(exc)
@@ -875,7 +913,7 @@ async def generate_events(
         _record_generation(
             source=source, stream=True, start=timer.start,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, error=error,
-            first_token_at=timer.first_token_at,
+            first_token_at=timer.first_token_at, cached_tokens=cached_tokens,
         )
 
 
@@ -898,6 +936,7 @@ async def generate_full(
             source=source, stream=False, start=timer.start,
             prompt_tokens=result.prompt_tokens if result else 0,
             completion_tokens=result.completion_tokens if result else 0,
+            cached_tokens=result.cached_tokens if result else 0,
             error=error,
             # No first_token_at: non-streaming rows deliberately carry no TTFT, because
             # requests_ttft_mean_ms averages only the rows that have one. `metrics` still does.
@@ -1034,6 +1073,7 @@ async def _generate_events_impl(
             pending_logprobs.append(ack.logprobs)
         if getattr(ack, "timings", None) is not None:
             timings = ack.timings
+            usage.timings = timings
         content_delta = ack.incremental_output
         if reasoning_parser is not None and content_delta:
             reasoning_delta, content_delta = reasoning_parser.parse_stream_chunk(content_delta)

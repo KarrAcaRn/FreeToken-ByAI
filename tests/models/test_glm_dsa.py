@@ -148,6 +148,87 @@ def test_sparse_kernel_equals_dense_when_all_selected():
     assert (o[0, 0].float() - ref).abs().max().item() < 2e-2
 
 
+def _dequantize(fmt_name, codes, scale):
+    if fmt_name == "fp8_per_token_head":
+        return codes.cpu().view(torch.float8_e4m3fn).float().to(codes.device) * scale
+    return codes.float() * scale
+
+
+@pytest.mark.parametrize("fmt_name", ["fp8_per_token_head", "int8_per_token_head"])
+@pytest.mark.parametrize("force_splits", [0, 4])
+def test_sparse_kernel_reads_quantized_latent_rows(fmt_name, force_splits):
+    from freetoken.kernel.triton.glm_dsa_sparse import glm_dsa_sparse_attn
+    from freetoken.kernel.triton.kv_rows import store_latent_rows
+    from freetoken.kvcache.format import KV_FORMATS
+
+    torch.manual_seed(0)
+    fmt = KV_FORMATS[fmt_name]
+    h, dv, dr, n = 40, 512, 64, 977
+    capacity = n + 13
+    gain = torch.logspace(-1, 1, n, device="cuda")[:, None]
+    c_kv = (torch.randn(n, dv, device="cuda") * gain).to(torch.bfloat16)
+    # the rope part has a far smaller range than the latent part of the same row, and its own per-row range
+    k_rope = (torch.randn(n, dr, device="cuda") * 0.01 * gain.flip(0)).to(torch.bfloat16)
+    rows = torch.randperm(capacity, device="cuda")[:n].to(torch.int32)
+    pool = torch.zeros(capacity, dv + dr, device="cuda", dtype=fmt.elem_store_dtype)
+    scale = torch.zeros(capacity, 2, device="cuda", dtype=fmt.scale_store_dtype)
+    store_latent_rows(fmt, c_kv, k_rope, rows, pool, scale)
+
+    live = rows.long()
+    latent = _dequantize(fmt_name, pool[live, :dv], scale[live, 0][:, None])
+    rope = _dequantize(fmt_name, pool[live, dv:], scale[live, 1][:, None])
+    torch.testing.assert_close(latent.abs().amax(-1), c_kv.float().abs().amax(-1), rtol=1e-5, atol=0.0)
+    torch.testing.assert_close(rope.abs().amax(-1), k_rope.float().abs().amax(-1), rtol=1e-5, atol=0.0)
+
+    q = torch.randn(1, 1, h, dv + dr, device="cuda", dtype=torch.bfloat16)
+    # a large rope query keeps the small rope keys in the logits, so a wrong kpe scale moves the output
+    q[..., dv:] *= 500
+    sm_scale = (dv + dr) ** -0.5
+    idx = torch.full((1, 1, 2048), -1, device="cuda", dtype=torch.int32)
+    idx[0, 0, :n] = rows
+    cnt = torch.tensor([[n]], device="cuda", dtype=torch.int32)
+    o = glm_dsa_sparse_attn(q, pool, idx, sm_scale, counts=cnt, force_splits=force_splits, kv_format=fmt, scale=scale)
+
+    keys = torch.cat([latent, rope], dim=-1)
+    ref = ((q[0, 0].float() @ keys.T) * sm_scale).softmax(-1) @ latent
+    torch.testing.assert_close(o[0, 0].float(), ref, atol=2e-2 * ref.abs().max().item(), rtol=2e-2)
+
+
+@pytest.mark.parametrize("force_splits", [0, 4])
+def test_sparse_kernel_reads_latent_rows_past_int32_offsets(force_splits):
+    from freetoken.kernel.triton.glm_dsa_sparse import glm_dsa_sparse_attn
+    from freetoken.kernel.triton.kv_rows import store_latent_rows
+    from freetoken.kvcache.format import INT8_PER_TOKEN_HEAD as fmt
+
+    torch.manual_seed(0)
+    h, dv, dr, n = 16, 512, 64, 64
+    high = (1 << 31) // (dv + dr) + 128
+    required = (high + n) * (dv + dr + 2 * fmt.scale_store_dtype.itemsize)
+    if torch.cuda.mem_get_info()[0] < required + (1 << 30):
+        torch.cuda.empty_cache()
+        if torch.cuda.mem_get_info()[0] < required + (1 << 30):
+            pytest.skip("High-row DSA regression needs 3.2 GiB of free GPU memory")
+
+    # an int32 row offset wraps into the zeroed low rows and fails numerically
+    pool = torch.zeros(high + n, dv + dr, device="cuda", dtype=fmt.elem_store_dtype)
+    scale = torch.zeros(high + n, 2, device="cuda", dtype=fmt.scale_store_dtype)
+    rows = torch.arange(high, high + n, device="cuda", dtype=torch.int32)
+    c_kv = torch.randn(n, dv, device="cuda", dtype=torch.bfloat16)
+    k_rope = torch.randn(n, dr, device="cuda", dtype=torch.bfloat16)
+    store_latent_rows(fmt, c_kv, k_rope, rows, pool, scale)
+    latent = _dequantize(fmt.name, pool[high:, :dv], scale[high:, 0][:, None])
+    rope = _dequantize(fmt.name, pool[high:, dv:], scale[high:, 1][:, None])
+
+    q = torch.randn(1, 1, h, dv + dr, device="cuda", dtype=torch.bfloat16)
+    sm_scale = (dv + dr) ** -0.5
+    idx = rows.view(1, 1, n)
+    o = glm_dsa_sparse_attn(q, pool, idx, sm_scale, force_splits=force_splits, kv_format=fmt, scale=scale)
+
+    keys = torch.cat([latent, rope], dim=-1)
+    ref = ((q[0, 0].float() @ keys.T) * sm_scale).softmax(-1) @ latent
+    torch.testing.assert_close(o[0, 0].float(), ref, atol=2e-2 * ref.abs().max().item(), rtol=2e-2)
+
+
 def test_identity_selection_equals_topk_selection_at_short_kv():
     """The dense regimes serve through IDENTITY selection (one shared row list,
     stride-0 broadcast, causal counts). At kv <= index_topk the DSA select picks
@@ -293,7 +374,7 @@ def test_splitk_writes_out_slice(dr):
         "split-k wrote outside the out= slice"
 
 
-def _make_backend(dsa: bool, latent=80, dv=64, idx_dim=32, idx_heads=16, topk=64, pages=400, kv_quant="none"):
+def _make_backend(dsa: bool, latent=80, dv=64, idx_dim=32, idx_heads=16, topk=64, pages=400, kv_format="none"):
     """Minimal ctx + pool + DSAAttnBackend (no engine)."""
     from types import SimpleNamespace
 
@@ -302,6 +383,7 @@ def _make_backend(dsa: bool, latent=80, dv=64, idx_dim=32, idx_heads=16, topk=64
     from freetoken.core import Context, set_global_ctx
     from freetoken.distributed import set_tp_info, try_get_tp_info
     from freetoken.kvcache.dsa_pool import DSAKVCache, MLAKVCache
+    from freetoken.kvcache.format import KV_FORMATS
 
     if try_get_tp_info() is None:  # the backend splits heads by TP size; run alone, nothing set it
         set_tp_info(rank=0, size=1)
@@ -310,9 +392,11 @@ def _make_backend(dsa: bool, latent=80, dv=64, idx_dim=32, idx_heads=16, topk=64
     ctx.page_table = torch.zeros(4, pages, dtype=torch.int32, device="cuda")
     if dsa:
         ctx.kv_cache = DSAKVCache(latent, 2, pages, 1, torch.bfloat16, torch.device("cuda"),
-                                  index_head_dim=idx_dim, num_index_layers=1, kv_quant=kv_quant)
+                                  index_head_dim=idx_dim, num_index_layers=1,
+                                  kv_format=KV_FORMATS[kv_format])
     else:
-        ctx.kv_cache = MLAKVCache(latent, 2, pages, 1, torch.bfloat16, torch.device("cuda"), kv_quant=kv_quant)
+        ctx.kv_cache = MLAKVCache(latent, 2, pages, 1, torch.bfloat16, torch.device("cuda"),
+                                  kv_format=KV_FORMATS[kv_format])
     set_global_ctx(ctx)
     args = SimpleNamespace(
         kv_lora_rank=dv, qk_rope_head_dim=latent - dv, qk_head_dim=latent,
@@ -323,14 +407,31 @@ def _make_backend(dsa: bool, latent=80, dv=64, idx_dim=32, idx_heads=16, topk=64
     return DSAAttnBackend(cfg), ctx
 
 
+def _latent_values(pool, dv: int, layer_id: int = 0) -> torch.Tensor:
+    """Layer ``layer_id``'s latent rows as the attention reads them, decoded when the pool is quantized."""
+    rows = pool.latent_rows(layer_id)
+    fmt = pool.kv_format
+    if not fmt.quantized:
+        return rows
+    if fmt.name == "nvfp4":
+        from tests.kernels.test_kv_nvfp4 import _decode_latent
+
+        return _decode_latent(pool, dv, layer_id)
+    scale = pool.latent_scale(layer_id)
+    return torch.cat([
+        _dequantize(fmt.name, rows[:, :dv], scale[:, :1]),
+        _dequantize(fmt.name, rows[:, dv:], scale[:, 1:]),
+    ], dim=1)
+
+
 def _ref_attend(q_cat, pool_rows, live_rows, scale, dv):
     k = pool_rows[live_rows.long()].float()
     s = (q_cat.float() @ k.T) * scale
     return s.softmax(-1) @ k[:, :dv]
 
 
-@pytest.mark.parametrize("kv_quant", ["none", "nvfp4"])
-def test_backend_ragged_prefill_identity_and_selection(kv_quant):
+@pytest.mark.parametrize("kv_format", ["none", "fp8_per_token_head", "nvfp4"])
+def test_backend_ragged_prefill_identity_and_selection(kv_format):
     """Two-request ragged prefill through the BACKEND (page-table slicing,
     counts = positions + 1, per-request segmentation, leader/follower reuse):
     request A stays under index_topk (selection == identity == dense), request B
@@ -339,7 +440,7 @@ def test_backend_ragged_prefill_identity_and_selection(kv_quant):
 
     torch.manual_seed(5)
     dv, dr, h, idx_h, idx_d, topk = 64, 16, 8, 16, 32, 64
-    backend, ctx = _make_backend(dsa=True, topk=topk, kv_quant=kv_quant)
+    backend, ctx = _make_backend(dsa=True, topk=topk, kv_format=kv_format)
     pool = ctx.kv_cache
     scale = backend.sm_scale
 
@@ -382,11 +483,7 @@ def test_backend_ragged_prefill_identity_and_selection(kv_quant):
 
     # request A (kv <= topk): selection covers all live -> equals dense reference
     q_cat = torch.cat([q_nope, q_pe], -1)
-    slab = pool.latent_rows(0)
-    if kv_quant == "nvfp4":
-        from tests.kernels.test_kv_nvfp4 import _decode_latent
-
-        slab = _decode_latent(pool)
+    slab = _latent_values(pool, dv)
     for j in range(8):  # A's queries, positions 32..39
         live = ctx.page_table[0, : 33 + j]
         ref = _ref_attend(q_cat[j], slab, live, scale, dv)
@@ -411,17 +508,16 @@ def test_backend_ragged_prefill_identity_and_selection(kv_quant):
     assert (o0.float() - o1.float()).abs().max().item() < 3e-2
 
     # identity wiring (dense ablation): same batch through an MLAKVCache backend
-    backend_d, ctx_d = _make_backend(dsa=False, kv_quant=kv_quant)
+    backend_d, ctx_d = _make_backend(dsa=False, kv_format=kv_format)
     ctx_d.page_table.copy_(ctx.page_table)
     ctx_d.kv_cache._kv_buffer.copy_(pool._kv_buffer)
-    if kv_quant == "nvfp4":
+    if pool._scale_buffer is not None:
         ctx_d.kv_cache._scale_buffer.copy_(pool._scale_buffer)
-        ctx_d.kv_cache._block_scale_buffer.copy_(pool._block_scale_buffer)
     batch_d = SimpleNamespace(reqs=reqs, positions=positions, out_loc=out_loc,
                               active_table_idx=None, attn_metadata=None)
     backend_d.prepare_metadata(batch_d)
     od = backend_d.mla_forward(q_nope, q_pe, c_kv, k_rope, 0, batch_d, indexer_inputs=None)
-    slab_d = _decode_latent(ctx_d.kv_cache) if kv_quant == "nvfp4" else ctx_d.kv_cache.latent_rows(0)
+    slab_d = _latent_values(ctx_d.kv_cache, dv)
     for j in range(8):
         live = ctx_d.page_table[0, : 33 + j]
         ref = _ref_attend(q_cat[j], slab_d, live, scale, dv)

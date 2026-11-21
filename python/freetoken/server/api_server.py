@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 from .args import ServerArgs
 from .anthropic_api import register_anthropic_routes
 from .accounting import AdmissionClosedError, register_accounting_routes
+from .audio_api import register_audio_routes
 from .control_api import build_runtime_identity_snapshot, register_control_routes
 from .maintenance import maintenance_gate
 from .openai_api import register_openai_routes
@@ -302,6 +303,11 @@ class FrontendManager:
         self.event_map[uid] = asyncio.Event()
         self.stats.on_new_user(uid)
         return uid
+
+    def drop_user(self, uid: int) -> None:
+        self.ack_map.pop(uid, None)
+        self.event_map.pop(uid, None)
+        self.stats.on_drop_user(uid)
 
     async def listen(self):
         while True:
@@ -591,6 +597,14 @@ register_anthropic_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_responses_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_control_routes(app, get_global_state, lambda: _MODEL_SAMPLING)
 register_accounting_routes(app, get_global_state)
+register_audio_routes(app, get_global_state, lambda: _stt_client())
+
+
+def _stt_client():
+    # lazy: freetoken.stt pulls in transformers
+    from freetoken.stt.client import get_stt_client
+
+    return get_stt_client()
 
 
 # Paths the HTTP middleware logs into the request ring. The three chat protocols funnel through
@@ -1087,17 +1101,19 @@ async def generate(req: GenerateRequest, request: Request):
         return gate
     if req.max_tokens < 1:
         return JSONResponse({"error": f"max_tokens must be at least 1, got {req.max_tokens}"}, status_code=400)
-    uid = state.new_user()
-    await state.send_one(
-        TokenizeMsg(
-            uid=uid,
+    from .generation import GenerationError, enqueue_tokenize
+
+    try:
+        uid = await enqueue_tokenize(
+            state,
             text=req.prompt,
             sampling_params=SamplingParams(
                 ignore_eos=req.ignore_eos,
                 max_tokens=req.max_tokens,
             ),
         )
-    )
+    except GenerationError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
     return StreamingResponse(
         state.stream_with_cancellation(state.stream_generate(uid), request, uid),

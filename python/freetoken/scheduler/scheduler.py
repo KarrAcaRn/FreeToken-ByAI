@@ -169,7 +169,6 @@ class Scheduler(SchedulerIOMixin):
         # popped there; _free_req_resources pops too, so a request aborted mid-prefill (which
         # never samples) cannot leave one behind.
         self._prefill_start: dict[int, float] = {}
-        self._forward_iter = 0  # global forward counter; drives the SWA proactive-eviction cadence
         # The launched-but-not-yet-drained batch (overlap): set at the top of each overlap_loop
         # iteration so the abort handler can tell whether a request's forward is still in flight
         # (mark it, defer the free to _process_last_data) or not (free immediately). Stays None
@@ -544,7 +543,8 @@ class Scheduler(SchedulerIOMixin):
             req.stats.draft_n += k
             req.stats.draft_n_accepted += min(n, emitted)
             reply.append(msg)
-            if msg.finished:
+            # a timings_per_token request gets the snapshot on every reply, growing
+            if msg.finished or req.sampling_params.timings_per_token:
                 msg.timings = req.stats.finish(req.input_ids.numel() - req.prompt_len)
             req.commit_pending(n)
             self.cache_manager.rollback_tail(req, req.cached_len, cached + k + 1)
@@ -680,7 +680,8 @@ class Scheduler(SchedulerIOMixin):
             )
         )
         req.stats.stamp_token(time.perf_counter() if now is None else now)
-        if finished:
+        # a timings_per_token request gets the snapshot on every reply, growing
+        if finished or req.sampling_params.timings_per_token:
             reply[-1].timings = req.stats.finish(req.input_ids.numel() - req.prompt_len)
         # NOTE: overlap scheduling may make the request freed twice, skip second free
         if finished and req not in self.finished_reqs:
@@ -1181,13 +1182,11 @@ class Scheduler(SchedulerIOMixin):
         if self.spec is not None and batch.is_decode:
             batch.phase, batch.rows_per_req = "verify", self.config.decode_rows_per_req
         self.engine.graph_runner.pad_batch(batch)
-        self._forward_iter += 1
         if not batch.is_prefill:
             # Free each decoding request's now-out-of-window SWA slots BEFORE the alloc below,
             # so they can back the new token -- this is what bounds the per-request swa
             # footprint during decode. (no-op unless the model is SWA / paged swa pool.)
-            self.cache_manager.maybe_free_swa_out_of_window(
-                batch.reqs, forward_iter=self._forward_iter)
+            self.cache_manager.maybe_free_swa_out_of_window(batch.reqs)
             for req in batch.reqs:
                 req.decode_batch_idx += 1
         else:

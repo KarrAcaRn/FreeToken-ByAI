@@ -366,36 +366,43 @@ def test_free_memory_is_read_before_this_process_creates_a_cuda_context(tiny_qwe
 
 
 def test_kv_dtype_tips_shrink_bytes_per_token_and_pick_a_code_decoding_backend(tiny_qwen3):
-    from freetoken.engine.engine import _backend_supports_kv_quant
+    from freetoken.engine.engine import _backend_parts_serve, _required_attn_types
     from freetoken.engine.forecast import _evaluate, _tips_kv_dtype
 
     r = _analyze(tiny_qwen3)
     changes = {c.flag: c for c in _tips_kv_dtype(r.inputs)}
-    assert set(changes) == {"--kv-cache-dtype fp8", "--kv-cache-dtype nvfp4"}
+    assert set(changes) == {"--kv-cache-dtype fp8_per_token_head", "--kv-cache-dtype nvfp4"}
     base = r.forecast
-    fp8 = _evaluate(r.inputs, (changes["--kv-cache-dtype fp8"],))
+    fp8 = _evaluate(r.inputs, (changes["--kv-cache-dtype fp8_per_token_head"],))
     nvfp4 = _evaluate(r.inputs, (changes["--kv-cache-dtype nvfp4"],))
     assert base.kv_tokens < fp8.kv_tokens < nvfp4.kv_tokens
     config = copy.copy(r.inputs.config)
-    changes["--kv-cache-dtype fp8"].apply(config)
-    assert _backend_supports_kv_quant(config.attention_backend, "fp8")
+    changes["--kv-cache-dtype fp8_per_token_head"].apply(config)
+    assert _backend_parts_serve(config.attention_backend, _required_attn_types(config.model_config), config.kv_format)
 
 
-def test_df11_placeholders_are_priced_from_the_weight_count():
-    """DF11 buffers are empty until load, so the forecast estimates them instead of counting 0."""
+def test_df11_online_weights_are_priced_from_the_weight_count():
+    """--online-quant df11 weights are bf16 in the meta build, so the forecast prices them at the DF11 rate instead."""
     from freetoken.layers.base import OPList
-    from freetoken.models.glm4_moe.df11_embedding import EmbeddingDF11
-    from freetoken.models.glm4_moe.df11_linear import LinearDF11
+    from freetoken.layers.quantization.embedding.df11 import Df11EmbeddingMethod
+    from freetoken.layers.quantization.linear.df11 import Df11LinearMethod
+
+    def op(method, *shape):
+        layer = OPList([])
+        layer.quant_method = None if method is None else object.__new__(method)
+        layer.weight = torch.empty(*shape, dtype=torch.bfloat16, device="meta")
+        return layer
 
     holder = OPList([])
-    holder.self_attn = LinearDF11(128, 256, has_bias=False)
-    holder.embed_tokens = EmbeddingDF11(512, 128)
-    loaded = LinearDF11(64, 64, has_bias=False)
-    loaded.low8 = torch.empty(64 * 64, dtype=torch.uint8)
-    holder.mlp = loaded
+    holder.self_attn = op(Df11LinearMethod, 256, 128)
+    holder.embed_tokens = op(Df11EmbeddingMethod, 512, 128)
+    holder.mlp = op(None, 64, 64)
     est = fc_mod._df11_estimate(holder)
     bits = fc_mod._DF11_BITS_PER_WEIGHT
-    assert est == {"attention": int(128 * 256 * bits / 8), "embeddings": int(512 * 128 * bits / 8)}
+    assert est == {
+        "attention": int(128 * 256 * bits / 8) - 128 * 256 * 2,
+        "embeddings": int(512 * 128 * bits / 8) - 512 * 128 * 2,
+    }
 
 
 def test_host_ram_short_of_the_expert_banks_does_not_fit(tmp_path, monkeypatch):

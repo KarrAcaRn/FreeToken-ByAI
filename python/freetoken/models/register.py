@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from .config import ModelConfig
@@ -13,6 +13,8 @@ class EncoderSpec:
     kind: str  # "vision" | "audio", the name --mm-disable takes
     config_key: str  # the checkpoint config section that builds the tower
     modalities: tuple[str, ...]  # inputs it serves, as implemented
+    # why a checkpoint's section builds no tower although the family registers one, or None; such a checkpoint serves the other modalities
+    unserved: Callable[[Any], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,9 @@ class ModelSpec:
     encoders: tuple[EncoderSpec, ...] = ()
     # speculative method -> "module:Class" of the family's draft for it
     spec_drafts: tuple[tuple[str, str], ...] = ()
+    # "module:function" building the QuantConfig when the checkpoint's quantization_config does not describe its tensors;
+    # called as function(model_path, hf_config, name_map=, unquantized=)
+    quant_config: str | None = None
 
 
 # Multimodal wrappers store the text tower under model.language_model.
@@ -85,6 +90,9 @@ _GEMMA4_SEGMENTS = (
 _GEMMA4_PACKED = _DENSE_PACKED + _EXPERTS_PACKED
 _GEMMA4_PROCESSOR = "freetoken.mm.processors.gemma4:Gemma4MMProcessor"
 _GEMMA4_UNIFIED_PROCESSOR = "freetoken.mm.processors.gemma4:Gemma4UnifiedMMProcessor"
+_GEMMA4_DRAFTS = (("shared_kv_mtp", "freetoken.models.gemma4.mtp:Gemma4MTPDraft"),)
+
+# the E2B / E4B towers' clipped linears are applied (vision.py), so every release serves images
 _GEMMA4_ENCODERS = (EncoderSpec("vision", "vision_config", ("image",)),)
 _MUSE_GLIMMER_PROCESSOR = "freetoken.mm.processors.muse_glimmer:MuseGlimmerMMProcessor"
 _MUSE_GLIMMER_ENCODERS = (EncoderSpec("vision", "vision_config", ("image",)),)
@@ -100,6 +108,9 @@ _RICURSIVE_PACKED = (("qk_proj", ("q_proj", "k_proj")), ("gate_up_proj", ("gate_
 # language model's rather than under a section of their own.
 _DSV4_PROCESSOR = "freetoken.mm.processors.deepseek_v4:DSV4MMProcessor"
 _DSV4_ENCODERS = (EncoderSpec("vision", "vision_n_layers", ("image",)),)
+
+# Inkling 2 Mini keeps the original checkpoint names (model.llm.*); hf_quant_config.json lists each format's tensors.
+_INKLING2_LOOP_ROOTS = (("model", "model.llm"), ("lm_head", "model.llm.unembed"))
 
 _MODEL_REGISTRY: dict[str, ModelSpec] = {
     "Lfm3ForCausalLM": ModelSpec(
@@ -301,8 +312,17 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         checkpoint_roots=(("model.layers", "layers"), ("model.embed", "embed"), ("model.norm", "norm")),
         packed_modules_mapping=_EXPERTS_W123_PACKED,
         unquantized_modules=(
-            "head", "*.compressor.wkv", "*.compressor.wgate", "*.indexer.wk", "*.indexer.weights_proj", "vision.*", "aligner.*",
+            "embed", "head", "*.compressor.wkv", "*.compressor.wgate", "*.indexer.wk", "*.indexer.weights_proj", "vision.*", "aligner.*",
         ),
+    ),
+    # llama.cpp deepseek41 GGUF (text; unsloth DeepSeek-V4.1-Flash-1017-GGUF): the same model classes with every tensor in its packed ggml type
+    "DeepseekV41GGUFForCausalLM": ModelSpec(
+        "freetoken.models.deepseek_v41",
+        "DeepseekV41ForCausalLM",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+        # the GGUF scheme reads expert types in (gate, up, down) order
+        packed_modules_mapping=_EXPERTS_W132_PACKED,
     ),
     "Qwen3_5MoeForConditionalGeneration": ModelSpec(
         "freetoken.models.qwen3_5_moe",
@@ -434,12 +454,14 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         packed_modules_mapping=_GEMMA4_PACKED,
         mm_processor=_GEMMA4_PROCESSOR,
         encoders=_GEMMA4_ENCODERS,
+        spec_drafts=_GEMMA4_DRAFTS,
     ),
     "Gemma4ForCausalLM": ModelSpec(
         "freetoken.models.gemma4",
         "Gemma4ForCausalLM",
         checkpoint_segments=_GEMMA4_SEGMENTS,
         packed_modules_mapping=_GEMMA4_PACKED,
+        spec_drafts=_GEMMA4_DRAFTS,
     ),
     # the gemma-4-12B "Unified" release (model_type gemma4_unified): the gemma4 decoder with a dense feed-forward and a linear vision embedder in place of the ViT tower; audio is not wired
     "Gemma4UnifiedForConditionalGeneration": ModelSpec(
@@ -450,12 +472,14 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         packed_modules_mapping=_GEMMA4_PACKED,
         mm_processor=_GEMMA4_UNIFIED_PROCESSOR,
         encoders=_GEMMA4_ENCODERS,
+        spec_drafts=_GEMMA4_DRAFTS,
     ),
     "Gemma4UnifiedForCausalLM": ModelSpec(
         "freetoken.models.gemma4",
         "Gemma4ForCausalLM",
         checkpoint_segments=_GEMMA4_SEGMENTS,
         packed_modules_mapping=_GEMMA4_PACKED,
+        spec_drafts=_GEMMA4_DRAFTS,
     ),
     # llama.cpp gemma4 GGUF: the same model classes with every tensor in its packed ggml type; the vision tower comes from an mmproj file and runs in bf16
     "Gemma4GGUFForCausalLM": ModelSpec(
@@ -467,6 +491,7 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         packed_modules_mapping=_GEMMA4_PACKED,
         mm_processor=_GEMMA4_PROCESSOR,
         encoders=_GEMMA4_ENCODERS,
+        spec_drafts=_GEMMA4_DRAFTS,
     ),
     # the same text GGUF with a gemma4uv mmproj (12B): the text GGUF does not tell the 12B apart, so build_gguf_shim picks this row from the projector
     "Gemma4UnifiedGGUFForCausalLM": ModelSpec(
@@ -478,6 +503,7 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         packed_modules_mapping=_GEMMA4_PACKED,
         mm_processor=_GEMMA4_UNIFIED_PROCESSOR,
         encoders=_GEMMA4_ENCODERS,
+        spec_drafts=_GEMMA4_DRAFTS,
     ),
     "GptOssForCausalLM": ModelSpec(
         "freetoken.models.gpt_oss",
@@ -548,6 +574,19 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         # dynamic quants (unsloth UD); the reader dequantizes and fuses them into the dense module
         unquantized_modules=("*.self_attn.kv_b_proj",),
     ),
+    # Inkling 2 Mini (model_type inkling2_loop): 24 decoder layers, layers 6-17 run three times with their own
+    # KV and convolution state per pass; relative-bias attention with sinks, short convolutions, block attention
+    # residuals, sigmoid-routed experts (NVFP4 on layers 0-19, MXFP8 on 20-23, served dequantized to bf16); the ViT
+    # tower under model.visual serves image input.
+    "Inkling2LoopForConditionalGeneration": ModelSpec(
+        "freetoken.models.inkling2_loop",
+        "Inkling2LoopForConditionalGeneration",
+        checkpoint_roots=_INKLING2_LOOP_ROOTS,
+        quant_config="freetoken.models.inkling2_loop.config:quant_config",
+        mm_processor="freetoken.mm.processors.inkling2:Inkling2MMProcessor",
+        encoders=(EncoderSpec("vision", "vision_config", ("image",)),),
+        spec_drafts=(("dspark_mtp", "freetoken.models.inkling2_loop.dspark:Inkling2DSparkDraft"),),
+    ),
 }
 
 
@@ -563,11 +602,13 @@ def _load_attr(module_path: str, attr_name: str) -> Any:
     return getattr(module, attr_name)
 
 
-def checkpoint_quant_config(model_path: str, hf_config: Any, spec: ModelSpec):
-    """The checkpoint's QuantConfig under the family's naming.
+def checkpoint_quant_config(
+    model_path: str, hf_config: Any, spec: ModelSpec, *, online: str | None = None, online_modules: tuple[str, ...] = ()
+):
+    """The checkpoint's QuantConfig under the family's naming, serving its bf16 layers (those ``online_modules`` names, when given) as the ``online`` kind.
 
     A GGUF family gets the GGUF dialect over the file's tensor table, named through the ``to_gguf`` its module exports."""
-    from freetoken.layers.quantization import GGUFConfig, NameMap, QuantConfig
+    from freetoken.layers.quantization import GGUFConfig, NameMap, QuantConfig, QuantKind
 
     name_map = NameMap(roots=spec.checkpoint_roots, segments=spec.checkpoint_segments, packed=spec.packed_modules_mapping)
     if spec.parse_config == "parse_gguf_config":
@@ -575,8 +616,13 @@ def checkpoint_quant_config(model_path: str, hf_config: Any, spec: ModelSpec):
         from freetoken.models.gguf.reader import gguf_tensor_index
 
         types = {name: info.ggml_type for name, info in gguf_tensor_index(hf_config.model_path).items()}
-        return GGUFConfig(types, to_gguf, name_map=name_map, unquantized=spec.unquantized_modules)
-    return QuantConfig.from_hf(hf_config, name_map=name_map, unquantized=spec.unquantized_modules)
+        quant = GGUFConfig(types, to_gguf, name_map=name_map, unquantized=spec.unquantized_modules)
+    elif spec.quant_config is not None:
+        build = _load_attr(*spec.quant_config.split(":"))
+        quant = build(model_path, hf_config, name_map=name_map, unquantized=spec.unquantized_modules)
+    else:
+        quant = QuantConfig.from_hf(hf_config, name_map=name_map, unquantized=spec.unquantized_modules)
+    return quant.with_online(QuantKind(online), online_modules) if online else quant
 
 
 def get_model_class(model_architecture: str, model_config: ModelConfig):

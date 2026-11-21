@@ -130,6 +130,9 @@ class KVCacheGroupSpec:
     # Attention-type taxonomy value for this group; drives the backend capability
     # matrix and (with the pool factory) selects the KV pool family.
     attn_type: AttnType = AttnType.FULL
+    # (layer, source) pairs: layers of this group that read the source's slab and own none.
+    # They are not in ``layer_ids``, so neither the pool nor the cost model gives them a slab.
+    shared_layers: Tuple[Tuple[int, int], ...] = ()
 
     @property
     def num_layers(self) -> int:
@@ -360,15 +363,6 @@ class ModelConfig:
     output_multiplier: float | None = None
     vision_config: Any | None = None
     image_token_id: int | None = None
-    # Per-layer embeddings (Gemma-4 E-series): each decoder layer gets a ``per_layer_input_size``
-    # slice of a ``[per_layer_vocab_size, num_layers * per_layer_input_size]`` table; 0 = off.
-    per_layer_input_size: int = 0
-    per_layer_vocab_size: int = 0
-    # (layer, source layer) pairs: the layer stores no KV and attends over its source layer's KV.
-    kv_sharing: Tuple[Tuple[int, int], ...] = ()
-    # the KV-sharing layers run a 2x intermediate_size dense MLP (Gemma-4 E2B)
-    double_wide_shared_mlp: bool = False
-    pad_token_id: int | None = None
     attention_groups: Tuple[AttentionGroupConfig, ...] = ()
     has_attn_bias: bool = False
     has_router_bias: bool = False
@@ -399,12 +393,27 @@ class ModelConfig:
     # n-gram embedding geometry and the QSA indexer scoring geometry the model module
     # needs. Opaque to model-agnostic engine code; None for every other model.
     qwen4_args: Any | None = None
+    # Gemma-4 E2B / E4B payload (Gemma4EArgs): per-layer input embeddings and KV-shared
+    # layers. Opaque to model-agnostic engine code; None for every other model.
+    gemma4_e_args: Any | None = None
     # Generic execution-path capability flags (set by a model's parse_config) so the engine and
     # factories stay model-agnostic instead of branching on dsv4_args:
     single_stream_only: bool = False  # model runs one sequence at a time -> force bs=1
+    # (layer, source) pairs: the layer attends over the KV the source layer stored and stores none
+    kv_shared_layers: Tuple[Tuple[int, int], ...] = ()
     # Extra per-request tensors riding the LinearStatePool slots (see SlotStateSpec);
-    # () for models without any. Requires a linear-attention group to ride on.
+    # () for models without any. A model without linear-attention layers gets a pool of these alone.
     slot_states: Tuple[SlotStateSpec, ...] = ()
+    # KV layers when some layers run more than once per forward with their own KV each (looped
+    # models): the attention groups then list cache-layer ids in [0, num_kv_layers). None = num_layers.
+    num_kv_layers: int | None = None
+    # why this model cannot resume from a cached prefix (forces --cache-type naive), or None
+    no_prefix_reuse: str | None = None
+    # KV formats the model's own attention kernel reads (--kv-cache-dtype names); None = what the pool and backend take
+    kv_formats: frozenset[str] | None = None
+    # Inkling 2 Mini (inkling2_loop) payload (Inkling2LoopArgs): the loop schedule and the attention /
+    # MoE scalars. Opaque to model-agnostic engine code; None for every other model.
+    inkling2_args: Any | None = None
 
     @property
     def is_moe(self) -> bool:
@@ -488,16 +497,6 @@ class ModelConfig:
     def is_swa_layer(self, layer_id: int) -> bool:
         return isinstance(self.attention_group_for_layer(layer_id), SWAAttentionGroupConfig)
 
-    def kv_source_layer(self, layer_id: int) -> int | None:
-        """The layer whose KV ``layer_id`` reads, or None when it owns its KV."""
-        return dict(self.kv_sharing).get(layer_id)
-
-    def _kv_owning_layers(self, layer_ids: Tuple[int, ...]) -> Tuple[int, ...]:
-        if not self.kv_sharing:
-            return layer_ids
-        shared = {layer for layer, _ in self.kv_sharing}
-        return tuple(layer for layer in layer_ids if layer not in shared)
-
     def is_linear_layer(self, layer_id: int) -> bool:
         return isinstance(
             self.attention_group_for_layer(layer_id),
@@ -528,13 +527,21 @@ class ModelConfig:
                 ),
             )
 
+        sources = dict(self.kv_shared_layers)
+
+        def split(group) -> dict:
+            return dict(
+                layer_ids=tuple(i for i in group.layer_ids if i not in sources),
+                shared_layers=tuple((i, sources[i]) for i in group.layer_ids if i in sources),
+            )
+
         specs: list[KVCacheGroupSpec] = []
         for group in self.attention_groups:
             if isinstance(group, FullAttentionGroupConfig):
                 specs.append(
                     KVCacheGroupSpec(
                         name=group.name,
-                        layer_ids=self._kv_owning_layers(group.layer_ids),
+                        **split(group),
                         num_kv_heads=group.num_kv_heads,
                         head_dim=group.head_dim,
                         sliding_window=None,
@@ -549,7 +556,7 @@ class ModelConfig:
                 specs.append(
                     KVCacheGroupSpec(
                         name=group.name,
-                        layer_ids=self._kv_owning_layers(group.layer_ids),
+                        **split(group),
                         num_kv_heads=group.num_kv_heads,
                         head_dim=group.head_dim,
                         sliding_window=group.sliding_window,

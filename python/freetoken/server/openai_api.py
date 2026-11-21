@@ -49,6 +49,7 @@ from .generation import (
     ToolCallsDelta,
     ToolCallStart,
     build_metrics,
+    enqueue_tokenize,
     prompt_token_ids,
     generate_events,
     generate_full,
@@ -105,6 +106,7 @@ def chat_request_to_genspec(
     model_sampling: dict[str, Any],
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     default_thinking_mode: str | None = None,
+    timings_per_token: bool = False,
 ) -> GenSpec:
     """OpenAI ChatCompletionRequest -> GenSpec (the OpenAI 'to_sampling_params')."""
     from .model_meta import effort_toggle_kwargs
@@ -114,7 +116,9 @@ def chat_request_to_genspec(
     if req.reasoning_effort or thinking_type:
         ctk = effort_toggle_kwargs(req.reasoning_effort, ctk, thinking_type=thinking_type)
     ctk = apply_default_thinking_mode(ctk, default_thinking_mode)
-    sampling_params = _resolve_sampling(req, model_sampling, default_max_tokens=default_max_tokens)
+    sampling_params = _resolve_sampling(
+        req, model_sampling, default_max_tokens=default_max_tokens, timings_per_token=timings_per_token
+    )
     sampling_params.logprobs = req.logprobs
     sampling_params.top_logprobs = req.top_logprobs or 0
     return GenSpec(
@@ -223,14 +227,17 @@ def register_openai_routes(
         model_id = _served_model_name(state)
         ctx = _model_context_length(state)
         efforts, default_effort = await _effort_fields(state)
-        return ModelList(data=[ModelCard(
+        cards = [ModelCard(
             id=model_id,
             root=state.config.model_path,
             max_model_len=ctx,
             context_length=ctx,
             supported_reasoning_efforts=efforts,
             default_reasoning_effort=default_effort,
-        )])
+        )]
+        if (stt_model := getattr(state.config, "stt_model", None)) is not None:
+            cards.append(ModelCard(id=state.config.stt_served_name, root=stt_model))
+        return ModelList(data=cards)
 
     @app.get("/v1/models/{model_id:path}")
     async def v1_model(model_id: str):
@@ -404,6 +411,13 @@ async def handle_chat_completion(
             model_sampling,
             default_max_tokens=default_max_tokens,
             default_thinking_mode=getattr(state.config, "default_thinking_mode", "auto"),
+            # stamp per-token only when the server opted into timings too; llama.cpp
+            # publishes partial timings on streams, so non-stream requests never pay
+            timings_per_token=bool(
+                req.stream
+                and req.timings_per_token
+                and getattr(state.config, "enable_timings_report", False)
+            ),
         )
     except ValueError as exc:
         return create_error_response(str(exc), param=_sampling_error_param(exc))
@@ -505,6 +519,10 @@ async def stream_chat_completion_chunks(
     def emit(chunk: dict[str, Any]) -> bytes:
         if continuous_usage:
             chunk["usage"] = _reported_usage(state, usage)
+        # per-token: post-ack chunks carry the ack's snapshot. Request-side gate: the
+        # terminal snapshot rides every request, so post-terminal residue must stay clean.
+        if req.timings_per_token and (t := timings_block(state, usage.timings)) is not None:
+            chunk["timings"] = t
         return _sse(chunk)
 
     tool_calls_sent = 0
@@ -663,6 +681,13 @@ async def handle_completion(
     except ValueError as exc:
         return create_error_response(str(exc), param=_sampling_error_param(exc))
 
+    # stamp per-token only when the server opted into timings too; llama.cpp publishes
+    # partial timings on streams, so non-stream requests never pay for the snapshots
+    timings_pt = bool(
+        req.stream
+        and req.timings_per_token
+        and getattr(state.config, "enable_timings_report", False)
+    )
     prompts = [req.prompt] if isinstance(req.prompt, str) else req.prompt
     assert isinstance(prompts, list)
     if not prompts:
@@ -675,7 +700,9 @@ async def handle_completion(
             return create_error_response(bad, param="prompt")
 
     def _tokenize_msg(uid: int, prompt: Any) -> TokenizeMsg:
-        sampling = _resolve_sampling(req, model_sampling, default_max_tokens=default_max_tokens)
+        sampling = _resolve_sampling(
+            req, model_sampling, default_max_tokens=default_max_tokens, timings_per_token=timings_pt
+        )
         if isinstance(prompt, str):
             return TokenizeMsg(uid=uid, text=prompt, sampling_params=sampling)
         return TokenizeMsg(uid=uid, text="", sampling_params=sampling, input_ids=list(prompt))
@@ -684,7 +711,10 @@ async def handle_completion(
         if len(prompts) != 1:
             return create_error_response("Streaming completions only support a single prompt")
         fan_out = _completion_fan_out(req.n, prompts[0], _tokenize_msg, state)
-        await fan_out.start()
+        try:
+            await fan_out.start()
+        except GenerationError as exc:
+            return create_error_response(str(exc), code=exc.code)
         chunks = stream_completion_chunks(fan_out, req, state)
         if request is not None:
             chunks = state.stream_with_cancellation(chunks, request, fan_out.take_live_uids)
@@ -707,7 +737,10 @@ async def handle_completion(
     first_timings: dict[str, Any] | None = None
     for prompt_index, prompt in enumerate(prompts):
         fan_out = _completion_fan_out(req.n, prompt, _tokenize_msg, state)
-        await fan_out.start()
+        try:
+            await fan_out.start()
+        except GenerationError as exc:
+            return create_error_response(str(exc), code=exc.code)
 
         async def _drain_one(fan_out: ChoiceFanOut = fan_out, prompt_index: int = prompt_index):
             nonlocal prompt_tokens, completion_tokens, cached_tokens, first_timings
@@ -769,7 +802,11 @@ def _completion_fan_out(
     n: int, prompt: Any, tokenize_msg: Callable[[int, Any], TokenizeMsg], state: Any
 ) -> ChoiceFanOut:
     async def submit(uid: int) -> None:
-        await state.send_one(tokenize_msg(uid, prompt))
+        try:
+            await state.send_one(tokenize_msg(uid, prompt))
+        except (OverflowError, TypeError, ValueError) as exc:
+            # msgpack refused the message: the tokenizer never saw uid (same as enqueue_tokenize)
+            raise GenerationError(f"could not encode request: {exc}") from exc
 
     async def consume(uid: int) -> AsyncIterator[Any]:
         async for ack in state.wait_for_ack(uid):
@@ -812,6 +849,10 @@ async def stream_completion_chunks(
     def emit(payload: dict[str, Any]) -> bytes:
         if continuous_usage:
             payload["usage"] = _reported_usage(state, usage)
+        # per-token: same request-side check as the chat stream - the terminal ack carries
+        # timings for every request, only the flag decides who gets a block on each chunk
+        if req.timings_per_token and (t := timings_block(state, raw_timings)) is not None:
+            payload["timings"] = t
         return _sse(payload)
 
     try:
@@ -885,6 +926,7 @@ def _resolve_sampling(
     req: ChatCompletionRequest | CompletionRequest,
     model_sampling: dict[str, Any],
     default_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    timings_per_token: bool = False,
 ) -> SamplingParams:
     sampling_params = resolve_sampling(
         temperature=req.temperature,
@@ -897,6 +939,7 @@ def _resolve_sampling(
         default_max_tokens=default_max_tokens,
         presence_penalty=req.presence_penalty,
         frequency_penalty=req.frequency_penalty,
+        timings_per_token=timings_per_token,
     )
     if isinstance(req, CompletionRequest) and req.logprobs is not None:
         sampling_params.logprobs = True

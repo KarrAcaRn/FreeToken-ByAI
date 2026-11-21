@@ -50,6 +50,8 @@ def _model_config(kind):
         has_swa_attention=False,
         has_linear_attention=False,
         num_layers=4,
+        slot_states=(),
+        model_is_mrope=False,
         rotary_config=RotaryConfig(head_dim=128, rotary_dim=128, max_position=1024, base=1e4, scaling=None),
     )
     if kind == "full":
@@ -442,3 +444,99 @@ def test_short_conv_refuses_speculation(monkeypatch, algorithm):
     )
     with pytest.raises(ValueError, match="short-conv state.*no verify handler"):
         _adjust_config(config)
+
+
+# Speculative decoding x windowed KV: engine.py refuses a windowed target unless the proposer
+# passes target_may_be_windowed (shared-KV and DSpark admit hybrid SWA; mtp/dflash never reach it).
+
+
+class _Draft:
+    @staticmethod
+    def check_source(path, target_path):
+        pass
+
+
+def _dspark_config():
+    from freetoken.models.inkling2_loop.dspark import DSparkConfig
+
+    return DSparkConfig(
+        hidden_size=64, num_layers=3, num_heads=2, num_kv_heads=1, head_dim=32, intermediate_size=128, rms_norm_eps=1e-6,
+        rope_theta=1e6, local_layer_ids=(0, 2), window=128, block_size=4, markov_rank=8, target_layer_ids=(1, 2, 4),
+        num_layer_visits=4, pass_start_visits=(), loop_core_start=0, vocab_size=64, target_rms_norm_eps=1e-6, softcap=30.0,
+        max_position=1 << 20,
+    )
+
+
+def _spec_config(kind, backend, method, monkeypatch):
+    from freetoken.spec.dspark.proposer import DSparkProposer
+    from freetoken.spec.mtp.proposer import MTPProposer
+    from freetoken.spec.mtp.shared_proposer import SharedKVMTPProposer
+
+    monkeypatch.setattr(MTPProposer, "_draft_class", classmethod(lambda cls, config: _Draft))
+    monkeypatch.setattr(SharedKVMTPProposer, "_draft_class", classmethod(lambda cls, config: _Draft))
+    monkeypatch.setattr(DSparkProposer, "_draft_config", classmethod(lambda cls, config: _dspark_config()))
+    monkeypatch.setattr("freetoken.models.inkling2_loop.dspark.mtp_file", lambda path: path)
+    config = _config(kind, attention_backend=backend, speculative_algorithm="mtp")
+    object.__setattr__(config, "hf_config", SimpleNamespace(architectures=["Gemma4ForCausalLM"]))
+    object.__setattr__(config, "model_spec", SimpleNamespace(spec_drafts={method: "freetoken.test:draft"}))
+    return config
+
+
+@pytest.mark.parametrize(
+    "kind, backend, method, allowed",
+    [
+        # the shared assistant keeps no KV: it reads the target's slabs through a read-only view
+        ("swa", "triton", "shared_kv_mtp", True),
+        # an mtp-draft family keeps the draft's own KV, so the window frees could release rows it reads
+        ("swa", "triton", "mtp", False),
+        # the DSV4 window tiers keep the refusal even for the shared assistant
+        ("dsv4", "dsv4_sparse", "shared_kv_mtp", False),
+        # DSpark keeps its own KV, but on the full-attention slot ids, which the window frees never release
+        ("swa", "triton", "dspark_mtp", True),
+        ("dsv4", "dsv4_sparse", "dspark_mtp", False),
+    ],
+)
+def test_windowed_target_admits_only_window_safe_drafts(monkeypatch, kind, backend, method, allowed):
+    from freetoken.engine.engine import _adjust_config
+
+    _patch_env(monkeypatch)
+    config = _spec_config(kind, backend, method, monkeypatch)
+    if allowed:
+        _adjust_config(config)
+        assert config.speculative_algorithm == "mtp" and config.speculative_num_steps == 3
+    else:
+        with pytest.raises(ValueError, match="sliding-window or DSV4 window-tier"):
+            _adjust_config(config)
+
+
+def test_mtp_cli_dispatches_by_the_declared_draft_method():
+    from freetoken.models.register import _MODEL_REGISTRY
+    from freetoken.spec.mtp.proposer import MTPProposer
+    from freetoken.spec.mtp.shared_proposer import SharedKVMTPProposer
+    from freetoken.spec.runner import proposer_class
+
+    def spec_cfg(arch):
+        return SimpleNamespace(
+            speculative_algorithm="mtp", model_spec=_MODEL_REGISTRY[arch],
+            hf_config=SimpleNamespace(architectures=[arch]), tp_info=SimpleNamespace(size=1),
+        )
+
+    from freetoken.spec.dspark.proposer import DSparkProposer
+
+    assert proposer_class(spec_cfg("Gemma4ForCausalLM")) is SharedKVMTPProposer
+    assert proposer_class(spec_cfg("Qwen3_5ForCausalLM")) is MTPProposer
+    assert proposer_class(spec_cfg("Inkling2LoopForConditionalGeneration")) is DSparkProposer
+    # gpt-oss resolves the hybrid pool but declares no draft: dispatch, not the gate, keeps it off the
+    # shared proposer and its MTP refusal verbatim
+    draft_less = spec_cfg("GptOssForCausalLM")
+    assert proposer_class(draft_less) is MTPProposer
+    with pytest.raises(ValueError, match="MTP is not supported for GptOssForCausalLM yet"):
+        MTPProposer.adjust_config(draft_less, lambda name, value: None)
+
+
+def test_dflash_keeps_the_windowed_refusal():
+    from freetoken.spec.runner import SpecRunner
+
+    # dflash's own adjust_config demands a draft checkpoint before the window gate, so its
+    # refusal is pinned on the predicate engine.py:221 consults
+    assert SpecRunner.target_may_be_windowed(_config("swa", speculative_algorithm="dflash")) is False

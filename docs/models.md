@@ -17,11 +17,12 @@ for them; other checkpoints of the same architectures work too.
 | Qwen3-MoE | [Qwen/Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B) |
 | Qwen3-VL | [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct), [Qwen/Qwen3-VL-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) |
 | gpt-oss | [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b), [openai/gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) |
-| Gemma-4 | [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it), [nvidia/Gemma-4-26B-A4B-NVFP4](https://huggingface.co/nvidia/Gemma-4-26B-A4B-NVFP4), [google/gemma-4-12B-it](https://huggingface.co/google/gemma-4-12B-it), [nvidia/Gemma-4-31B-IT-NVFP4](https://huggingface.co/nvidia/Gemma-4-31B-IT-NVFP4) .. |
+| Gemma-4 | [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it), [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it), [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it), [nvidia/Gemma-4-26B-A4B-NVFP4](https://huggingface.co/nvidia/Gemma-4-26B-A4B-NVFP4), [google/gemma-4-12B-it](https://huggingface.co/google/gemma-4-12B-it), [nvidia/Gemma-4-31B-IT-NVFP4](https://huggingface.co/nvidia/Gemma-4-31B-IT-NVFP4) .. |
 | MiniMax-M2.5 | [nvidia/MiniMax-M2.5-NVFP4](https://huggingface.co/nvidia/MiniMax-M2.5-NVFP4) |
 | MiniMax-M3 | [nvidia/MiniMax-M3-NVFP4](https://huggingface.co/nvidia/MiniMax-M3-NVFP4) |
 | Muse-Glimmer | [meta-models/Muse-Glimmer-30B](https://huggingface.co/meta-models/Muse-Glimmer-30B), [RedHatAI/Muse-Glimmer-30B-NVFP4](https://huggingface.co/RedHatAI/Muse-Glimmer-30B-NVFP4) |
 | [Flint](flint.md) | [FutureMLS-Lab/flint-nvfp4-coldgptq](https://huggingface.co/FutureMLS-Lab/flint-nvfp4-coldgptq), [RecursiveSI/flint-nvfp4-gguf](https://huggingface.co/RecursiveSI/flint-nvfp4-gguf) |
+| Inkling 2 Mini | [thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) |
 | Ripple-65B Preview | [ricursiveAI/Ripple-65B-Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview), [ricursiveAI/Ripple-65B-Preview-NVFP4](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-NVFP4), [AtomicChat/Ripple-65B-Preview-GGUF](https://huggingface.co/AtomicChat/Ripple-65B-Preview-GGUF) |
 
 ### GGUF
@@ -37,7 +38,7 @@ These llama.cpp architectures (`general.architecture`) are served:
 | `qwen3vlmoe`, `qwen3vl` | Qwen3-VL |
 | `qwen2` | Qwen2, Qwen2.5 |
 | `llama` | Llama, Mistral |
-| `gemma4` | Gemma-4, except E2B / E4B |
+| `gemma4` | Gemma-4 |
 | `glm4moe` | GLM-4.5, GLM-4.6, GLM-4.7 |
 | `glm5-next` | GLM-5.3-Flash |
 | `deepseek4` | DeepSeek-V4 Flash and Pro |
@@ -90,17 +91,24 @@ These families accept image input by default; pass `--text-model-only` to skip t
 | --- | --- | --- | --- |
 | DeepSeek-V4.1-Flash (ViT tower, streamed under `--mm-encoder-weights host`) | one feature per 42x42 pixels, plus a learned row break per row and two delimiters; checkpoint cap 1024 total span tokens | maximum caps the entire span; minimum maps to a pixel-area floor before the cap; checkpoint minimum area is 544x544 | `{"max_image_tokens": 512, "min_pixels": 295936}` |
 | Qwen3.6 (both variants, every listed weight format), Qwen3.8-Flash-Next, Qwen3-VL | one token per 32x32 pixels of the resized image, dynamic resolution | pixel areas in `size.shortest_edge` / `longest_edge`; checkpoint defaults 64 to 16384 tokens | `{"size": {"longest_edge": 1048576}}` |
-| Gemma-4 26B-A4B, 31B (`gemma4`: ViT tower, streamed under `--mm-encoder-weights host`) | one of the soft-token budgets 70 / 140 / 280 / 560 / 1120, every image scaled to its budget as far as the aspect ratio allows | the maximum picks the largest budget within it, below 70 is refused at start-up; the minimum has no effect | `{"max_soft_tokens": 1120}` |
+| Gemma-4 E2B, E4B, 26B-A4B, 31B (`gemma4`: ViT tower, streamed under `--mm-encoder-weights host`; the E2B / E4B towers clip their linears) | one of the soft-token budgets 70 / 140 / 280 / 560 / 1120, every image scaled to its budget as far as the aspect ratio allows | the maximum picks the largest budget within it, below 70 is refused at start-up; the minimum has no effect | `{"max_soft_tokens": 1120}` |
 | Gemma-4 12B (`gemma4_unified`: linear patch embedder, resident under either placement) | same budgets, one 48x48 super-patch per soft token | same as the tower releases | same |
 | GLM-5.3-Flash (`glm5_next`: ViT tower, streamed under `--mm-encoder-weights host`) | one token per 28x28 pixels of the resized image, dynamic resolution on a canvas zero-padded to a 28-multiple | token counts, passed through as the processor's `min_image_tokens` / `max_image_tokens`; checkpoint defaults 16 to 8000 tokens | `{"max_image_tokens": 2048}` |
 | Muse-Glimmer-30B (windowed ViT tower, streamed under `--mm-encoder-weights host`) | one token per 28x28 pixels of the resized image, aspect ratio kept under a token cap; checkpoint default 4096 tokens | the maximum is the cap (`max_image_tokens`); the minimum has no effect | `{"max_image_tokens": 1024}` |
 | MiniMax-M3 (`minimax_m3`: CLIP-style ViT tower, streamed under `--mm-encoder-weights host`) | one token per 28x28 pixels of the resized image, dynamic resolution | pixel areas in `size.shortest_edge` / `longest_edge`; checkpoint defaults 4 to 576 tokens | `{"size": {"longest_edge": 1048576}}` |
+| Inkling 2 Mini (`inkling2_loop`: ViT tower, streamed under `--mm-encoder-weights host`) | one token per 40x40-pixel tile of the image at its own resolution, padded to whole tiles | the maximum refuses a larger image instead of resizing it (default 16384 tokens); the minimum has no effect | not read |
 | DeepSeek-V4-Flash-Vision (`deepseek_v4`: native-resolution ViT tower, streamed under `--mm-encoder-weights host`) | one token per 3x3 grid of 14x14 patches, against a per-image cap; the block carries sentinel tokens and lead pads that align it to a 4-token compression stride, so its length depends on where it lands in the prompt | the maximum is a cap on the block (`vision_max_n_token`, checkpoint default 384) and lowers it, the minimum is read as the checkpoint's upscale floor and has no effect | not read |
 
 A GGUF model takes image input from a separate llama.cpp mmproj file, found in the model file's own folder or passed with `--mmproj` (see the
 [CLI reference](cli.md#image-input)). A GGUF file that carries the vision tensors itself (the Ollama layout) serves text only. The tower runs in bf16
 whatever the mmproj stores; a quantized mmproj is dequantized at load and keeps its quantization error. Image tokens and budgets are those of the
 family's row above.
+
+### Audio transcription
+
+Whisper checkpoints (`WhisperForConditionalGeneration`, e.g. `openai/whisper-large-v3-turbo`) serve speech-to-text next
+to the LLM through `--stt-model`, see the [CLI reference](cli.md#audio-transcription). They run on transformers in a
+side worker, not on the engine.
 
 ## MoE strategies
 
@@ -174,6 +182,10 @@ unset on PCIe GPUs: wider grids add no bandwidth there.
   see [ftw-hotfix.md](ftw-hotfix.md) for the affected checkpoints and the repair tool.
 - Muse-Glimmer keeps the attention gate as its own linear next to `qkv_proj`; an FTW converted
   when the gate was fused into `qkvg_proj` no longer loads, reconvert it with `ft checkpoint`.
+- GLM-4.7 (`nvidia/GLM-4.7-NVFP4`) serves its attention and input embedding in bf16, as the checkpoint stores
+  them. `--online-quant df11` compresses them losslessly at load, about 8 GiB less VRAM, at the cost of decoding
+  them on every step; builds before the flag always did this. An FTW of GLM-4.7 converted by such a build stores
+  those weights as DF11 and no longer loads; reconvert it with `ft checkpoint`.
 - NVFP4 global scales are kept in fp32. An NVFP4 FTW that stores them as fp16 (converted by an
   older build) is refused at load; reconvert it with `ft checkpoint`.
 - Qwen3.5 / Qwen3.6 / Qwen3.8-27B load their zero-centred norm weights as stored and add the 1 in
@@ -188,6 +200,15 @@ unset on PCIe GPUs: wider grids add no bandwidth there.
   `deepseek4v` mmproj; the text-only 0731 release has no image token and refuses the
   mmproj. ggml-org's Vision-Exp text GGUF ships a chat template that renders no image
   placeholder; serve unsloth's release for image requests.
+- A DeepSeek-V4.1 GGUF (llama.cpp's `deepseek41` layout, such as
+  [unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF))
+  serves text; its `deepseek41v` mmproj and DSpark draft are not read. The Engram tables
+  stream from the file's `per_layer_token_embd` tensor, so keep that file on a fast NVMe.
+  A build that ships the tables as a separate shard needs it linked next to the others under
+  its shard name, as llama.cpp does. A file converted for an earlier llama.cpp branch has
+  no `ple.layers` key and is refused, and so are unsloth's UD-Q3_K_XL, UD-Q4_K_XL and UD-Q8_K_XL,
+  whose MXFP8 tables only unsloth's llama.cpp PR reads. `ft checkpoint` does not convert these
+  GGUFs: serve the `.gguf`.
 - DeepSeek-V4.1-Flash serves text and images from the HF checkpoint as shipped (fp8 block-32
   dense weights, fp4 experts on the offload cache, 890 B/token global KV in packed
   fp4/fp8 pools). Its two 98 GiB Engram tables stream from the checkpoint shards on
@@ -218,11 +239,24 @@ unset on PCIe GPUs: wider grids add no bandwidth there.
   template kwargs with thinking on, `"chat_template_kwargs": {"enable_thinking": true,
   "reasoning_effort": 37}`, and the checkpoint's encoder validates it. Runtime window-cache
   controls use 128-token pages.
+- Inkling 2 Mini runs its layers 6-17 three times per token; every run keeps its own KV and
+  short-convolution state, so the KV pool holds 48 layers (40 sliding, 8 global). Its prefix cache is
+  off: a cached prefix would need the convolution windows at the cut, which nothing snapshots yet, so
+  `--cache-type radix` serves as `naive`. The naive cache reserves each running request the window KV of
+  one window plus one prefill chunk on all 40 sliding layers (about 1.4 GiB at the default
+  `--max-extend-length 8192`); lower `--max-extend-length` to run many requests at once. The NVFP4
+  experts (layers 0-19) run W4A16, since the checkpoint declares only per-token activation scales; the
+  MXFP8 experts (layers 20-23) are dequantized to bf16 at load. Speculative decoding uses the
+  checkpoint's DSpark draft (`mtp.safetensors`). On a 16 GB card start with `--memory-ratio 0.85`: the
+  prefill activations are not in the memory budget, and at the default 0.9 a 4K-token prompt runs out of
+  memory in the expert GEMM.
 - Qwen3.8-Flash-Next keeps a 47.7 GiB PLE n-gram table pinned in host RAM.
 - Multimodal checkpoints are served text-only.
-- `--kv-cache-dtype fp8` (see [cli.md](cli.md#fp8-kv-cache)) covers the plain paged,
-  hybrid-SWA and QSA sparse KV pools — gpt-oss, Qwen3/3.5/3.6, GLM-4.x, Gemma-4,
-  MiniMax-M2.5, Muse-Glimmer, Llama/Qwen2/Mistral, Qwen3.8-Flash-Next (on QSA only the
-  selected K/V rows are read back as codes; block selection keeps 16-bit index keys).
-  MLA/DSA (GLM-5.2), DeepSeek-V4's tiered pool and MiniMax-M3's block-sparse pool stay
-  16-bit and reject it.
+- Gemma-4 serves MTP speculative decoding from an assistant sidecar: unsloth's GGUF repos ship `mtp-*.gguf` files for it; upstream's `google/gemma-4-*-it-assistant` HF release must first go through llama.cpp's `convert_hf_to_gguf.py`, then pass the resulting GGUF with `--spec-draft-model`, see [CLI reference](cli.md#speculative-decoding).
+- `--kv-cache-dtype fp8` / `fp8_per_token_head`, `int8_per_token_head` and `nvfp4` (see
+  [cli.md](cli.md#quantized-kv-cache)) cover the plain paged, hybrid-SWA, QSA sparse and
+  MLA/DSA KV pools — gpt-oss, Qwen3/3.5/3.6, GLM-4.x, GLM-5.2, Gemma-4, MiniMax-M2.5,
+  Muse-Glimmer, Llama/Qwen2/Mistral, Qwen3.8-Flash-Next (on QSA only the selected K/V rows
+  are read back as codes; block selection keeps 16-bit index keys). The per_token_head
+  formats also cover MiniMax-M3's block-sparse pool; DeepSeek-V4 / V4.1 use their own
+  `fp8_ds_mla` / `nvfp4_ds_mla` layouts.

@@ -13,12 +13,13 @@ import triton.testing
 
 from freetoken.distributed import set_tp_info
 from freetoken.kernel.triton.attention import decode_paged_attention
+from freetoken.kvcache.format import resolve_kv_format
 from freetoken.kvcache.mha_pool import MHAKVCache
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--formats", default="none,fp8,nvfp4")
+    parser.add_argument("--formats", default="auto,fp8_per_token_head,int8_per_token_head,nvfp4")
     parser.add_argument("--lengths", default="1024,8192,32768")
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--heads", type=int, default=4)
@@ -41,28 +42,24 @@ def main():
         pos = torch.full((batch,), length - 1, device=device, dtype=torch.int32)
         scratch = torch.empty(batch, qheads, 8, dim, device=device)
         lse = torch.empty(batch, qheads, 8, device=device)
-        splits = torch.full((batch,), 8, device=device, dtype=torch.int32)
         out = torch.empty_like(q)
-        for quant in args.formats.split(","):
-            pool = MHAKVCache(heads, 1, dim, slots, 1, q.dtype, device, kv_quant=quant)
+        for name in args.formats.split(","):
+            fmt = resolve_kv_format(name)
+            pool = MHAKVCache(heads, 1, dim, slots, 1, q.dtype, device, kv_format=fmt)
             pool.store_kv(k, v, loc, 0)
-            extra = {}
-            if quant == "nvfp4":
-                extra = dict(kv_quant=quant, k_block_scale=pool.k_block_scale(0),
-                             v_block_scale=pool.v_block_scale(0))
-            kc, vc = [getattr(pool, name)(0).flatten(0, 1) for name in ("k_cache", "v_cache")]
+            kc, vc = [getattr(pool, view)(0).flatten(0, 1) for view in ("k_cache", "v_cache")]
 
             def decode():
-                return decode_paged_attention(q, kc, vc, indptr, loc, pos,
-                    scratch, lse, splits, 8, dim ** -.5, out=out,
-                    k_scale=pool.k_scale(0), v_scale=pool.v_scale(0), **extra)
+                return decode_paged_attention(q, kc, vc, indptr, loc, pos, scratch, lse, dim ** -.5,
+                    out=out, max_kv_splits=8, kv_format=fmt,
+                    k_scale=pool.k_scale(0), v_scale=pool.v_scale(0))
 
             decode()
             decode_ms = triton.testing.do_bench(decode, warmup=100, rep=300)
             store_ms = triton.testing.do_bench(
                 lambda: pool.store_kv(k[-batch:], v[-batch:], loc[-batch:], 0),
                 warmup=100, rep=300)
-            record = dict(format=quant, length=length, batch=batch,
+            record = dict(format=fmt.name, length=length, batch=batch,
                           kv_bytes=pool.unit_bytes()[0] * slots,
                           decode_ms=decode_ms, store_ms=store_ms)
             results.append(record)

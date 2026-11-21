@@ -176,18 +176,21 @@ class WeightReport:
         return sum(self.gpu.values())
 
 
-# DF11 (lossless entropy-coded bf16) buffers are sized by the data at load and are empty in the meta
-# build; GLM-4.5-Air's attention and embedding measured 10.7-11.2 bits per weight.
+# --online-quant df11 compresses bf16 weights at load to a size that depends on the data; the meta
+# build still holds them at bf16. GLM-4.5-Air's attention and embedding measured 10.7-11.2 bits per weight.
 _DF11_BITS_PER_WEIGHT = 11.2
 
 
 def _df11_estimate(model) -> Counter[str]:
-    """Per category, the estimated bytes of DF11 weights whose buffers are still placeholders."""
+    """Per category, the bytes --online-quant df11 saves over the bf16 weights the meta build holds (negative)."""
+    from freetoken.layers.quantization.embedding.df11 import Df11EmbeddingMethod
+    from freetoken.layers.quantization.linear.df11 import Df11LinearMethod
+
     found: Counter[str] = Counter()
     for path, o in _walk(model):
-        low8 = getattr(o, "low8", None) if hasattr(o, "_DF11_KEYS") else None
-        if isinstance(low8, torch.Tensor) and low8.numel() == 0:
-            found[tensor_category(f"{path}.weight")] += int(o.n * _DF11_BITS_PER_WEIGHT / 8)
+        weight = getattr(o, "weight", None)
+        if isinstance(getattr(o, "quant_method", None), (Df11LinearMethod, Df11EmbeddingMethod)) and isinstance(weight, torch.Tensor):
+            found[tensor_category(f"{path}.weight")] += int(weight.numel() * _DF11_BITS_PER_WEIGHT / 8) - _nbytes(weight)
     return found
 
 
@@ -741,18 +744,17 @@ def _tips_moe(inp: ForecastInputs) -> Iterable[Change]:
                      note="experts decode on the CPU")
 
 
-def _set_kv_quant(kv_quant: str):
+def _set_kv_cache_dtype(kv_cache_dtype: str):
     def apply(config):
-        from freetoken.engine.engine import _backend_parts_serve, _backend_supports_kv_quant, _required_attn_types
+        from freetoken.engine.engine import _backend_parts_serve, _required_attn_types
 
-        object.__setattr__(config, "kv_quant", kv_quant)
-        if not _backend_supports_kv_quant(config.attention_backend, kv_quant):
+        object.__setattr__(config, "kv_cache_dtype", kv_cache_dtype)
+        required = _required_attn_types(config.model_config)
+        if not _backend_parts_serve(config.attention_backend, required, config.kv_format):
             # What --attn auto picks once the cache is quantized. The code-decoding backends
             # have no arch condition, so this needs no CUDA probe (ft info runs on CPU too).
-            required = _required_attn_types(config.model_config)
             backend = next(
-                (n for n in ("dsa", "qsa_sparse", "triton")
-                 if _backend_parts_serve(n, required) and _backend_supports_kv_quant(n, kv_quant)),
+                (n for n in ("dsa", "qsa_sparse", "m3_sparse", "triton") if _backend_parts_serve(n, required, config.kv_format)),
                 config.attention_backend,
             )
             object.__setattr__(config, "attention_backend", backend)
@@ -760,19 +762,21 @@ def _set_kv_quant(kv_quant: str):
 
 
 def _tips_kv_dtype(inp: ForecastInputs) -> Iterable[Change]:
-    from freetoken.engine.engine import kv_quant_unsupported_reason
+    from freetoken.engine.engine import kv_format_unsupported_reason
+    from freetoken.kvcache.format import resolve_kv_format
 
-    current = getattr(inp.config, "kv_quant", "none")
+    current = inp.config.kv_format.name
     options = (
-        ("fp8", 1, "e4m3 codes with per-row scales; decode within a few percent of bf16"),
+        ("fp8_per_token_head", 1, "e4m3 codes with per-row scales; decode within a few percent of bf16"),
         ("nvfp4", 2, "packed 4-bit codes; slower decode at long context"),
     )
-    order = [q for q, _, _ in options]
-    for quant, cost, note in options:
-        if current != "none" and order.index(quant) <= order.index(current):
+    order = [name for name, _, _ in options]
+    for name, cost, note in options:
+        if current != "none" and (current not in order or order.index(name) <= order.index(current)):
             continue
-        if kv_quant_unsupported_reason(inp.config.model_config, quant) is None:
-            yield Change(f"--kv-cache-dtype {quant}", "kv_quant", cost, _set_kv_quant(quant), note=note)
+        fmt = resolve_kv_format(name)
+        if kv_format_unsupported_reason(inp.config, inp.config.model_config, fmt) is None:
+            yield Change(f"--kv-cache-dtype {name}", "kv_cache_dtype", cost, _set_kv_cache_dtype(name), note=note)
 
 
 # A new sizing option adds one generator here; a bytes-per-token effect (like --kv-cache-dtype)
