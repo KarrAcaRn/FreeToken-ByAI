@@ -402,7 +402,8 @@
       "Cyber-Marty <15370813896@163.com>"
     ],
     "summary": "--moe-cache-auto now charges the attention backend's workspace, avoiding startup OOM at tight --memory-ratio",
-    "fixup": "Runtime rebuild fit check (validate_rebuild) charges the workspace too"
+    "fixup": "Runtime rebuild fit check (validate_rebuild) charges the workspace too",
+    "upstream": "closed"
   },
   "559": {
     "number": 559,
@@ -651,8 +652,8 @@
     "title": "feat(kvcache): store the KV cache as fp8 e4m3 codes (--kv-cache-dtype fp8)",
     "head_sha": "9b103b04f9c8",
     "reviewed_at": "2026-10-03",
-    "decision": "adopted-with-fixups",
-    "reason": "Best of the KV-quant group: e4m3 codes + one fp32 scale per (token, kv head), robust to outliers; covers MHA (incl. GDN hybrid), hybrid-SWA, QSA and MLA/DSA. On the 27B = RadixArk/Qwen3.8-27B-NVFP4 on the RTX 4090, --max-running-requests 1 --memory-ratio 0.95 --max-prefill-length 2048: KV 13420 -> 26427 tokens, decode 46.2 vs 46.6 tok/s (triton instead of fi), same quality (Q&A, 8k fact retrieval, 15 codes in 7.4k); coherent on Qwen3-0.6B where #126 produced NaN. Fixups: test doubles for newer main attributes, one-bf16-ulp tolerance for an sm_89 summation-order case, help/docs now say MLA/DSA is covered.",
+    "decision": "superseded",
+    "reason": "Was adopted 2026-10-03 (27B fp8 KV 13.4k -> 26.4k tokens). Upstream merged its own KV format framework (#894, fp8_per_token_head: the same e4m3 + fp32 per (token, kv head) layout); on the 2026-11-21 sync next dropped this implementation for upstream's, keeping --kv-cache-dtype fp8 as an alias. 27B on upstream's fp8: 47.6k KV tokens, decode 46.3 tok/s, prefill ~3000 tok/s.",
     "commits": [
       "bd8bd44",
       "8f00988",
@@ -665,8 +666,9 @@
       "Matsumoto Takaya (松本 貴也) <matsumoto.t@zigexn.co.jp>",
       "Vincent Labreche <vincent.dev@gmail.com>"
     ],
-    "summary": "Adds fp8 e4m3 KV cache (--kv-cache-dtype fp8) with per-token/head scales; roughly doubles KV capacity on the 27B",
-    "fixup": "Test doubles for newer attributes, a one-ulp tolerance on sm_89, docs say MLA/DSA is covered"
+    "summary": "fp8 KV cache; replaced on next by upstream's #894 fp8_per_token_head (fp8 kept as an alias)",
+    "fixup": "Test doubles for newer attributes, a one-ulp tolerance on sm_89, docs say MLA/DSA is covered",
+    "superseded_by": 894
   },
   "408": {
     "number": 408,
@@ -674,17 +676,18 @@
     "head_sha": "1c7bb42909c4",
     "reviewed_at": "2026-10-03",
     "decision": "adopted-with-fixups",
-    "reason": "nvfp4 KV on top of #354 (software decode on sm_89): 3.46x the bf16 tokens (46476 on the 27B) with the same quality on both models; costs ~15% decode at 8k and ~10% prefill, so it is opt-in. Fixup: kv_row_bytes sizes the packed row instead of kv_storage_bytes_per_elem raising 'unknown kv_quant'.",
+    "reason": "nvfp4 KV on top of #354 (software decode on sm_89): 3.46x the bf16 tokens (46476 on the 27B) with the same quality on both models; costs ~15% decode at 8k and ~10% prefill, so it is opt-in. Fixup: kv_row_bytes sizes the packed row instead of kv_storage_bytes_per_elem raising 'unknown kv_quant'. 2026-11-21: ported onto upstream's KVFormat framework; 27B: 83.7k KV tokens, decode 45.8 tok/s at 8k, prefill ~2950 tok/s, same answers.",
     "commits": [
       "853a88d",
-      "53a72b0"
+      "53a72b0",
+      "723663e4"
     ],
     "gpu_untested": false,
     "authors": [
       "ArqAlice <y.tomi0131@gmail.com>"
     ],
     "summary": "Adds nvfp4 KV cache on top of #354: 3.46x the bf16 KV tokens, opt-in (~15% slower decode at 8k)",
-    "fixup": "kv_row_bytes sizes the packed row instead of raising 'unknown kv_quant'"
+    "fixup": "2026-11-21: ported onto upstream's KVFormat framework (#894) as format nvfp4: block scales inside the row, triton/qsa/dsa readers (723663e4)"
   },
   "309": {
     "number": 309,
@@ -1406,7 +1409,8 @@
     ],
     "upstream_followup": "offered upstream (candidate, see fork/upstream-candidates.md)",
     "summary": "Dense Gemma-4 GGUF checkpoints failed to parse/load; expert fields now default to 0",
-    "fixup": "Native-quant swap and offload assertion fixed for dense GGUF; conflict with #494 resolved"
+    "fixup": "Native-quant swap and offload assertion fixed for dense GGUF; conflict with #494 resolved",
+    "upstream": "closed"
   },
   "346": {
     "number": 346,
@@ -2584,7 +2588,8 @@
       "mkornreich <52514824+mkornreich@users.noreply.github.com>"
     ],
     "summary": "Gemma-4 E2B/E4B (per-layer embeddings, KV sharing, double-wide MLP); matches HF greedy output exactly",
-    "fixup": "Own version on today's code: shared layers read the source's paged KV, PLE table via --embed-weights host, GGUF parts left out ([8589098](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/8589098))"
+    "fixup": "Own version on today's code: shared layers read the source's paged KV, PLE table via --embed-weights host, GGUF parts left out ([8589098](https://github.com/KarrAcaRn/FreeToken-ByAI/commit/8589098))",
+    "upstream": "merged"
   },
   "31": {
     "number": 31,
@@ -3462,7 +3467,8 @@
     "summary": "Draft - revisit when ready; opt-in HIP fp8 decode kernels for R9700 (ROCm only)",
     "reviewed_at": "2026-10-21",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "closed"
   },
   "676": {
     "number": 676,
@@ -3905,7 +3911,8 @@
     "reason": "The author's proof of concept for MTP drafts; the finished version is #844, which upstream merged and next carries (with our fixups).",
     "summary": "Proof of concept, superseded by #844 (MTP drafts), which upstream merged",
     "commits": [],
-    "gpu_untested": false
+    "gpu_untested": false,
+    "upstream": "closed"
   },
   "831": {
     "number": 831,
@@ -3958,5 +3965,87 @@
     "commits": [],
     "gpu_untested": true,
     "upstream": "merged"
+  },
+  "942": {
+    "number": 942,
+    "reviewed_at": "2026-11-21",
+    "title": "feat(inkling2_loop): add inkling-2-mini support",
+    "head_sha": "75a0f74424bc",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>"
+    ],
+    "decision": "adopted-with-fixups",
+    "reason": "thinkingmachines/Inkling-2-Mini (looped Inkling 2 MoE, own Triton attention with a relative position bias, DSpark draft). RTX 4090, checkpoint revision ed40e7da (the PR's 6e7c8248f7 is no longer on the hub), offload strategy auto, --memory-ratio 0.85: 30.6k KV tokens, 6.9k-token prefill ~3090 tok/s, decode ~32 tok/s, needle found, correct short answers. At the default 0.9 a 6.9k-token prompt OOMs in prefill (the PR documents this for 16 GB cards; it applies to 24 GB too). --kv-cache-dtype fp8 refused at config time as intended. Conflicts: own-kernel KV format check, layer-major prefill hook, docs. tests/models/test_quant_config fails for this checkpoint (generic scheme_for does not know its amax/outer_scale_denominator expert tensors; the model's own loader does).",
+    "summary": "Adds Inkling-2-Mini (looped MoE, own attention kernel); 4090: ~3090 tok/s prefill, ~32 tok/s decode at --memory-ratio 0.85",
+    "commits": [
+      "9aedfe71",
+      "20bafae2"
+    ],
+    "gpu_untested": false,
+    "fixup": "Model KV check joins kv_format_unsupported_reason; offload prefill hook skipped on layer-major chunks (#686) via _start_prefill_call"
+  },
+  "940": {
+    "number": 940,
+    "reviewed_at": "2026-11-21",
+    "title": "Record cached_tokens per request in /v1/requests",
+    "head_sha": "21f8e97289e9",
+    "authors": [
+      "Joshua <d4mer@users.noreply.github.com>"
+    ],
+    "decision": "adopted",
+    "reason": "One field per request-ring row: prefix-cache hits from the terminal GenDone/GenResult, so /v1/requests consumers can compute fresh prefill rates. Small conflict with next's GenTimer (first-token timing) resolved; server tests green.",
+    "summary": "/v1/requests rows carry cached_tokens (prefix-cache hits) per request",
+    "commits": [
+      "f7bb3f0d"
+    ],
+    "gpu_untested": true
+  },
+  "918": {
+    "number": 918,
+    "reviewed_at": "2026-11-21",
+    "title": "fix(server): drop leaked user uid and return 400 on unpackable request fields",
+    "head_sha": "31d4c57a2032",
+    "authors": [
+      "aoright <102943475+aoright@users.noreply.github.com>"
+    ],
+    "decision": "adopted-with-fixups",
+    "reason": "msgpack failures (ints beyond 64 bit, lone surrogates) returned 500 and leaked the uid into stats/ack maps, hanging prepare-stop. Next's /v1/completions submits through the #843 ChoiceFanOut, which bypassed the fix (4 of the new cases failed without it); fixup applies the same guarantee there.",
+    "summary": "Unencodable request fields now give 400 instead of 500 and no longer leak an active uid",
+    "commits": [
+      "09999b33"
+    ],
+    "gpu_untested": true,
+    "fixup": "ChoiceFanOut submit maps pack errors to 400 and drops (not aborts) the admitted uids; test cases for n=2 / streamed n=3"
+  },
+  "917": {
+    "number": 917,
+    "reviewed_at": "2026-11-21",
+    "title": "fix(checkpoint): serve w4a4 nvfp4 moe from ftw checkpoints with alphas",
+    "head_sha": "1350a18581c8",
+    "authors": [
+      "aoright <102943475+aoright@users.noreply.github.com>"
+    ],
+    "decision": "adopted",
+    "reason": "An nvfp4 FTW with gate_up_alpha/down_alpha was pinned to triton and refused --quant-backend moe.nvfp4=w4a4; now auto picks between triton and w4a4 and explicit w4a4 is accepted when the alphas exist. Clean merge, CPU tests green. w4a4 only pays off on sm_120, so the w4a4 path is untested on the 4090.",
+    "summary": "nvfp4 FTW checkpoints with static activation scales can use the w4a4 MoE kernel again",
+    "commits": [
+      "3e773ecd"
+    ],
+    "gpu_untested": true
+  },
+  "915": {
+    "number": 915,
+    "reviewed_at": "2026-11-21",
+    "title": "perf(gguf): decode deepseek-v4.1's wo_a from its ggml blocks",
+    "head_sha": "17f003bb4d96",
+    "authors": [
+      "Chen Cheng <85005591+ischencheng@users.noreply.github.com>"
+    ],
+    "decision": "deferred",
+    "revisit": "after-queue",
+    "reason": "Keeps DeepSeek-V4.1 GGUF wo_a as ggml blocks (batched mul_mat, MMQ bf16 out fix). Not judged on its merits: no DeepSeek-V4.1 checkpoint fits this machine (24 GB VRAM, 58 GiB RAM), and the shared mmq.cuh change only matters with one.",
+    "summary": "DeepSeek-V4.1 GGUF wo_a kept quantized in decode; model far too large to run here",
+    "commits": [],
+    "gpu_untested": false
   }
 }
