@@ -34,7 +34,7 @@ def main() -> None:
     args = ap.parse_args()
 
     kwargs = dict(
-        max_running_req=1, kv_quant="fp8", moe_disk_tier="on", expert_ram_experts=128,
+        max_running_req=1, kv_cache_dtype="fp8_per_token_head", moe_disk_tier="on", expert_ram_experts=128,
         ple_backend="disk", moe_prefill_overlap=False, cuda_graph_max_bs=0,
         mm=MultimodalConfig(disabled_encoders=frozenset(ENCODER_KINDS)),
     )

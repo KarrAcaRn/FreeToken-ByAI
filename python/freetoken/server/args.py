@@ -1017,19 +1017,6 @@ def parse_args(
     )
 
     parser.add_argument(
-        "--online-quant",
-        default=None,
-        choices=["none", "fp8"],
-        help=(
-            "Quantize the checkpoint's bf16 linear weights (projections, an untied lm_head; "
-            "not routers or gates) to fp8 with one scale per output row at load. Halves their "
-            "bytes, so a bandwidth-bound decode runs faster, but the outputs change slightly. "
-            "Same as --quant-backend linear.none=fp8. Default fp8 unless --quant-backend has a "
-            "linear or linear.none entry; 'none' keeps the bf16 weights."
-        ),
-    )
-
-    parser.add_argument(
         "--ple-backend",
         default=ServerArgs.ple_backend,
         choices=["pinned", "disk"],
@@ -1072,13 +1059,18 @@ def parse_args(
 
     parser.add_argument(
         "--online-quant",
-        default=ServerArgs.online_quant,
-        choices=["df11"],
+        default=None,
+        choices=["none", "fp8", "df11"],
         help=(
-            "Convert the Linear layers and input embedding tables that the checkpoint stores in bf16 at load. 'df11' "
-            "compresses them losslessly to ~11 bits per weight and decodes them bit-for-bit on use: about 30%% less "
-            "VRAM for those weights, at the cost of a decode per use. The LM head, a table tied to it, vision encoders and "
-            "layers whose weight the model reads directly stay bf16; refused when no layer qualifies."
+            "Convert the layers that the checkpoint stores in bf16 at load. 'fp8' quantizes the linear weights "
+            "(projections, an untied lm_head; not routers or gates) to fp8 with one scale per output row: half "
+            "their bytes, so a bandwidth-bound decode runs faster, but the outputs change slightly (same as "
+            "--quant-backend linear.none=fp8). 'df11' compresses the Linear layers and input embedding tables "
+            "losslessly to ~11 bits per weight and decodes them bit-for-bit on use: about 30%% less VRAM for those "
+            "weights, at the cost of a decode per use; the LM head, a table tied to it, vision encoders and layers "
+            "whose weight the model reads directly stay bf16, and it is refused when no layer qualifies. "
+            "'none' keeps the bf16 weights. Default fp8 unless --quant-backend has a linear or linear.none entry "
+            "or --online-quant-modules is given."
         ),
     )
 
@@ -1491,16 +1483,18 @@ def parse_args(
         if entry:
             kwargs["quant_backend"] = entry
 
-    # next-speed default: fp8 bf16 linears, unless the user picked a linear kernel themselves
-    online_quant = kwargs.pop("online_quant")
+    # next-speed default: fp8 bf16 linears, unless the user picked a linear kernel or df11 modules themselves;
+    # fp8 is a --quant-backend entry, only df11 reaches the engine as online_quant
+    online_quant = kwargs["online_quant"]
     if online_quant is None:
         from freetoken.layers.quantization import LayerKind, QuantBackend, QuantKind
 
         tables = dict(QuantBackend.parse(kwargs["quant_backend"]).items)
         explicit = (LayerKind.LINEAR, None) in tables or (LayerKind.LINEAR, QuantKind.NONE) in tables
-        online_quant = "none" if explicit else "fp8"
+        online_quant = "none" if explicit or kwargs["online_quant_modules"] else "fp8"
     if online_quant == "fp8":
         kwargs["quant_backend"] = ",".join(x for x in (kwargs["quant_backend"], "linear.none=fp8") if x)
+    kwargs["online_quant"] = online_quant if online_quant == "df11" else ServerArgs.online_quant
 
     if kwargs["distributed_port"] is None:
         kwargs["distributed_port"] = kwargs["server_port"] + 1

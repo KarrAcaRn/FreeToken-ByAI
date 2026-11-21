@@ -26,6 +26,7 @@ def _quant_backend(argv: list[str]) -> str | None:
         ([], "linear.none=fp8"),
         (["--online-quant", "fp8"], "linear.none=fp8"),
         (["--online-quant", "none"], None),
+        (["--online-quant", "df11"], None),
         (["--quant-backend", "moe.nvfp4=triton"], "moe.nvfp4=triton,linear.none=fp8"),
         (["--quant-backend", "linear.none=torch"], "linear.none=torch"),
         (["--quant-backend", "linear=gemv"], "linear=gemv"),
