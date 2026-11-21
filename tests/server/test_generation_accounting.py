@@ -161,6 +161,39 @@ def test_stream_records_the_totals_from_gendone():
     assert (row["prompt_tokens"], row["completion_tokens"]) == (7, 5)
 
 
+def test_non_stream_records_the_prefix_cache_hit():
+    """cached_tokens on the ring row is what the scheduler reported on the terminal ack —
+    a monitoring panel can show honest new-token prefill instead of guessing from prompt
+    growth."""
+    request_ring.reset()
+    st = FakeState([_ack(prompt=500, cached=480, completion=1, out="a"),
+                    _ack(completion=2, out="bc", finished=True)])
+    asyncio.run(generate_full(42, _spec(), st, source="/v1/chat/completions"))
+    row = _last_row()
+    assert (row["prompt_tokens"], row["cached_tokens"]) == (500, 480)
+
+
+def test_stream_records_the_prefix_cache_hit():
+    request_ring.reset()
+    st = FakeState([_ack(prompt=7, cached=3, completion=1, out="x"),
+                    _ack(completion=4, out="yz", finished=True)])
+
+    async def drain():
+        async for _ev in generate_events(42, _spec(), st, source="/v1/messages"):
+            pass
+
+    asyncio.run(drain())
+    row = _last_row()
+    assert (row["prompt_tokens"], row["cached_tokens"]) == (7, 3)
+
+
+def test_cache_report_absent_records_zero_not_a_guess():
+    request_ring.reset()
+    st = FakeState([_ack(prompt=5, completion=1, out="a", finished=True)])
+    asyncio.run(generate_full(42, _spec(), st, source="/v1/chat/completions"))
+    assert _last_row()["cached_tokens"] == 0
+
+
 def test_stream_still_records_the_row_when_the_client_disconnects_mid_stream():
     request_ring.reset()
     st = FakeState([_ack(prompt=9, completion=2, out="p"), _ack(completion=2, out="q", finished=True)])
