@@ -4047,5 +4047,85 @@
     "summary": "DeepSeek-V4.1 GGUF wo_a kept quantized in decode; model far too large to run here",
     "commits": [],
     "gpu_untested": false
+  },
+  "912": {
+    "number": 912,
+    "reviewed_at": "2026-11-21",
+    "title": "fix(mistral): honor sliding-window attention",
+    "head_sha": "4045215a04e7",
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ],
+    "decision": "adopted",
+    "commits": [
+      "c692f12d"
+    ],
+    "gpu_untested": false,
+    "reason": "Mistral's sliding_window was dropped, so v0.1-style checkpoints attended causally over everything; now an SWA group on a pure-SWA HybridSWAKVCache. RTX 4090, Mistral-7B-Instruct-v0.3 (window null): unchanged, 57k KV, decode 60 tok/s, needle found. With --hf-overrides sliding_window=4096: swa_radix pool, a needle 7.8k tokens back is no longer visible (correct), one in the window is found. Clean merge.",
+    "summary": "Mistral checkpoints with sliding_window now use windowed attention (pure-SWA KV pool) instead of full attention"
+  },
+  "910": {
+    "number": 910,
+    "reviewed_at": "2026-11-21",
+    "title": "fix(moe): pad gpt-oss mxfp4 expert banks for tensor parallelism",
+    "head_sha": "22c4d0922828",
+    "authors": [
+      "taking-lying-flat <1615405@qq.com>"
+    ],
+    "decision": "adopted",
+    "commits": [
+      "f8ebafbc"
+    ],
+    "gpu_untested": true,
+    "reason": "gpt-oss MXFP4 expert banks padded to whole 32-element groups so TP=4/8 slices match the reader. Only one GPU here, so the TP path is untested; TP=1 regression on gpt-oss-20b: needle found, 184-192 tok/s. CPU tests green.",
+    "summary": "gpt-oss MXFP4 expert banks load at TP=4/8 (pads the last rank's slice); TP=1 unchanged"
+  },
+  "907": {
+    "number": 907,
+    "reviewed_at": "2026-11-21",
+    "title": "perf(moe): vectorize the hybrid expert ensure kernel",
+    "head_sha": "63fcf090154f",
+    "authors": [
+      "sword-k-w <sword-k@sjtu.edu.cn>"
+    ],
+    "decision": "adopted",
+    "commits": [
+      "ca6852c0"
+    ],
+    "gpu_untested": false,
+    "reason": "Vectorized _ensure_experts_hybrid_kernel (no per-route barrier). Qwen3.6-35B-A3B --moe-strategy hybrid --moe-cache-rate 0.1, bs=1, A/B vs next: greedy output byte-identical on 4 prompts plain and with MTP k=3; decode within noise (68-81 vs 68-77 tok/s): the gain targets multi-request MTP routes, not bs=1.",
+    "summary": "Cheaper hybrid expert-ensure kernel; output byte-identical, bs=1 decode unchanged here"
+  },
+  "905": {
+    "number": 905,
+    "reviewed_at": "2026-11-21",
+    "title": "fix(engine): drop prefill overlap when moe-cache-auto cannot fund its slot floor",
+    "head_sha": "5f21a5754d71",
+    "authors": [
+      "yipin <1259478761@qq.com>"
+    ],
+    "decision": "adopted",
+    "commits": [
+      "fea68e56"
+    ],
+    "gpu_untested": true,
+    "reason": "plan_cache_budget clamped the expert cache up to 2*num_experts for prefill overlap even when the budget could not fund it, failing an assert after the full load; now overlap is dropped first. Pure arithmetic, CPU tests green; the failing budget needs a smaller card than this one.",
+    "summary": "--moe-cache-auto drops prefill overlap instead of failing an assert when 2x experts do not fit"
+  },
+  "888": {
+    "number": 888,
+    "reviewed_at": "2026-11-21",
+    "title": "test(moe): cover prefill staging geometry on CPU across slot pools",
+    "head_sha": "f12aab41b9f7",
+    "authors": [
+      "riony <32639725+riony@users.noreply.github.com>"
+    ],
+    "decision": "adopted",
+    "commits": [
+      "ddc2496b"
+    ],
+    "gpu_untested": false,
+    "reason": "Test-only: CPU coverage of the #689 slot-pool prefill staging (which slots get unregistered). Passes on next; conflict with #907's new tests in the same file resolved by keeping both.",
+    "summary": "CPU test for slot-pool prefill staging geometry (test-only)"
   }
 }
