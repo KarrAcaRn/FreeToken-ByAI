@@ -321,6 +321,78 @@ def test_invalidate_prefill_slots_kernel_matches_eager_reference():
         invalidate_prefill_slots(ids.new_full((1,), -1), slot_for_id, usage.new_zeros(1), 0, 2)
 
 
+def test_prefill_staging_unregisters_exactly_the_slots_it_overwrites():
+    # the staging buffers are byte ranges at the start of every bank, so with pools of several row widths a slot can straddle their end
+    # checked against the slot bytes, not the slot arithmetic: after a prefill a slot stays registered iff the staging left its bytes alone
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    torch.manual_seed(0)
+    L, E, wide = 4, 8, (1, 3)
+    # 512-byte gate_up rows; 96-byte down rows on the wide layers, 64-byte on the others: slot 7 of layer 0's pool straddles the staging end
+    sources = {
+        "gate_up": [torch.randn(E, 16, 8) for _ in range(L)],
+        "down": [torch.randint(1, 255, (E, 96), dtype=torch.uint8) if layer in wide else torch.randn(E, 4, 4) for layer in range(L)],
+    }
+    cache = OffloadMoeCache(
+        num_layers=L, num_experts=E, cache_size=33, device=torch.device("cpu"),
+        prefill_overlap=True, pool_of_layer=[2, 0, 3, 1], pool_sizes=[6, 5, 12, 10],
+    )
+    # the wide layers' kernel reads 20 bytes past a pool's last down row (an MMQ tail)
+    tail_bytes = {"gate_up": [0] * L, "down": [20 if layer in wide else 0 for layer in range(L)]}
+    cache.set_bank_sources(sources, row_tail_bytes=tail_bytes)
+
+    # the bytes a kernel reads past each pool's last row stay clear of the next pool's first row and of the bank's end
+    for k, (_, bank) in enumerate(cache.banks):
+        spans = []
+        for layer in range(L):
+            view = cache.pool_bank_views(layer)[k]
+            first = view.storage_offset() * view.element_size()
+            spans.append((first, first + view.numel() * view.element_size(), tail_bytes[cache.bank_schema[k]][layer], layer))
+        spans.sort()
+        for (_, end, tail, layer), nxt in zip(spans, [s[0] for s in spans[1:]] + [bank.numel() * bank.element_size()]):
+            assert end + tail <= nxt, (cache.bank_schema[k], layer, end, tail, nxt)
+
+    def slot_bytes(layer, s):
+        return [view[s].reshape(-1).view(torch.uint8).clone() for view in cache.pool_bank_views(layer)]
+
+    # stage the state decode would leave (its kernel is CUDA-only): every slot holds an expert row, the first E of each pool registered
+    before = []
+    for layer in range(L):
+        base = cache.pool_bases[cache.pool_of_layer[layer]]
+        for s in range(cache.pool_slots(layer)):
+            for (src, _), view in zip(cache.banks, cache.pool_bank_views(layer)):
+                view[s].copy_(src[layer][s % E])
+            if s < E:
+                cache.id_of_slot[base + s] = layer * E + s
+                cache.slot_for_id[layer, s] = s
+                cache.usage[base + s] = s + 1
+        before.append([slot_bytes(layer, s) for s in range(cache.pool_slots(layer))])
+
+    cache.begin_prefill()
+    for layer in range(L):
+        cache.prefetch_prefill_layer(layer)
+        cache.prefetch_prefill_layer(layer + 1)
+        cache.wait_prefill_layer(layer)
+        cache.release_prefill_layer(layer)
+
+    straddled = False
+    for layer in range(L):
+        size = cache.pool_slots(layer)
+        after = [slot_bytes(layer, s) for s in range(size)]
+        changed = [any(not torch.equal(a, b) for a, b in zip(before[layer][s], after[s])) for s in range(size)]
+        n = sum(changed)
+        # the staging area lies below the pool, so the slots it overwrites are its first n; hit-D2D trusts every slot from there on
+        assert changed == [True] * n + [False] * (size - n), (layer, changed)
+        assert cache._pool_stable_from[cache.pool_of_layer[layer]] == n, (layer, n)
+        registered = [s for s in cache.slot_for_id[layer].tolist() if s >= 0]
+        assert registered == [s for s in range(min(E, size)) if not changed[s]], (layer, registered, changed)
+        if n:
+            straddled |= any(not torch.equal(a[:16], b[:16]) and torch.equal(a[-16:], b[-16:]) for a, b in zip(before[layer][n - 1], after[n - 1]))
+    # a slot the staging only partly overwrites, or a floor in place of the ceiling would pass
+    assert straddled
+
+
 def test_prefill_overlap_waits_for_previous_prefill_release_after_begin(monkeypatch):
     from freetoken.moe.offload_cache import OffloadMoeCache
 
@@ -887,7 +959,7 @@ def test_slot_pools_keep_each_layer_in_its_own_slots(target):
     assert [v[0].shape[0] for v in map(cache.pool_bank_views, range(L))] == [8, 8, 24]
 
 
-def _hybrid_ensure_reference(st, layer, ids, weights, num_experts, pool, frac, mode, kernel_fetch):
+def _hybrid_ensure_reference(st, layer, ids, weights, num_experts, pool, frac, mode, kernel_fetch, by_recency=True, fetch_cap=None):
     """One hybrid ensure call on CPU copies of the cache state, written from the LRU contract."""
     base, size = pool
     step = int(st["step"]) + 1
@@ -898,22 +970,27 @@ def _hybrid_ensure_reference(st, layer, ids, weights, num_experts, pool, frac, m
     missing = [e for e in active if slot_for_id[layer, e] < 0]
     m, fq = len(missing), min(1 << 16, max(0, round(frac * (1 << 16))))
     lo, room = (m * fq) >> 16, size - len(hits)
+    cap = num_experts if fetch_cap is None else fetch_cap
     if mode == "min-wait":
         cost_lo = max(lo * ((1 << 16) - fq), (m - lo) * fq)
         cost_hi = max((lo + 1) * ((1 << 16) - fq), (m - lo - 1) * fq)
-        num_fetch = min(m, lo if cost_lo <= cost_hi else lo + 1, room)
+        num_fetch = min(m, lo if cost_lo <= cost_hi else lo + 1, room, cap)
     elif mode == "prefer-fetch":
-        num_fetch = min(m, (m * fq + 0xFFFF) >> 16, room)
+        num_fetch = min(m, (m * fq + 0xFFFF) >> 16, room, cap)
     else:
-        allowed = {min(m, lo, room)} if (m * fq) & 0xFFFF == 0 else {min(m, lo, room), min(m, lo + 1, room)}
+        allowed = {min(m, lo, room, cap)} if (m * fq) & 0xFFFF == 0 else {min(m, lo, room, cap), min(m, lo + 1, room, cap)}
         assert kernel_fetch in allowed
         num_fetch = kernel_fetch
     taken = torch.zeros(size, dtype=torch.bool)
     for e in hits:
         p_usage[slot_for_id[layer, e]] = step
         taken[slot_for_id[layer, e]] = True
+    if by_recency:
+        ordered = sorted(missing, key=lambda e: (-int(recency[layer, e]), e))
+    else:
+        ordered = sorted(missing)
     plan = []
-    for e in sorted(missing, key=lambda e: (-int(recency[layer, e]), e))[:num_fetch]:
+    for e in ordered[:num_fetch]:
         victim = int(torch.argmin(p_usage.masked_fill(taken, torch.iinfo(torch.int64).max)))  # first minimum
         old = int(p_ids[victim])
         if old >= 0:
@@ -923,7 +1000,8 @@ def _hybrid_ensure_reference(st, layer, ids, weights, num_experts, pool, frac, m
         p_usage[victim] = step
         taken[victim] = True
         plan.append((victim, e))
-    recency[layer, active] = step
+    if by_recency:
+        recency[layer, active] = step
     st["step"] = torch.tensor(step)
     slots = slot_for_id[layer, ids.long()]
     on_gpu = slots >= 0
@@ -977,6 +1055,54 @@ def test_hybrid_ensure_matches_lru_reference(monkeypatch, layout, clamp, mode):
             for name in names:
                 assert torch.equal(getattr(cache, name).cpu(), st[name]), name
         assert bool((cache.id_of_slot >= 0).all())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("rows,top_k,E", [(16, 8, 256), (4, 8, 256), (13, 5, 192)])
+@pytest.mark.parametrize("by_recency", [True, False])
+@pytest.mark.parametrize("fetch_cap", [None, 0, 3])
+@pytest.mark.parametrize("clamp", [False, True])
+def test_hybrid_ensure_matches_lru_reference_wide_batch(monkeypatch, rows, top_k, E, by_recency, fetch_cap, clamp):
+    """The MTP/wide-batch shapes, lowest-id policy and the fetch-cap edges, against the same CPU contract."""
+    from freetoken.moe import offload_kernels
+    from freetoken.moe.offload_cache import OffloadMoeCache
+
+    _init_tp()
+    monkeypatch.setattr(offload_kernels, "_HYBRID_FETCH_ROUND", offload_kernels._HYBRID_FETCH_ROUNDING["prefer-fetch"])
+    monkeypatch.setattr(offload_kernels, "_HYBRID_FETCH_BY_RECENCY", by_recency)
+    torch.manual_seed(0)
+    L, size, frac = 40, 5120, 0.413
+    cache = OffloadMoeCache(
+        num_layers=L, num_experts=E, cache_size=size, device=torch.device("cuda"),
+        decode_target="hybrid", hybrid_max_fetch=1,
+    )
+    popularity = 1.0 / torch.arange(1, E + 1, dtype=torch.float64) ** 0.6
+    names = ["slot_for_id", "id_of_slot", "usage", "step", "expert_recency"]
+
+    # 16 calls exercise a cold cache, several layers sharing the pool and repeated hits/fetches.
+    for call in range(16):
+        layer = call % L
+        ids = torch.stack([torch.multinomial(popularity, top_k) for _ in range(rows)]).to(torch.int32).view(-1)
+        ids[-1] = ids[0]  # a duplicate route must not be rewritten twice or counted twice
+        weights = torch.rand(ids.numel())
+        st = {n: getattr(cache, n).cpu().clone() for n in names}
+        routes = offload_kernels.ensure_experts_hybrid(
+            cache, layer, ids.cuda(), weights.cuda(), 1, frac, clamp=clamp, fetch_cap=fetch_cap
+        )
+        n = int(cache.num_indices)
+        p = cache.pool_of_layer[layer]
+        st, plan, slots, cpu_ids, gpu_w, m, active = _hybrid_ensure_reference(
+            st, layer, ids, weights, E, (cache.pool_bases[p], cache.pool_sizes[p]), frac,
+            "prefer-fetch", n, by_recency=by_recency, fetch_cap=fetch_cap,
+        )
+        assert int(cache.num_missing_full) == m and n == len(plan)
+        assert cache.evict_slots[:n].cpu().tolist() == [v for v, _ in plan]
+        assert cache.src_indices[:n].cpu().tolist() == [e for _, e in plan]
+        assert torch.equal(routes.gpu_slots.cpu(), slots.clamp(min=0) if clamp else slots)
+        assert torch.equal(routes.cpu_ids.cpu(), cpu_ids) and torch.equal(routes.gpu_w.cpu(), gpu_w)
+        assert cache.active_mask.cpu().nonzero().flatten().tolist() == active
+        for name in names:
+            assert torch.equal(getattr(cache, name).cpu(), st[name]), name
 
 
 def _make_split_cache(num_layers=2, locked=(1,), prefill_overlap=False, device="cpu"):
