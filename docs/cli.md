@@ -88,35 +88,34 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--skip-preflight` | off | Load the weights even when the pre-load memory forecast says the configuration cannot fit; see [ft info](#ft-info) |
 | `--num-pages` / `--num-tokens` | auto | KV capacity override in pages / tokens (mutually exclusive; auto sizes from VRAM left after weights and MoE cache) |
 | `--embed-weights` | gpu | Where the input token embedding tables live. `host` pins them in host RAM as they load (they never occupy VRAM) and each lookup reads its rows over PCIe, so their VRAM goes to the expert cache and KV (2.37 GiB on Qwen3.8-27B). Decode reads one row per token, so speed is unchanged. A table tied to the LM head stays on the GPU; a model whose only table is tied is refused. `ft info` suggests it; Gemma-4 E2B / E4B's per-layer table is the one that moves, the way those models fit an 8 GB GPU |
+| `--online-quant` | — | Convert the Linear layers and input embedding tables that the checkpoint stores in bf16 at load. `df11` compresses them losslessly to about 11 bits per weight and decodes them bit-for-bit on use: about 30% less VRAM for those weights, at the cost of a decode per use. Layers the checkpoint quantizes, the LM head, a table tied to it, vision encoders and layers whose weight the model reads directly are left as they are, and so are tables under TP > 1; refused when no layer qualifies |
+| `--online-quant-modules` | all | Limit `--online-quant` to these modules: comma-separated checkpoint module names or glob patterns, e.g. `model.layers.*.self_attn,model.embed_tokens` (`model.language_model.layers.*` where the checkpoint nests the text model); a name also covers the modules under it, and one that selects no convertible layer is refused. A fused layer (`qkv_proj`) must be covered in all of its checkpoint parts |
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
 | `--dense-offload-layers` | 0 | `N` or `auto`: dense models keep N decoder layers in pinned host RAM and stream them over PCIe every forward; the freed VRAM goes to the KV cache. `auto` offloads the fewest layers that reach `--kv-reserve-tokens`. Costs decode speed (each offloaded layer crosses PCIe once per token); long prefills hide most of the copies. Single GPU, dense models only |
 | `--embed-device` | gpu | Deprecated alias: `cpu` is `--embed-weights host` (logs a warning), `gpu` the default |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
-| `--kv-cache-dtype` | bf16 | `bf16`, `fp8`, or `nvfp4` (see [NVFP4 KV cache](#nvfp4-kv-cache)): FP8 stores the KV cache as e4m3 codes plus one fp32 scale per (token, kv head), roughly doubling the tokens that fit in the same VRAM; see [FP8 KV cache](#fp8-kv-cache) |
 | `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU |
+| `--kv-cache-dtype` | auto | How K and V are stored. `auto` (alias `bf16`) keeps the compute dtype. `fp8_per_token_head` (e4m3, alias `fp8`) and `int8_per_token_head` store 8 bits per element plus one fp32 scale per token and head (two per MLA latent row, for ckv and kpe), about half the KV memory; see [Quantized KV cache](#quantized-kv-cache). The `triton`, `qsa_sparse`, `m3_sparse` and `dsa` backends read them; `auto` picks one of these. They need `--dtype bfloat16` and no tensor parallelism. An `mtp` draft stores its KV in the same format. DeepSeek-V4 stores only `fp8_ds_mla` (window and compressed KV as e4m3 with one ue8m0 scale per 64 channels and bf16 rope, 584 B per row; indexer keys as MXFP4, 68 B) and DeepSeek-V4.1 only `nvfp4_ds_mla` (window KV as MXFP8, compressed KV as NVFP4, indexer keys as MXFP4); the names follow vLLM, and `auto` picks them on those models |
 
-### FP8 KV cache
+### Quantized KV cache
 
-`ft serve --kv-cache-dtype fp8` halves the bytes per cached token (8-bit codes instead
-of 16), so a card that held N tokens holds close to 2N. Each `(token, kv head)` row
-keeps its own fp32 scale, which costs ~3% back at `head_dim=128`. Requirements and
-trade-offs:
+`ft serve --kv-cache-dtype fp8` (the same as `fp8_per_token_head`) halves the bytes per
+cached token (8-bit codes instead of 16), so a card that held N tokens holds close to 2N.
+Each `(token, kv head)` row keeps its own fp32 scale, which costs ~3% back at
+`head_dim=128`. `int8_per_token_head` has the same layout with int8 codes. Requirements
+and trade-offs:
 
 - Needs an attention backend that decodes the codes: **triton** for plain paged and
-  hybrid-SWA pools, **qsa_sparse** and **dsa** for the sparse ones. `--attn auto` selects
-  it (and refuses an explicit `fi`/`fa`/`trtllm`, which cannot be shown to apply these
-  scales).
-- Works on the plain paged, hybrid-SWA, QSA sparse (Qwen3.8-Flash-Next) and MLA/DSA KV
-  pools. On QSA the block-selection index keys stay 16-bit, and on DSA the index-key and
-  tail tiers do; only the selected K/V or latent rows are read back as codes.
-  DeepSeek-V4's tiered pool and the block-sparse MiniMax-M3 pool stay 16-bit; asking for
-  fp8 there fails at startup rather than silently ignoring the flag.
-- The same bytes on every GPU FreeToken targets: the codes sit in a plain byte buffer
-  and are decoded in software, so the cache holds identical data and produces identical
-  numbers on any card (the fp8 type is deliberately kept out of the kernels, which is
-  also what makes the feature work on the RTX 30 series).
+  hybrid-SWA pools, **qsa_sparse**, **m3_sparse** and **dsa** for the sparse ones.
+  `--attn auto` selects it and an explicit `fi`/`fa`/`trtllm` is refused.
+- Works on the plain paged, hybrid-SWA, QSA sparse (Qwen3.8-Flash-Next), MiniMax-M3
+  block-sparse and MLA/DSA KV pools. On QSA the block-selection index keys stay 16-bit,
+  and on DSA the index-key and tail tiers do; only the selected K/V or latent rows are
+  read back as codes. DeepSeek-V4 / V4.1 store their own `fp8_ds_mla` / `nvfp4_ds_mla`
+  layouts instead.
+- Needs `--dtype bfloat16` and `--tp 1`.
 - Accuracy is checkpoint-dependent. Expect it to matter most on long contexts and on
-  models with outlier key channels; keep `bf16` when a run must be bit-reproducible.
+  models with outlier key channels; keep `auto` when a run must be bit-reproducible.
 - `ft ctl stats` / `/v1/cache/status` report the smaller `kv_bytes_per_token`, and
   `ft ctl cache --kv N` moves the same (now cheaper) pool.
 
@@ -152,13 +151,14 @@ decoding up to bf16 ties. With a speculative algorithm, `--max-running-requests`
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--speculative-algorithm`, `--spec-algo` | off | Draft method. `mtp` drafts with the checkpoint's multi-token-prediction layer: Qwen3.5 / Qwen3.6 HF or GGUF checkpoints, and Qwen3.8-Flash-Next HF or GGUF. `dflash` drafts a block of tokens per step with a DFlash 2 draft checkpoint over the target's layer outputs, for the Qwen3.5 / Qwen3.6 / Qwen3.8 family and Qwen3.8-Flash-Next: `incoai/Qwen3.8-27B-DFlash2` for Qwen3.8-27B, `incoai/Qwen3.6-35B-A3B-DFlash2` for Qwen3.6-35B-A3B, `incoai/Qwen3.8-Flash-Next-DFlash2` for Qwen3.8-Flash-Next |
+| `--speculative-algorithm`, `--spec-algo` | off | Draft method. `mtp` drafts with the checkpoint's multi-token-prediction layer: Qwen3.5 / Qwen3.6 HF or GGUF checkpoints, and Qwen3.8-Flash-Next HF or GGUF; Gemma-4 (dense, E2B / E4B and MoE) keeps no draft in the target file and drafts from an `mtp-*.gguf` assistant sidecar (architecture `gemma4-assistant`) given with `--speculative-draft-model-path` / `--spec-draft-model`. `dflash` drafts a block of tokens per step with a DFlash 2 draft checkpoint over the target's layer outputs, for the Qwen3.5 / Qwen3.6 / Qwen3.8 family and Qwen3.8-Flash-Next: `incoai/Qwen3.8-27B-DFlash2` for Qwen3.8-27B, `incoai/Qwen3.6-35B-A3B-DFlash2` for Qwen3.6-35B-A3B, `incoai/Qwen3.8-Flash-Next-DFlash2` for Qwen3.8-Flash-Next (or its GGUF release, `incoai/Qwen3.8-Flash-Next-DFlash2-GGUF`, as BF16, Q4_K_M, Q5_K_M, Q6_K or Q8_0) |
 | `--speculative-num-steps`, `--spec-num-steps` | the method's default (3 for `mtp`, the draft's `block_size` - 1 for `dflash`) | Draft tokens per decode step, 1 to 8 for `mtp`; 1 to the draft's `block_size` - 1 for `dflash` |
-| `--speculative-draft-model-path`, `--spec-draft-model` | the target checkpoint | Where the draft weights load from. A Qwen3.8-Flash-Next target also takes a Strata MTP pack (a GGUF that keeps the checkpoint's `mtp.*` tensors under their HF names), and a Qwen3.8-Flash-Next GGUF target needs one; a Qwen3.5 / Qwen3.6 GGUF target drafts from its own `nextn` MTP block (the block llama.cpp keeps after the last decoder layer), or from an `mtp-*.gguf` sidecar of the same model (unsloth's `MTP/` releases) given here; for `mtp`, a separate checkpoint folder is an HF-target option, read with the target's quantization config, and a GGUF target refuses a folder draft. `dflash` requires it: the DFlash 2 draft checkpoint (bf16 safetensors with its `config.json`), whose `target_layer_ids`, `num_target_layers`, hidden size and vocabulary must match the target |
+| `--speculative-draft-model-path`, `--spec-draft-model` | the target checkpoint | Where the draft weights load from. A Qwen3.8-Flash-Next target also takes a Strata MTP pack (a GGUF that keeps the checkpoint's `mtp.*` tensors under their HF names), and a Qwen3.8-Flash-Next GGUF target needs one; a Qwen3.5 / Qwen3.6 GGUF target drafts from its own `nextn` MTP block (the block llama.cpp keeps after the last decoder layer), or from an `mtp-*.gguf` sidecar of the same model (unsloth's `MTP/` releases) given here; for `mtp`, a separate checkpoint folder is an HF-target option, read with the target's quantization config, and a GGUF target refuses a folder draft. `dflash` requires it: the DFlash 2 draft checkpoint (bf16 safetensors with its `config.json`, or a local `.gguf` from `incoai/Qwen3.8-Flash-Next-DFlash2-GGUF`, served natively at its BF16, Q4_K_M, Q5_K_M, Q6_K or Q8_0 types), whose `target_layer_ids`, hidden size and vocabulary must match the target (`num_target_layers` too, when the checkpoint records it; only the HF checkpoint does) |
+| `--speculative-token-map`, `--spec-token-map` | off | `mtp` only. A file of distinct little-endian int32 token ids (`python scripts/make_token_map.py MODEL` writes one): the draft computes its logits over those LM head rows alone, from a copy made at startup whose size is logged. That VRAM comes out of the expert cache when `--moe-cache-auto` sizes it (the default for hybrid and offload without a cache size), and out of the KV cache otherwise. The target still verifies over the whole vocabulary, so the output distribution does not depend on the file, only the acceptance rate does. A tied or block-FP8 LM head is refused |
 
-Speculative decoding needs `--tp 1` and runs without overlap scheduling; targets with sliding-window or DSV4 window-tier KV are refused at startup. `mtp` refuses an FTW checkpoint as the draft source, since FTW drops the `mtp.*` tensors, and a Qwen3.5 / Qwen3.6 GGUF converted without its MTP layer (llama.cpp `--no-mtp`) when no `mtp-*.gguf` sidecar is given: such a trunk has no draft of its own to read, while a `--no-mtp` trunk plus a sidecar works (the trunk config's shapes, the sidecar's weights). Neither works with `--prefill-layer-major`.
+Speculative decoding needs `--tp 1` and runs without overlap scheduling; a target with sliding-window KV is served only by the Gemma-4 assistant, which reads the target's cache through a read-only view; every other target with sliding-window KV is refused at startup, and so is every target with DSV4 window-tier KV. The Gemma-4 assistant keeps no KV of its own: it reads the target's cache, so it adds nothing to the KV budget and its weights cost about 149 MiB for the E4B draft, about 425-428 MiB for the 12b and 26B-A4B Q8_0 ones. `mtp` refuses an FTW checkpoint as the draft source, since FTW drops the `mtp.*` tensors, and a Qwen3.5 / Qwen3.6 GGUF converted without its MTP layer (llama.cpp `--no-mtp`) when no `mtp-*.gguf` sidecar is given: such a trunk has no draft of its own to read, while a `--no-mtp` trunk plus a sidecar works (the trunk config's shapes, the sidecar's weights). Speculative decoding does not combine with `--prefill-layer-major`.
 
-`dflash` keeps the draft's context in a per-request ring of the draft's sliding window (2048 positions for the released drafts) and, on a hybrid GDN target, in a window on the GDN state slots, so a prefix-cache hit restores it with the GDN snapshot; the window adds `(window + 64) x hidden` activation-dtype bytes to every GDN slot (`/v1/cache/status` counts them). A target without GDN layers needs `--cache-type naive`. Quantized drafts and DFlash v1 drafts are refused. With sampling, the drafts are drawn from the draft's own distribution over its top-16 candidates and verified by rejection sampling against the target's distribution, so the output distribution is the target's.
+`dflash` keeps the draft's context in a per-request ring of the draft's sliding window (2048 positions for the released drafts) and, on a hybrid GDN target, in a window on the GDN state slots, so a prefix-cache hit restores it with the GDN snapshot; the window adds `(window + 64) x hidden` activation-dtype bytes to every GDN slot (`/v1/cache/status` counts them). A target without GDN layers needs `--cache-type naive`. DFlash v1 drafts are refused, and so is a quantized safetensors draft: the GGUF release is the quantized path. A quantized GGUF draft loads its linear weights at the file's own ggml types (Q4_K_M, Q5_K_M, Q6_K or Q8_0) and dequantizes only the selector codebooks and the K/V context copy; a BF16/F16/F32 GGUF loads floats throughout. With sampling, the drafts are drawn from the draft's own distribution over its top-16 candidates and verified by rejection sampling against the target's distribution, so the output distribution is the target's.
 
 ### API behaviour
 

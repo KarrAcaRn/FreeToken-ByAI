@@ -158,7 +158,7 @@ def test_kv_sharing_layers_get_no_slab_and_read_their_source(monkeypatch):
 
     _patch_tp(monkeypatch)
     # Gemma-4 E-series layout: layers 4 (swa) and 5 (full) reuse layers 3 and 2
-    config = dataclasses.replace(_hybrid_model_config(), kv_sharing=((4, 3), (5, 2)))
+    config = dataclasses.replace(_hybrid_model_config(), kv_shared_layers=((4, 3), (5, 2)))
     specs = {spec.name: spec.layer_ids for spec in config.kv_cache_group_specs()}
     assert specs == {"full": (2,), "swa": (0, 1, 3)}
 
@@ -174,9 +174,9 @@ def test_kv_sharing_layers_get_no_slab_and_read_their_source(monkeypatch):
     assert pool.v_cache(4).data_ptr() == pool.v_cache(3).data_ptr()
     assert pool.group_of(4) == "swa" and pool.group_of(5) == "full"
 
-    with pytest.raises(ValueError, match="KV-sharing"):
+    with pytest.raises(ValueError, match="KV-shared layer"):
         create_kvcache_pool(
-            model_config=dataclasses.replace(config, kv_sharing=((4, 3), (5, 4))),
+            model_config=dataclasses.replace(config, kv_shared_layers=((4, 3), (5, 4))),
             num_pages=4,
             page_size=16,
             dtype=torch.bfloat16,

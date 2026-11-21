@@ -21,7 +21,8 @@ Prompt: an AIME-25 problem sent as a chat message with thinking enabled -- a rea
 reasoning workload, so expert routing is representative. The server renders the chat
 template (including checkpoint-shipped encoders like DSV4's ``encoding_dsv4.py``). The
 problems come from the ``math-ai/aime25`` dataset on the Hub, downloaded into the usual
-HF cache on first run; ``--aime`` points at a local jsonl instead.
+HF cache on first run; ``--aime`` points at a local jsonl instead. ``--context N`` puts
+the other problems, cycled, in front of it so decode runs against about N tokens of KV.
 
 Sampling: the checkpoint's recommended params (``generation_config.json``), falling back
 to temperature 1.0 / top_p 0.95 / top_k 64 for fields the checkpoint does not specify --
@@ -101,6 +102,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--problem", type=int, default=0, help="0-based AIME problem index")
     p.add_argument("--decode", type=int, default=256, help="decode tokens to measure (D)")
     p.add_argument(
+        "--context",
+        type=int,
+        default=0,
+        help="pad the prompt with the other AIME problems to about this many tokens; 0 = the problem alone",
+    )
+    p.add_argument(
         "--greedy",
         action="store_true",
         help="force temperature 0 (ignore the checkpoint's sampling) so ids are comparable",
@@ -125,11 +132,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def load_problem(path: str | None, index: int) -> tuple[str, str]:
-    """One AIME-25 (problem, answer). Downloads the dataset unless ``path`` overrides it.
-
-    Accepts both the Hub schema (``problem``) and the pre-formatted jsonl some local copies
-    use (``prompt``, answer instruction already appended)."""
+def load_rows(path: str | None) -> list[dict]:
     if not path:
         from huggingface_hub import hf_hub_download
 
@@ -137,7 +140,31 @@ def load_problem(path: str | None, index: int) -> tuple[str, str]:
             path = hf_hub_download(AIME_REPO, AIME_FILE, repo_type="dataset")
         except Exception as e:  # offline, rate-limited, repo moved
             sys.exit(f"could not fetch {AIME_REPO}/{AIME_FILE} ({e}); pass --aime <local jsonl>")
-    rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def pad_to_context(model_path: str, aime_path: str | None, index: int, problem: str, context: int) -> str:
+    """Prefix the problem with the other AIME problems, cycled, until the prompt is about ``context`` tokens."""
+    from freetoken.utils.hf import load_tokenizer
+
+    tok = load_tokenizer(model_path)
+    texts = [row.get("problem") or row["prompt"] for i, row in enumerate(load_rows(aime_path)) if i != index]
+    sizes = [len(tok(text, add_special_tokens=False)["input_ids"]) for text in texts]
+    need = context - len(tok(problem, add_special_tokens=False)["input_ids"])
+    parts: list[str] = []
+    while need > 0:
+        i = len(parts) % len(texts)
+        parts.append(texts[i])
+        need -= sizes[i] + 1
+    return "\n\n".join(parts + [problem])
+
+
+def load_problem(path: str | None, index: int) -> tuple[str, str]:
+    """One AIME-25 (problem, answer). Downloads the dataset unless ``path`` overrides it.
+
+    Accepts both the Hub schema (``problem``) and the pre-formatted jsonl some local copies
+    use (``prompt``, answer instruction already appended)."""
+    rows = load_rows(path)
     if not 0 <= index < len(rows):
         sys.exit(f"--problem {index} out of range ({len(rows)} problems available)")
     row = rows[index]
@@ -203,6 +230,7 @@ def serve_cmd(args: argparse.Namespace, backend: str, port: int) -> list[str]:
         "--moe-backend", backend,
     ]
     passthrough = _server_args(args)
+    seq_len = max(8192, args.context + 1024) + args.decode
     # Bench-chosen defaults, applied only when the passthrough doesn't set them:
     # single running request, the decode-budgeted seq cap, MoE cache auto-sizing,
     # and one CUDA-graph batch size (bs=1 measurement). The server's own defaults
@@ -210,7 +238,10 @@ def serve_cmd(args: argparse.Namespace, backend: str, port: int) -> list[str]:
     if not _has_flag(passthrough, "--max-running-requests"):
         cmd += ["--max-running-requests", "1"]
     if not _has_flag(passthrough, "--max-seq-len-override"):
-        cmd += ["--max-seq-len-override", str(8192 + args.decode)]
+        cmd += ["--max-seq-len-override", str(seq_len)]
+    if args.context and not _has_flag(passthrough, "--kv-reserve-tokens"):
+        # the auto-sized expert cache otherwise leaves too little KV for a long prompt
+        cmd += ["--kv-reserve-tokens", str(seq_len)]
     if not _has_flag(passthrough, "--moe-cache-size", "--moe-cache-rate", "--moe-cache-auto"):
         cmd.append("--moe-cache-auto")
     if not _has_flag(passthrough, "--cuda-graph-max-bs"):
@@ -325,6 +356,8 @@ def stream_generate(origin: str, model_id: str, problem: str, sampling: dict,
 
 def run_one(args: argparse.Namespace, backend: str) -> dict:
     problem, answer = load_problem(args.aime, args.problem)
+    if args.context:
+        problem = pad_to_context(args.model, args.aime, args.problem, problem, args.context)
     sampling, sampling_src = resolve_sampling(args.model, args.greedy)
     port = free_port()
     origin = f"http://127.0.0.1:{port}"
@@ -334,7 +367,8 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
     passthrough = " ".join(_server_args(args)) or "(none)"
     print(
         f"[bench] model={args.model}\n"
-        f"[bench] backend={backend} decode={args.decode} server_args={passthrough}\n"
+        f"[bench] backend={backend} decode={args.decode} context={args.context or 'problem only'} "
+        f"server_args={passthrough}\n"
         f"[bench] sampling={sampling} <- {sampling_src}\n"
         f"[bench] server log: {log_path}",
         flush=True,
@@ -372,6 +406,8 @@ def run_one(args: argparse.Namespace, backend: str) -> dict:
     row = {
         "model": args.model,
         "backend": backend,
+        "server_args": _server_args(args),
+        "context": args.context,
         "problem": args.problem,
         "prompt_tokens": usage["prompt_tokens"],
         "decode_steps": steps,

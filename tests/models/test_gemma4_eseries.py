@@ -38,8 +38,7 @@ def _hf_config(*, eseries: bool = True):
 def test_parse_config_maps_shared_layers_to_the_last_owner_of_their_type():
     config = parse_config(_hf_config())
     # layers 3..5 share: 3, 4 are sliding (last sliding owner 1), 5 is full (owner 2)
-    assert config.kv_sharing == ((3, 1), (4, 1), (5, 2))
-    assert config.kv_source_layer(4) == 1 and config.kv_source_layer(1) is None
+    assert config.kv_shared_layers == ((3, 1), (4, 1), (5, 2))
     e_args = config.gemma4_e_args
     assert (e_args.per_layer_hidden_size, e_args.per_layer_vocab_size, e_args.kv_shared_intermediate_size) == (32, 64, 192)
     specs = {spec.name: spec.layer_ids for spec in config.kv_cache_group_specs()}
@@ -50,7 +49,7 @@ def test_parse_config_maps_shared_layers_to_the_last_owner_of_their_type():
 
 def test_parse_config_without_eseries_fields_keeps_the_old_layout():
     config = parse_config(_hf_config(eseries=False))
-    assert config.kv_sharing == () and config.gemma4_e_args is None
+    assert config.kv_shared_layers == () and config.gemma4_e_args is None
     specs = {spec.name: spec.layer_ids for spec in config.kv_cache_group_specs()}
     assert specs == {"full": (2, 5), "swa": (0, 1, 3, 4)}
 
@@ -118,7 +117,7 @@ def test_iter_weights_matches_the_model_state_dict(tmp_path, monkeypatch):
     assert loaded["model.layers.0.feed_forward.shared_mlp.gate_up_proj.weight"].shape == (2 * 96, 128)
     assert loaded["model.layers.3.feed_forward.shared_mlp.gate_up_proj.weight"].shape == (4 * 96, 128)
     attn = model.model.layers.op_list
-    assert attn[3].self_attn.attn_spec.kv_shared and attn[3].self_attn.kv_shared
+    assert attn[3].self_attn.kv_shared and attn[3].self_attn.kv_source_layer == 1
     assert attn[1].self_attn.kv_source and not attn[0].self_attn.kv_source
 
 

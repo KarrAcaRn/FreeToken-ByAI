@@ -28,8 +28,8 @@ import torch
 import triton
 import triton.language as tl
 
-from freetoken.kernel.triton.e4m3_compat import kv_load_e4m3_tile_f32
-from freetoken.kernel.triton.kv_nvfp4 import load_nvfp4
+from freetoken.kernel.triton.kv_rows import kv_row_scale, kv_tile
+from freetoken.kvcache.format import NONE, KVFormat
 
 BLOCK_H = 16
 BLOCK_T = 32
@@ -39,12 +39,11 @@ MIN_TILES_PER_SPLIT = 4
 
 @triton.jit
 def _glm_dsa_sparse_kernel(
-    q_ptr, pool_ptr, pool_scale_ptr, pool_block_ptr, o_ptr, idx_ptr, cnt_ptr,
+    q_ptr, pool_ptr, scale_ptr, o_ptr, idx_ptr, cnt_ptr,
     scale,
     H, TOPK,
     stride_qb, stride_qm, stride_qh, stride_qd,
-    stride_pn, stride_pd,
-    stride_ps,
+    stride_pn, stride_pd, stride_ps,
     stride_ob, stride_om, stride_oh, stride_od,
     stride_ib, stride_im, stride_it,
     stride_nb, stride_nm,
@@ -54,8 +53,8 @@ def _glm_dsa_sparse_kernel(
     BLOCK_T: tl.constexpr,
     HAS_COUNTS: tl.constexpr,
     HAS_ROPE: tl.constexpr,
-    HAS_FP8: tl.constexpr,
-    HAS_NVFP4: tl.constexpr,
+    KV_FMT: tl.constexpr,
+    KV_OFFSET_DTYPE: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -67,15 +66,11 @@ def _glm_dsa_sparse_kernel(
 
     q_base = q_ptr + pid_b * stride_qb + pid_m * stride_qm + offs_h[:, None] * stride_qh
     q_v = tl.load(q_base + offs_v[None, :] * stride_qd, mask=h_mask[:, None], other=0.0).to(tl.float32)
-    if HAS_NVFP4:
-        q_v = q_v.to(q_ptr.dtype.element_ty)
     if HAS_ROPE:
         # NoPE checkpoints (glm5_next) have D_R == 0: tl.arange needs a non-empty
         # span, so the whole rope half is compiled out on the constexpr.
         offs_r = tl.arange(0, D_R)
         q_r = tl.load(q_base + (D_V + offs_r[None, :]) * stride_qd, mask=h_mask[:, None], other=0.0).to(tl.float32)
-        if HAS_NVFP4:
-            q_r = q_r.to(q_ptr.dtype.element_ty)
 
     m_i = tl.full((BLOCK_H,), -float("inf"), dtype=tl.float32)
     l_i = tl.zeros((BLOCK_H,), dtype=tl.float32)
@@ -91,36 +86,15 @@ def _glm_dsa_sparse_kernel(
         t_mask = offs_t < n_active
         idxs = tl.load(idx_base + offs_t * stride_it, mask=t_mask, other=-1)
         valid = idxs >= 0
-        kv_base = pool_ptr + idxs[:, None] * stride_pn
-        if HAS_NVFP4:
-            kv_v = load_nvfp4(
-                pool_ptr, pool_block_ptr, pool_scale_ptr,
-                idxs[:, None], 0, offs_v[None, :], valid[:, None],
-                stride_pn, 0, stride_ps, D_V + D_R,
-            ).to(q_ptr.dtype.element_ty)
-        elif HAS_FP8:
-            row_scale = tl.load(pool_scale_ptr + idxs * stride_ps, mask=valid, other=0.0)
-            kv_v = kv_load_e4m3_tile_f32(
-                kv_base + offs_v[None, :] * stride_pd, valid[:, None]
-            ) * row_scale[:, None]
-        else:
-            kv_v = tl.load(kv_base + offs_v[None, :] * stride_pd, mask=valid[:, None], other=0.0).to(tl.float32)
+        kv_base = pool_ptr + idxs[:, None].to(KV_OFFSET_DTYPE) * stride_pn
+        scale_base = scale_ptr + idxs * stride_ps
+        kv_v = kv_tile(kv_base + offs_v[None, :] * stride_pd, valid[:, None], KV_FMT).to(tl.float32)
+        scale_v = kv_row_scale(scale_base, valid, KV_FMT)
 
-        scores = tl.dot(q_v, tl.trans(kv_v))
+        scores = tl.dot(q_v, tl.trans(kv_v)) * scale_v[None, :]
         if HAS_ROPE:
-            if HAS_NVFP4:
-                kv_r = load_nvfp4(
-                    pool_ptr, pool_block_ptr, pool_scale_ptr,
-                    idxs[:, None], 0, offs_r[None, :], valid[:, None],
-                    stride_pn, 0, stride_ps, D_V + D_R, DIM_OFFSET=D_V,
-                ).to(q_ptr.dtype.element_ty)
-            elif HAS_FP8:
-                kv_r = kv_load_e4m3_tile_f32(
-                    kv_base + (D_V + offs_r[None, :]) * stride_pd, valid[:, None]
-                ) * row_scale[:, None]
-            else:
-                kv_r = tl.load(kv_base + (D_V + offs_r[None, :]) * stride_pd, mask=valid[:, None], other=0.0).to(tl.float32)
-            scores += tl.dot(q_r, tl.trans(kv_r))
+            kv_r = kv_tile(kv_base + (D_V + offs_r[None, :]) * stride_pd, valid[:, None], KV_FMT).to(tl.float32)
+            scores += tl.dot(q_r, tl.trans(kv_r)) * kv_row_scale(scale_base + 1, valid, KV_FMT)[None, :]
         scores = scores * scale
         scores = tl.where(valid[None, :], scores, -float("inf"))
 
@@ -129,10 +103,10 @@ def _glm_dsa_sparse_kernel(
         alpha = tl.where(m_new == -float("inf"), 1.0, tl.exp(m_i - m_new))
         p = tl.where(valid[None, :], tl.exp(scores - m_new[:, None]), 0.0)
         l_i = l_i * alpha + tl.sum(p, axis=1)
-        acc = acc * alpha[:, None] + tl.dot(p.to(kv_v.dtype), kv_v)
+        acc = acc * alpha[:, None] + tl.dot((p * scale_v[None, :]).to(kv_v.dtype), kv_v)
         m_i = m_new
 
-    o = tl.where(l_i[:, None] > 0, acc / l_i[:, None], 0.0)
+    o = acc / l_i[:, None]
     o_ptrs = o_ptr + pid_b * stride_ob + pid_m * stride_om + offs_h[:, None] * stride_oh + offs_v[None, :] * stride_od
     tl.store(o_ptrs, o.to(o_ptr.dtype.element_ty), mask=h_mask[:, None])
 
@@ -233,12 +207,11 @@ def glm_dsa_decode_logits(
 
 @triton.jit
 def _glm_dsa_splitk_kernel(
-    q_ptr, pool_ptr, pool_scale_ptr, pool_block_ptr, mid_o_ptr, mid_lse_ptr, idx_ptr, cnt_ptr,
+    q_ptr, pool_ptr, scale_ptr, mid_o_ptr, mid_lse_ptr, idx_ptr, cnt_ptr,
     scale,
     H, TOPK,
     stride_qb, stride_qm, stride_qh, stride_qd,
-    stride_pn, stride_pd,
-    stride_ps,
+    stride_pn, stride_pd, stride_ps,
     stride_mb, stride_mm, stride_mh, stride_ms, stride_md,
     stride_lb, stride_lm, stride_lh, stride_ls,
     stride_ib, stride_im, stride_it,
@@ -249,9 +222,9 @@ def _glm_dsa_splitk_kernel(
     BLOCK_T: tl.constexpr,
     HAS_COUNTS: tl.constexpr,
     HAS_ROPE: tl.constexpr,
-    HAS_FP8: tl.constexpr,
-    HAS_NVFP4: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
+    KV_FMT: tl.constexpr,
+    KV_OFFSET_DTYPE: tl.constexpr,
 ):
     """Stage 1 (decode flash-decoding): each program reduces one BLOCK_T-aligned slice of
     the candidate list and writes a normalized [D_V] partial + log-sum-exp. Same structure
@@ -281,13 +254,9 @@ def _glm_dsa_splitk_kernel(
     if split_end > split_start:
         q_base = q_ptr + pid_b * stride_qb + pid_m * stride_qm + offs_h[:, None] * stride_qh
         q_v = tl.load(q_base + offs_v[None, :] * stride_qd, mask=h_mask[:, None], other=0.0).to(tl.float32)
-        if HAS_NVFP4:
-            q_v = q_v.to(q_ptr.dtype.element_ty)
         if HAS_ROPE:
             offs_r = tl.arange(0, D_R)
             q_r = tl.load(q_base + (D_V + offs_r[None, :]) * stride_qd, mask=h_mask[:, None], other=0.0).to(tl.float32)
-            if HAS_NVFP4:
-                q_r = q_r.to(q_ptr.dtype.element_ty)
         idx_base = idx_ptr + pid_b * stride_ib + pid_m * stride_im
 
         for start in range(split_start, split_end, BLOCK_T):
@@ -295,36 +264,15 @@ def _glm_dsa_splitk_kernel(
             t_mask = offs_t < split_end
             idxs = tl.load(idx_base + offs_t * stride_it, mask=t_mask, other=-1)
             valid = idxs >= 0
-            kv_base = pool_ptr + idxs[:, None] * stride_pn
-            if HAS_NVFP4:
-                kv_v = load_nvfp4(
-                    pool_ptr, pool_block_ptr, pool_scale_ptr,
-                    idxs[:, None], 0, offs_v[None, :], valid[:, None],
-                    stride_pn, 0, stride_ps, D_V + D_R,
-                ).to(q_ptr.dtype.element_ty)
-            elif HAS_FP8:
-                row_scale = tl.load(pool_scale_ptr + idxs * stride_ps, mask=valid, other=0.0)
-                kv_v = kv_load_e4m3_tile_f32(
-                    kv_base + offs_v[None, :] * stride_pd, valid[:, None]
-                ) * row_scale[:, None]
-            else:
-                kv_v = tl.load(kv_base + offs_v[None, :] * stride_pd, mask=valid[:, None], other=0.0).to(tl.float32)
+            kv_base = pool_ptr + idxs[:, None].to(KV_OFFSET_DTYPE) * stride_pn
+            scale_base = scale_ptr + idxs * stride_ps
+            kv_v = kv_tile(kv_base + offs_v[None, :] * stride_pd, valid[:, None], KV_FMT).to(tl.float32)
+            scale_v = kv_row_scale(scale_base, valid, KV_FMT)
 
-            scores = tl.dot(q_v, tl.trans(kv_v))
+            scores = tl.dot(q_v, tl.trans(kv_v)) * scale_v[None, :]
             if HAS_ROPE:
-                if HAS_NVFP4:
-                    kv_r = load_nvfp4(
-                        pool_ptr, pool_block_ptr, pool_scale_ptr,
-                        idxs[:, None], 0, offs_r[None, :], valid[:, None],
-                        stride_pn, 0, stride_ps, D_V + D_R, DIM_OFFSET=D_V,
-                    ).to(q_ptr.dtype.element_ty)
-                elif HAS_FP8:
-                    kv_r = kv_load_e4m3_tile_f32(
-                        kv_base + (D_V + offs_r[None, :]) * stride_pd, valid[:, None]
-                    ) * row_scale[:, None]
-                else:
-                    kv_r = tl.load(kv_base + (D_V + offs_r[None, :]) * stride_pd, mask=valid[:, None], other=0.0).to(tl.float32)
-                scores += tl.dot(q_r, tl.trans(kv_r))
+                kv_r = kv_tile(kv_base + (D_V + offs_r[None, :]) * stride_pd, valid[:, None], KV_FMT).to(tl.float32)
+                scores += tl.dot(q_r, tl.trans(kv_r)) * kv_row_scale(scale_base + 1, valid, KV_FMT)[None, :]
             scores = scores * scale
             scores = tl.where(valid[None, :], scores, -float("inf"))
 
@@ -332,7 +280,7 @@ def _glm_dsa_splitk_kernel(
             alpha = tl.where(m_new == -float("inf"), 1.0, tl.exp(m_i - m_new))
             p = tl.where(valid[None, :], tl.exp(scores - m_new[:, None]), 0.0)
             l_i = l_i * alpha + tl.sum(p, axis=1)
-            acc = acc * alpha[:, None] + tl.dot(p.to(kv_v.dtype), kv_v)
+            acc = acc * alpha[:, None] + tl.dot((p * scale_v[None, :]).to(kv_v.dtype), kv_v)
             m_i = m_new
 
     out = tl.where(l_i[:, None] == 0.0, 0.0, acc / l_i[:, None])
@@ -386,7 +334,7 @@ def _glm_dsa_merge_kernel(
         l_i = l_i * alpha + beta
         m_i = m_new
 
-    o = tl.where(l_i > 0, acc / l_i, 0.0)
+    o = acc / l_i
     o_ptrs = (
         o_ptr + pid_b * stride_ob + pid_m * stride_om + pid_h * stride_oh
         + offs_v * stride_od
@@ -414,11 +362,10 @@ def glm_dsa_sparse_attn(
     softmax_scale: float,
     counts: torch.Tensor | None = None,  # [b, m] int32 live columns per query (device-read)
     d_v: int = 512,
-    pool_scale: torch.Tensor | None = None,  # [rows] fp32, one scale per quantized latent row
     force_splits: int | None = None,     # tests only: 0 = single-program, N = split-k N
-    kv_quant: str | None = None,
-    pool_block_scale: torch.Tensor | None = None,
     out: torch.Tensor | None = None,     # [b, m, h, d_v] to write into, any strides
+    kv_format: KVFormat = NONE,
+    scale: torch.Tensor | None = None,   # [rows, 2] fp32 (ckv, kpe) when the pool is quantized
 ) -> torch.Tensor:
     """Sparse MLA attention over gathered latent rows; returns ``[b, m, h, d_v]``.
 
@@ -427,9 +374,6 @@ def glm_dsa_sparse_attn(
     query reads the same position-ordered row list, causally bounded by its own
     ``counts[q] = position + 1``, with zero per-query index materialization.
 
-    NVFP4 restores tiles to Q's compute dtype before the dot products, with FP32
-    accumulators. FP32 dot operands exceed consumer GPU shared memory at width 576.
-
     ``q`` and ``out`` are consumed with their given strides (a transposed bmm output
     works without a contiguous copy); ``out`` lets a preallocated workspace receive
     the result instead of a fresh allocation.
@@ -437,39 +381,22 @@ def glm_dsa_sparse_attn(
     b, m, h, d = q.shape
     d_r = d - d_v
     topk = topk_idxs.shape[-1]
-    if kv_quant is None:
-        kv_quant = "fp8" if pool_scale is not None else "none"
-    assert kv_quant in ("none", "fp8", "nvfp4"), kv_quant
-    has_fp8 = kv_quant == "fp8"
-    has_nvfp4 = kv_quant == "nvfp4"
-    stored_dim = d // 2 if has_nvfp4 else d
-    assert pool.ndim == 2 and pool.shape[-1] == stored_dim, (pool.shape, d)
-    if has_fp8 or has_nvfp4:
-        assert pool_scale is not None
-        assert pool.dtype == torch.uint8, pool.dtype
-        assert pool_scale.shape == (pool.shape[0],), (pool_scale.shape, pool.shape)
-        assert pool_scale.dtype is torch.float32, pool_scale.dtype
-        scale_pool = pool_scale.contiguous()
-    else:
-        assert pool_scale is None
-        assert pool.is_floating_point()
-        scale_pool = pool
-    if has_nvfp4:
-        assert d % 16 == 0
-        assert pool_block_scale is not None
-        assert pool_block_scale.shape == (pool.shape[0], d // 16)
-        assert pool_block_scale.dtype == torch.uint8
-        assert pool_block_scale.device == pool.device
-        block_pool = pool_block_scale.contiguous()
-    else:
-        assert pool_block_scale is None
-        block_pool = pool
-    assert pool.device == q.device
-    if has_fp8 or has_nvfp4:
-        assert pool_scale.device == pool.device
-    pool_2d = pool.reshape(-1, stored_dim)
+    assert pool.shape[-1] == d, (pool.shape, d)
+    pool_2d = pool.reshape(-1, d)
     assert pool_2d.stride(-1) == 1
+    if kv_format.quantized:
+        assert pool.dtype == kv_format.elem_store_dtype and scale.dtype == kv_format.scale_store_dtype
+        assert scale.shape == (pool_2d.shape[0], 2) and scale.stride(1) == 1
+        scale_arg, stride_ps = scale, scale.stride(0)
+    else:
+        scale_arg, stride_ps = q, 0
+    # the decode arms raise register use; this tile compiles without spills on sm_80 to sm_120
+    block_t, num_warps = (16, 8) if kv_format.quantized else (BLOCK_T, 4)
+    # the fp32 tiles of an unquantized pool need ~100 KiB at BLOCK_T=32, above the 99 KiB of sm_86/89/120
+    if not kv_format.quantized and torch.cuda.get_device_properties(q.device).shared_memory_per_block_optin < 128 * 1024:
+        block_t = 16
     idx = topk_idxs.contiguous().to(torch.int32)
+    offset_dtype = tl.int32 if pool_2d.shape[0] * pool_2d.stride(0) < 1 << 31 else tl.int64
     broadcast_m = idx.shape[1] == 1 and m > 1
     assert broadcast_m or idx.shape[1] == m, (idx.shape, m)
     if out is None:
@@ -489,33 +416,25 @@ def glm_dsa_sparse_attn(
     else:
         cnt, stride_nb, stride_nm = idx, 0, 0
 
-    # Packed gathers need additional layout conversions at the 512-wide latent size.
-    # The fp32 tiles of an unquantized pool need ~100 KiB at BLOCK_T=32, just above
-    # the 99 KiB per block of consumer GPUs (sm_86/89/120).
-    small_smem = torch.cuda.get_device_properties(q.device).shared_memory_per_block_optin < 128 * 1024
-    block_t = 16 if has_nvfp4 or (kv_quant == "none" and small_smem) else BLOCK_T
     n_splits = _split_count(b, m, h, topk, q.device) if force_splits is None else force_splits
     if n_splits:
         mid_o = q.new_empty(b, m, h, n_splits, d_v, dtype=torch.float32)
         mid_lse = q.new_empty(b, m, h, n_splits, dtype=torch.float32)
         grid1 = (m * n_splits, b, triton.cdiv(h, BLOCK_H))
         _glm_dsa_splitk_kernel[grid1](
-            q, pool_2d, scale_pool, block_pool, mid_o, mid_lse, idx, cnt,
+            q, pool_2d, scale_arg, mid_o, mid_lse, idx, cnt,
             float(softmax_scale),
             h, topk,
             q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            pool_2d.stride(0), pool_2d.stride(1),
-            scale_pool.stride(0) if has_fp8 or has_nvfp4 else 0,
+            pool_2d.stride(0), pool_2d.stride(1), stride_ps,
             mid_o.stride(0), mid_o.stride(1), mid_o.stride(2), mid_o.stride(3), mid_o.stride(4),
             mid_lse.stride(0), mid_lse.stride(1), mid_lse.stride(2), mid_lse.stride(3),
             idx.stride(0), 0 if broadcast_m else idx.stride(1), idx.stride(2),
             stride_nb, stride_nm,
             D_V=d_v, D_R=d_r,
             BLOCK_H=BLOCK_H, BLOCK_T=block_t,
-            HAS_COUNTS=has_counts, HAS_ROPE=d_r > 0, HAS_FP8=has_fp8, HAS_NVFP4=has_nvfp4, NUM_SPLITS=n_splits,
-            # The 512-wide latent accumulator exceeds the 99 KiB shared-memory
-            # limit of consumer Blackwell GPUs with a two-stage pipeline.
-            num_warps=4, num_stages=1,
+            HAS_COUNTS=has_counts, HAS_ROPE=d_r > 0, NUM_SPLITS=n_splits, KV_FMT=kv_format.name, KV_OFFSET_DTYPE=offset_dtype,
+            num_warps=num_warps, num_stages=2,
         )
         grid2 = (m, b, h)
         _glm_dsa_merge_kernel[grid2](
@@ -530,19 +449,18 @@ def glm_dsa_sparse_attn(
 
     grid = (m, b, triton.cdiv(h, BLOCK_H))
     _glm_dsa_sparse_kernel[grid](
-        q, pool_2d, scale_pool, block_pool, o, idx, cnt,
+        q, pool_2d, scale_arg, o, idx, cnt,
         float(softmax_scale),
         h, topk,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        pool_2d.stride(0), pool_2d.stride(1),
-        scale_pool.stride(0) if has_fp8 or has_nvfp4 else 0,
+        pool_2d.stride(0), pool_2d.stride(1), stride_ps,
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         idx.stride(0), 0 if broadcast_m else idx.stride(1), idx.stride(2),
         stride_nb, stride_nm,
         D_V=d_v, D_R=d_r,
         BLOCK_H=BLOCK_H, BLOCK_T=block_t,
-        HAS_COUNTS=has_counts, HAS_ROPE=d_r > 0, HAS_FP8=has_fp8, HAS_NVFP4=has_nvfp4,
-        num_warps=4, num_stages=1,
+        HAS_COUNTS=has_counts, HAS_ROPE=d_r > 0, KV_FMT=kv_format.name, KV_OFFSET_DTYPE=offset_dtype,
+        num_warps=num_warps, num_stages=2,
     )
     return o
 

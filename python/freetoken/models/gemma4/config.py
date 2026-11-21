@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,8 +58,20 @@ class Gemma4EArgs:
     def is_kv_shared(self, layer_id: int) -> bool:
         return layer_id >= self.first_kv_shared_layer
 
-    def is_kv_source(self, layer_id: int, group_layer_ids: tuple[int, ...]) -> bool:
-        return layer_id == max((i for i in group_layer_ids if i < self.first_kv_shared_layer), default=None)
+    def kv_shared_layers(self, *groups_layer_ids: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
+        """``ModelConfig.kv_shared_layers``: each shared layer paired with the last earlier layer of its group."""
+        pairs = []
+        for layer_ids in groups_layer_ids:
+            shared = [i for i in layer_ids if self.is_kv_shared(i)]
+            if not shared:
+                continue
+            source = max((i for i in layer_ids if i < self.first_kv_shared_layer), default=None)
+            if source is None:
+                raise NotImplementedError(
+                    "gemma4 KV-shared layers with no earlier layer of their attention type are not supported"
+                )
+            pairs += [(i, source) for i in shared]
+        return tuple(sorted(pairs))
 
 
 def gemma4_e_args(
@@ -82,19 +93,6 @@ def gemma4_e_args(
     return Gemma4EArgs(
         per_layer_hidden_size, per_layer_vocab_size, num_layers - num_kv_shared_layers, kv_shared_intermediate_size
     )
-
-
-def with_kv_sharing(config: ModelConfig) -> ModelConfig:
-    """Fill ``kv_sharing`` from ``gemma4_e_args``, so the KV pool gives a KV-shared layer no slab
-    of its own and resolves it to its source layer's."""
-    e_args = config.gemma4_e_args
-    if e_args is None:
-        return config
-    pairs = []
-    for group in config.attention_groups:
-        source = max((i for i in group.layer_ids if not e_args.is_kv_shared(i)), default=None)
-        pairs += [(i, source) for i in group.layer_ids if e_args.is_kv_shared(i) and source is not None]
-    return dataclasses.replace(config, kv_sharing=tuple(sorted(pairs)))
 
 
 def _text_config(hf_config: Any) -> tuple[Any, list[str] | None, Any]:
@@ -215,8 +213,17 @@ def parse_config(hf_config: Any) -> ModelConfig:
     # checkpoint's own ignore-list.
     expert_quant = detect_expert_quant(top_cfg)
     dense_quant = "nvfp4" if (expert_quant == "nvfp4" and not num_experts > 0) else "none"
+    # Gemma4UnifiedTextConfig omits the E-series fields
+    e_args = gemma4_e_args(
+        cfg.num_hidden_layers,
+        getattr(cfg, "hidden_size_per_layer_input", None) or 0,
+        getattr(cfg, "vocab_size_per_layer_input", None) or 0,
+        getattr(cfg, "num_kv_shared_layers", None) or 0,
+        num_experts,
+        cfg.intermediate_size * (2 if getattr(cfg, "use_double_wide_mlp", False) else 1),
+    )
 
-    return with_kv_sharing(ModelConfig(
+    return ModelConfig(
         num_layers=cfg.num_hidden_layers,
         num_qo_heads=cfg.num_attention_heads,
         num_kv_heads=full_kv_heads,
@@ -243,15 +250,8 @@ def parse_config(hf_config: Any) -> ModelConfig:
         embedding_scale=float(cfg.hidden_size) ** 0.5,
         vision_config=_parse_vision_config(top_cfg, cfg.hidden_size),
         image_token_id=getattr(top_cfg, "image_token_id", None),
-        # Gemma4UnifiedTextConfig omits the E-series fields
-        gemma4_e_args=gemma4_e_args(
-            cfg.num_hidden_layers,
-            getattr(cfg, "hidden_size_per_layer_input", None) or 0,
-            getattr(cfg, "vocab_size_per_layer_input", None) or 0,
-            getattr(cfg, "num_kv_shared_layers", None) or 0,
-            num_experts,
-            cfg.intermediate_size * (2 if getattr(cfg, "use_double_wide_mlp", False) else 1),
-        ),
+        gemma4_e_args=e_args,
+        kv_shared_layers=e_args.kv_shared_layers(full_layer_ids, sliding_layer_ids) if e_args is not None else (),
         attention_groups=(
             FullAttentionGroupConfig(
                 name="full",
@@ -271,7 +271,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
                 bidirectional_mm_blocks=getattr(cfg, "use_bidirectional_attention", None) == "vision",
             ),
         ),
-    ))
+    )
 
 
-__all__ = ["Gemma4EArgs", "UnifiedVisionConfig", "VisionConfig", "gemma4_e_args", "parse_config", "with_kv_sharing"]
+__all__ = ["Gemma4EArgs", "UnifiedVisionConfig", "VisionConfig", "gemma4_e_args", "parse_config"]

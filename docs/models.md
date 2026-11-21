@@ -145,6 +145,10 @@ unset on PCIe GPUs: wider grids add no bandwidth there.
   see [ftw-hotfix.md](ftw-hotfix.md) for the affected checkpoints and the repair tool.
 - Muse-Glimmer keeps the attention gate as its own linear next to `qkv_proj`; an FTW converted
   when the gate was fused into `qkvg_proj` no longer loads, reconvert it with `ft checkpoint`.
+- GLM-4.7 (`nvidia/GLM-4.7-NVFP4`) serves its attention and input embedding in bf16, as the checkpoint stores
+  them. `--online-quant df11` compresses them losslessly at load, about 8 GiB less VRAM, at the cost of decoding
+  them on every step; builds before the flag always did this. An FTW of GLM-4.7 converted by such a build stores
+  those weights as DF11 and no longer loads; reconvert it with `ft checkpoint`.
 - NVFP4 global scales are kept in fp32. An NVFP4 FTW that stores them as fp16 (converted by an
   older build) is refused at load; reconvert it with `ft checkpoint`.
 - Qwen3.5 / Qwen3.6 / Qwen3.8-27B load their zero-centred norm weights as stored and add the 1 in
@@ -159,6 +163,15 @@ unset on PCIe GPUs: wider grids add no bandwidth there.
   `deepseek4v` mmproj; the text-only 0731 release has no image token and refuses the
   mmproj. ggml-org's Vision-Exp text GGUF ships a chat template that renders no image
   placeholder; serve unsloth's release for image requests.
+- A DeepSeek-V4.1 GGUF (llama.cpp's `deepseek41` layout, such as
+  [unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF))
+  serves text; its `deepseek41v` mmproj and DSpark draft are not read. The Engram tables
+  stream from the file's `per_layer_token_embd` tensor, so keep that file on a fast NVMe.
+  A build that ships the tables as a separate shard needs it linked next to the others under
+  its shard name, as llama.cpp does. A file converted for an earlier llama.cpp branch has
+  no `ple.layers` key and is refused, and so are unsloth's UD-Q3_K_XL, UD-Q4_K_XL and UD-Q8_K_XL,
+  whose MXFP8 tables only unsloth's llama.cpp PR reads. `ft checkpoint` does not convert these
+  GGUFs: serve the `.gguf`.
 - DeepSeek-V4.1-Flash serves text and images from the HF checkpoint as shipped (fp8 block-32
   dense weights, fp4 experts on the offload cache, 890 B/token global KV in packed
   fp4/fp8 pools). Its two 98 GiB Engram tables stream from the checkpoint shards on
@@ -191,9 +204,11 @@ unset on PCIe GPUs: wider grids add no bandwidth there.
   controls use 128-token pages.
 - Qwen3.8-Flash-Next keeps a 47.7 GiB PLE n-gram table pinned in host RAM.
 - Multimodal checkpoints are served text-only.
-- `--kv-cache-dtype fp8` (see [cli.md](cli.md#fp8-kv-cache)) covers the plain paged,
-  hybrid-SWA and QSA sparse KV pools — gpt-oss, Qwen3/3.5/3.6, GLM-4.x, Gemma-4,
-  MiniMax-M2.5, Muse-Glimmer, Llama/Qwen2/Mistral, Qwen3.8-Flash-Next (on QSA only the
-  selected K/V rows are read back as codes; block selection keeps 16-bit index keys).
-  MLA/DSA (GLM-5.2), DeepSeek-V4's tiered pool and MiniMax-M3's block-sparse pool stay
-  16-bit and reject it.
+- Gemma-4 serves MTP speculative decoding from an assistant sidecar: unsloth's GGUF repos ship `mtp-*.gguf` files for it; upstream's `google/gemma-4-*-it-assistant` HF release must first go through llama.cpp's `convert_hf_to_gguf.py`, then pass the resulting GGUF with `--spec-draft-model`, see [CLI reference](cli.md#speculative-decoding).
+- `--kv-cache-dtype fp8` / `fp8_per_token_head`, `int8_per_token_head` and `nvfp4` (see
+  [cli.md](cli.md#quantized-kv-cache)) cover the plain paged, hybrid-SWA, QSA sparse and
+  MLA/DSA KV pools — gpt-oss, Qwen3/3.5/3.6, GLM-4.x, GLM-5.2, Gemma-4, MiniMax-M2.5,
+  Muse-Glimmer, Llama/Qwen2/Mistral, Qwen3.8-Flash-Next (on QSA only the selected K/V rows
+  are read back as codes; block selection keeps 16-bit index keys). The per_token_head
+  formats also cover MiniMax-M3's block-sparse pool; DeepSeek-V4 / V4.1 use their own
+  `fp8_ds_mla` / `nvfp4_ds_mla` layouts.

@@ -199,6 +199,7 @@ def parse_args(
     """
     from freetoken.attention import validate_attn_backend
     from freetoken.kvcache import SUPPORTED_CACHE_MANAGER
+    from freetoken.kvcache.format import KV_CACHE_DTYPE_ALIASES, KV_FORMATS, NONE
     from freetoken.moe import MOE_STRATEGIES
     from freetoken.moe.pool_policy import SCOPES
 
@@ -210,6 +211,12 @@ def parse_args(
         except ValueError as exc:
             raise argparse.ArgumentTypeError(str(exc)) from None
         return value
+
+    def _parse_module_list(value: str) -> tuple[str, ...]:
+        names = tuple(p.strip() for p in value.split(",") if p.strip())
+        if not names:
+            raise argparse.ArgumentTypeError("expected comma-separated module names or glob patterns")
+        return names
 
     def _parse_moe_cache_rate(value: str) -> float:
         try:
@@ -693,24 +700,6 @@ def parse_args(
     )
 
     parser.add_argument(
-        "--kv-cache-dtype",
-        dest="kv_quant",
-        type=str,
-        default=ServerArgs.kv_quant,
-        choices=["auto", "bf16", "fp8", "nvfp4"],
-        help=(
-            "KV-cache storage format. 'bf16' (default) stores the compute dtype; 'fp8'"
-            " stores e4m3 codes plus one fp32 scale per (token, kv head), roughly "
-            "doubling the tokens that fit in the same VRAM. Needs an attention backend"
-            " that decodes the codes (--attn auto picks triton, qsa_sparse or dsa) and a"
-            " plain paged, hybrid-SWA, QSA sparse or MLA/DSA KV pool (not DSV4 or"
-            " MiniMax-M3 block-sparse models)."
-            " 'nvfp4' stores packed E2M1 with block/row scales on the same pools; it"
-            " needs head_dim divisible by 16."
-        ),
-    )
-
-    parser.add_argument(
         "--attention-backend",
         "--attn",
         type=validate_attn_backend,
@@ -744,6 +733,19 @@ def parse_args(
         "(one slot = one whole GDN state, ~110 MB on a Qwen3-Coder-Next-class model) so a long "
         "prompt stays resumable from a boundary in the middle of it, not just from its end. "
         "0 (default) keeps today's behavior and costs no host RAM.",
+    )
+
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        default=ServerArgs.kv_cache_dtype,
+        choices=["auto", *(name for name in KV_FORMATS if name != NONE.name), *KV_CACHE_DTYPE_ALIASES],
+        help="How K and V are stored. 'auto' keeps the compute dtype. The per_token_head formats store 8 bits per "
+        "element plus one scale per token and head (two per MLA latent row); the triton, qsa_sparse, m3_sparse and dsa "
+        "attention backends read "
+        "them. They need --dtype bfloat16 and no tensor parallelism. An mtp draft stores its KV in the same format. "
+        "DeepSeek-V4 stores only fp8_ds_mla and DeepSeek-V4.1 only nvfp4_ds_mla (their own packed fp8 / fp4 layouts, "
+        "named as in vLLM); 'auto' picks them there. 'fp8' is an alias of fp8_per_token_head and 'bf16' of 'auto'.",
     )
 
     parser.add_argument(
@@ -1042,6 +1044,30 @@ def parse_args(
             "Where the input token embedding tables live. 'gpu' (default) keeps them in VRAM; 'host' keeps them in "
             "pinned host RAM and each lookup reads its rows over PCIe, so their VRAM goes to the expert cache and KV. "
             "A table tied to the LM head stays on the GPU; Gemma-4 E2B / E4B's per-layer table is the one that moves."
+        ),
+    )
+
+    parser.add_argument(
+        "--online-quant",
+        default=ServerArgs.online_quant,
+        choices=["df11"],
+        help=(
+            "Convert the Linear layers and input embedding tables that the checkpoint stores in bf16 at load. 'df11' "
+            "compresses them losslessly to ~11 bits per weight and decodes them bit-for-bit on use: about 30%% less "
+            "VRAM for those weights, at the cost of a decode per use. The LM head, a table tied to it, vision encoders and "
+            "layers whose weight the model reads directly stay bf16; refused when no layer qualifies."
+        ),
+    )
+
+    parser.add_argument(
+        "--online-quant-modules",
+        default=ServerArgs.online_quant_modules,
+        type=_parse_module_list,
+        help=(
+            "Limit --online-quant to these modules: comma-separated checkpoint module names or glob patterns, "
+            "e.g. 'model.layers.*.self_attn,model.embed_tokens' ('model.language_model.layers.*' where the checkpoint "
+            "nests the text model). A name also covers the modules under it; one that selects no convertible layer is "
+            "refused. Default: every layer --online-quant can convert."
         ),
     )
 
@@ -1358,6 +1384,14 @@ def parse_args(
         type=str,
         default=ServerArgs.speculative_draft_model_path,
         help="Draft weights; by default they come from the target checkpoint. Required for dflash, which reads a separate draft checkpoint.",
+    )
+
+    parser.add_argument(
+        "--speculative-token-map",
+        "--spec-token-map",
+        type=str,
+        default=ServerArgs.speculative_token_map,
+        help="File of little-endian int32 token ids the draft may propose (mtp only). The draft computes logits over those LM head rows alone; the target still verifies over the whole vocabulary. Off by default.",
     )
 
     parser.add_argument(
